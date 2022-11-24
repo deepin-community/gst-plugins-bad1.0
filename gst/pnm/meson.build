@@ -13,3 +13,5 @@ gstpnm = library('gstpnm',
   install : true,
   install_dir : plugins_install_dir,
 )
+pkgconfig.generate(gstpnm, install_dir : plugins_pkgconfig_install_dir)
+plugins += [gstpnm]

@@ -148,6 +148,9 @@ struct _MpegTSBase {
   /* Upstream segment */
   GstSegment segment;
 
+  /* Downstream segment, for use by sub-classes */
+  GstSegment out_segment;
+
   /* Last received seek event seqnum (default GST_SEQNUM_INVALID) */
   guint last_seek_seqnum;
 
@@ -157,10 +160,15 @@ struct _MpegTSBase {
   /* Whether to push data and/or sections to subclasses */
   gboolean push_data;
   gboolean push_section;
+  gboolean push_unknown;
 
   /* Whether the parent bin is streams-aware, meaning we can
    * add/remove streams at any point in time */
   gboolean streams_aware;
+
+  /* Do not use the PCR stream for timestamp calculation. Useful for
+   * streams with broken/invalid PCR streams. */
+  gboolean ignore_pcr;
 };
 
 struct _MpegTSBaseClass {
@@ -198,12 +206,12 @@ struct _MpegTSBaseClass {
   GstFlowReturn (*drain) (MpegTSBase * base);
 
   /* flush all streams
-   * The hard inicator is used to flush completelly on FLUSH_STOP events
+   * The hard inicator is used to flush completely on FLUSH_STOP events
    * or partially in pull mode seeks of tsdemux */
   void (*flush) (MpegTSBase * base, gboolean hard);
 
   /* Notifies subclasses input buffer has been handled */
-  GstFlowReturn (*input_done) (MpegTSBase *base, GstBuffer *buffer);
+  GstFlowReturn (*input_done) (MpegTSBase *base);
 
   /* signals */
   void (*pat_info) (GstStructure *pat);
@@ -211,6 +219,9 @@ struct _MpegTSBaseClass {
   void (*nit_info) (GstStructure *nit);
   void (*sdt_info) (GstStructure *sdt);
   void (*eit_info) (GstStructure *eit);
+
+  /* takes ownership of @query */
+  gboolean (*sink_query) (MpegTSBase *base, GstQuery * query);
 };
 
 #define MPEGTS_BIT_SET(field, offs)    ((field)[(offs) >> 3] |=  (1 << ((offs) & 0x7)))

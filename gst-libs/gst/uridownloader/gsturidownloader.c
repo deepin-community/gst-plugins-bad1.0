@@ -18,6 +18,9 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include <glib.h>
 #include "gstfragment.h"
@@ -27,17 +30,12 @@
 #define GST_CAT_DEFAULT uridownloader_debug
 GST_DEBUG_CATEGORY (uridownloader_debug);
 
-#define GST_URI_DOWNLOADER_GET_PRIVATE(obj)  \
-   (G_TYPE_INSTANCE_GET_PRIVATE ((obj), \
-    GST_TYPE_URI_DOWNLOADER, GstUriDownloaderPrivate))
-
 struct _GstUriDownloaderPrivate
 {
   /* Fragments fetcher */
   GstElement *urisrc;
   GstBus *bus;
   GstPad *pad;
-  GTimeVal *timeout;
   GstFragment *download;
   gboolean got_buffer;
   GMutex download_lock;         /* used to restrict to one download only */
@@ -75,6 +73,7 @@ static GstStaticPadTemplate sinkpadtemplate = GST_STATIC_PAD_TEMPLATE ("sink",
 }
 
 G_DEFINE_TYPE_WITH_CODE (GstUriDownloader, gst_uri_downloader, GST_TYPE_OBJECT,
+    G_ADD_PRIVATE (GstUriDownloader)
     _do_init);
 
 static void
@@ -84,8 +83,6 @@ gst_uri_downloader_class_init (GstUriDownloaderClass * klass)
 
   gobject_class = (GObjectClass *) klass;
 
-  g_type_class_add_private (klass, sizeof (GstUriDownloaderPrivate));
-
   gobject_class->dispose = gst_uri_downloader_dispose;
   gobject_class->finalize = gst_uri_downloader_finalize;
 }
@@ -93,7 +90,7 @@ gst_uri_downloader_class_init (GstUriDownloaderClass * klass)
 static void
 gst_uri_downloader_init (GstUriDownloader * downloader)
 {
-  downloader->priv = GST_URI_DOWNLOADER_GET_PRIVATE (downloader);
+  downloader->priv = gst_uri_downloader_get_instance_private (downloader);
 
   /* Initialize the sink pad. This pad will be connected to the src pad of the
    * element created with gst_element_make_from_uri and will handle the download */
@@ -240,7 +237,7 @@ gst_uri_downloader_bus_handler (GstBus * bus,
     GST_WARNING_OBJECT (downloader,
         "Received error: %s from %s, the download will be cancelled",
         err->message, GST_OBJECT_NAME (message->src));
-    GST_DEBUG ("Debugging info: %s\n", (dbg_info) ? dbg_info : "none");
+    GST_DEBUG ("Debugging info: %s", (dbg_info) ? dbg_info : "none");
 
     if (dbg_info)
       new_error = g_strdup_printf ("%s: %s\n", err->message, dbg_info);
@@ -277,7 +274,7 @@ gst_uri_downloader_bus_handler (GstBus * bus,
     GST_WARNING_OBJECT (downloader,
         "Received warning: %s from %s",
         GST_OBJECT_NAME (message->src), err->message);
-    GST_DEBUG ("Debugging info: %s\n", (dbg_info) ? dbg_info : "none");
+    GST_DEBUG ("Debugging info: %s", (dbg_info) ? dbg_info : "none");
     g_error_free (err);
     g_free (dbg_info);
   } else if (GST_MESSAGE_TYPE (message) == GST_MESSAGE_NEED_CONTEXT) {
@@ -682,7 +679,7 @@ quit:
       } else {
         GstQuery *query;
 
-        /* Download successfull, let's query the URI */
+        /* Download successful, let's query the URI */
         query = gst_query_new_uri ();
         if (gst_element_query (urisrc, query)) {
           gst_query_parse_uri (query, &download->uri);

@@ -21,7 +21,6 @@
  * SECTION:element-curlsink
  * @title: curlsink
  * @short_description: sink that uploads data to a server using libcurl
- * @see_also:
  *
  * This is a network sink that uses libcurl as a client to upload data to
  * an SMTP server.
@@ -253,7 +252,6 @@ gst_curl_smtp_sink_class_init (GstCurlSmtpSinkClass * klass)
 
   GST_DEBUG_CATEGORY_INIT (gst_curl_smtp_sink_debug, "curlsmtpsink", 0,
       "curl smtp sink element");
-  GST_DEBUG_OBJECT (klass, "class_init");
 
   gst_element_class_set_static_metadata (element_class,
       "Curl smtp sink",
@@ -636,7 +634,7 @@ gst_curl_smtp_sink_set_transfer_options_unlocked (GstCurlBaseSink * bcsink)
 
   /* time */
   date = g_date_time_new_now_local ();
-  date_str = g_date_time_format (date, "%a %b %e %H:%M:%S %Y %z");
+  date_str = g_date_time_format (date, "%a, %e %b %Y %H:%M:%S %z");
   g_date_time_unref (date);
 
   /* recipient, sender and subject are all UTF-8 strings, which are additionally

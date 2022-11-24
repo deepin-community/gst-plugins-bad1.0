@@ -45,12 +45,19 @@ struct _GstWlWindow
 
   GstWlDisplay *display;
   struct wl_surface *area_surface;
+  struct wl_surface *area_surface_wrapper;
   struct wl_subsurface *area_subsurface;
   struct wp_viewport *area_viewport;
   struct wl_surface *video_surface;
+  struct wl_surface *video_surface_wrapper;
   struct wl_subsurface *video_subsurface;
   struct wp_viewport *video_viewport;
-  struct wl_shell_surface *shell_surface;
+  struct wl_shell_surface *wl_shell_surface;
+  struct xdg_surface *xdg_surface;
+  struct xdg_toplevel *xdg_toplevel;
+  gboolean configured;
+  GCond configure_cond;
+  GMutex configure_mutex;
 
   /* the size and position of the area_(sub)surface */
   GstVideoRectangle render_rectangle;
@@ -74,8 +81,10 @@ struct _GstWlWindowClass
 
 GType gst_wl_window_get_type (void);
 
+void gst_wl_window_ensure_fullscreen (GstWlWindow * window,
+        gboolean fullscreen);
 GstWlWindow *gst_wl_window_new_toplevel (GstWlDisplay * display,
-        const GstVideoInfo * info, GMutex * render_lock);
+        const GstVideoInfo * info, gboolean fullscreen, GMutex * render_lock);
 GstWlWindow *gst_wl_window_new_in_surface (GstWlDisplay * display,
         struct wl_surface * parent, GMutex * render_lock);
 

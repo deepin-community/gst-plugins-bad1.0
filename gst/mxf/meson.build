@@ -15,6 +15,8 @@ mxf_sources = [
   'mxfd10.c',
   'mxfup.c',
   'mxfvc3.c',
+  'mxfprores.c',
+  'mxfvanc.c',
 #  'mxfdms1.c',
 ]
 
@@ -26,3 +28,5 @@ gstmxf = library('gstmxf',
   install : true,
   install_dir : plugins_install_dir,
 )
+pkgconfig.generate(gstmxf, install_dir : plugins_pkgconfig_install_dir)
+plugins += [gstmxf]

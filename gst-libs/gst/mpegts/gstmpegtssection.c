@@ -28,6 +28,9 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -45,8 +48,49 @@
 /**
  * SECTION:gstmpegtssection
  * @title: Base MPEG-TS sections
- * @short_description: Sections for ITU H.222.0 | ISO/IEC 13818-1 
+ * @short_description: Sections for ITU H.222.0 | ISO/IEC 13818-1
  * @include: gst/mpegts/mpegts.h
+ * @symbols:
+ * - GST_MPEGTS_SECTION_TYPE
+ * - GstMpegtsSection
+ * - GstMpegtsSectionTableID
+ * - GstMpegtsSectionType
+ * - gst_message_new_mpegts_section
+ * - gst_message_parse_mpegts_section
+ * - gst_mpegts_section_send_event
+ * - gst_event_parse_mpegts_section
+ * - gst_mpegts_section_packetize
+ * - gst_mpegts_section_new
+ * - gst_mpegts_section_ref
+ * - gst_mpegts_section_unref
+ * - GstMpegtsPatProgram
+ * - gst_mpegts_section_get_pat
+ * - gst_mpegts_pat_new
+ * - gst_mpegts_pat_program_new
+ * - gst_mpegts_section_from_pat
+ * - GstMpegtsPMT
+ * - GstMpegtsPMTStream
+ * - GstMpegtsStreamType
+ * - gst_mpegts_section_get_pmt
+ * - gst_mpegts_pmt_new
+ * - gst_mpegts_pmt_stream_new
+ * - gst_mpegts_section_from_pmt
+ * - gst_mpegts_section_get_tsdt
+ * - gst_mpegts_section_get_cat
+ * - GST_TYPE_MPEGTS_SECTION_TABLE_ID
+ * - GST_TYPE_MPEGTS_SECTION_TYPE
+ * - GST_TYPE_MPEGTS_SECTION_DVB_TABLE_ID
+ * - GST_MPEGTS_SECTION
+ * - GST_TYPE_MPEGTS_STREAM_TYPE
+ * - GST_TYPE_MPEGTS_PMT
+ * - GST_TYPE_MPEGTS_PMT_STREAM
+ * - GST_TYPE_MPEGTS_SECTION
+ * - gst_mpegts_section_table_id_get_type
+ * - gst_mpegts_section_type_get_type
+ * - gst_mpegts_pmt_get_type
+ * - gst_mpegts_pmt_stream_get_type
+ * - gst_mpegts_section_get_type
+ * - gst_mpegts_stream_type_get_type
  *
  * For more details, refer to the ITU H.222.0 or ISO/IEC 13818-1 specifications
  * and other specifications mentioned in the documentation.
@@ -55,7 +99,7 @@
 /*
  * TODO
  *
- * * Check minimum size for section parsing in the various 
+ * * Check minimum size for section parsing in the various
  *   gst_mpegts_section_get_<tabld>() methods
  *
  * * Implement parsing code for
@@ -357,6 +401,9 @@ gst_event_parse_mpegts_section (GstEvent * event)
   GstMpegtsSection *section;
 
   structure = gst_event_get_structure (event);
+
+  if (!structure)
+    return NULL;
 
   if (!gst_structure_id_get (structure, QUARK_SECTION, MPEG_TYPE_TS_SECTION,
           &section, NULL))
@@ -1075,6 +1122,13 @@ _identify_section (guint16 pid, guint8 table_id)
       if (pid == 0x1ffb)
         return GST_MPEGTS_SECTION_ATSC_STT;
       break;
+    case GST_MTS_TABLE_ID_ATSC_RATING_REGION:
+      if (pid == 0x1ffb)
+        return GST_MPEGTS_SECTION_ATSC_RRT;
+      break;
+    case GST_MTS_TABLE_ID_SCTE_SPLICE:
+      return GST_MPEGTS_SECTION_SCTE_SIT;
+      break;
     default:
       /* Handle ranges */
       if (table_id >= GST_MTS_TABLE_ID_EVENT_INFORMATION_ACTUAL_TS_PRESENT &&
@@ -1125,8 +1179,13 @@ _packetize_common_section (GstMpegtsSection * section, gsize length)
     case GST_MPEGTS_SECTION_PMT:
     case GST_MPEGTS_SECTION_CAT:
     case GST_MPEGTS_SECTION_TSDT:
+    case GST_MPEGTS_SECTION_SCTE_SIT:
       /* Tables from ISO/IEC 13818-1 has a '0' bit
        * after the section_syntax_indicator */
+      /* FIXME : that 'bit' after the section_syntax_indicator is the
+       * private_indicator field. We should figure out why/when it
+       * needs to be set *OR* decide that by default it is set to 0
+       * (i.e. not private data) unless the user/caller decides */
       GST_WRITE_UINT16_BE (data, (section->section_length - 3) | 0x3000);
       break;
     default:
@@ -1161,7 +1220,7 @@ _packetize_common_section (GstMpegtsSection * section, gsize length)
 /**
  * gst_mpegts_section_new:
  * @pid: the PID to which this section belongs
- * @data: (transfer full): a pointer to the beginning of the section (i.e. the first byte
+ * @data: (transfer full) (array length=data_size): a pointer to the beginning of the section (i.e. the first byte
  * should contain the table_id field).
  * @data_size: size of the @data argument.
  *

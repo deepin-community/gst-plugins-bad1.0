@@ -48,12 +48,11 @@
  *
  * opencvtextoverlay renders the text on top of the video frames
  *
- * <refsect2>
- * <title>Example launch line</title>
+ * ## Example launch line
+ *
  * |[
  * gst-launch-1.0 videotestsrc ! videoconvert ! opencvtextoverlay text="Opencv Text Overlay " ! videoconvert ! xvimagesink
  * ]|
- * </refsect2>
  */
 
 #ifdef HAVE_CONFIG_H
@@ -121,7 +120,7 @@ static void gst_opencv_text_overlay_get_property (GObject * object,
     guint prop_id, GValue * value, GParamSpec * pspec);
 
 static GstFlowReturn gst_opencv_text_overlay_transform_ip (GstOpencvVideoFilter
-    * filter, GstBuffer * buf, IplImage * img);
+    * filter, GstBuffer * buf, cv::Mat img);
 
 /* Clean up */
 static void
@@ -218,7 +217,7 @@ gst_opencv_text_overlay_class_init (GstOpencvTextOverlayClass * klass)
 
 /* initialize the new element
  * instantiate pads and add them to element
- * set pad calback functions
+ * set pad callback functions
  * initialize instance structure
  */
 static void
@@ -326,15 +325,14 @@ gst_opencv_text_overlay_get_property (GObject * object, guint prop_id,
  */
 static GstFlowReturn
 gst_opencv_text_overlay_transform_ip (GstOpencvVideoFilter * base,
-    GstBuffer * buf, IplImage * img)
+    GstBuffer * buf, cv::Mat img)
 {
   GstOpencvTextOverlay *filter = GST_OPENCV_TEXT_OVERLAY (base);
 
-  cvInitFont (&(filter->font), CV_FONT_VECTOR0, filter->width, filter->height,
-      0, filter->thickness, 0);
-  cvPutText (img, filter->textbuf, cvPoint (filter->xpos,
-          filter->ypos), &(filter->font), cvScalar (filter->colorR,
-          filter->colorG, filter->colorB, 0));
+  cv::putText (img, filter->textbuf, cv::Point (filter->xpos,
+          filter->ypos), cv::FONT_HERSHEY_SIMPLEX,
+      (filter->width + filter->height) * 0.5, cv::Scalar (filter->colorR,
+          filter->colorG, filter->colorB), filter->thickness);
 
   return GST_FLOW_OK;
 }

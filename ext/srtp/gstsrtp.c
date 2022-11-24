@@ -196,6 +196,10 @@ rtcp_buffer_get_ssrc (GstBuffer * buf, guint32 * ssrc)
           *ssrc = gst_rtcp_packet_app_get_ssrc (&packet);
           ret = TRUE;
           break;
+        case GST_RTCP_TYPE_BYE:
+          *ssrc = gst_rtcp_packet_bye_get_nth_ssrc (&packet, 0);
+          ret = TRUE;
+          break;
         default:
           break;
       }
@@ -218,6 +222,12 @@ set_crypto_policy_cipher_auth (GstSrtpCipherType cipher,
       break;
     case GST_SRTP_CIPHER_AES_256_ICM:
       policy->cipher_type = SRTP_AES_ICM_256;
+      break;
+    case GST_SRTP_CIPHER_AES_128_GCM:
+      policy->cipher_type = SRTP_AES_GCM_128;
+      break;
+    case GST_SRTP_CIPHER_AES_256_GCM:
+      policy->cipher_type = SRTP_AES_GCM_256;
       break;
     case GST_SRTP_CIPHER_NULL:
       policy->cipher_type = SRTP_NULL_CIPHER;
@@ -242,7 +252,12 @@ set_crypto_policy_cipher_auth (GstSrtpCipherType cipher,
     case GST_SRTP_AUTH_NULL:
       policy->auth_type = SRTP_NULL_AUTH;
       policy->auth_key_len = 0;
-      policy->auth_tag_len = 0;
+      if (cipher == GST_SRTP_CIPHER_AES_128_GCM
+          || cipher == GST_SRTP_CIPHER_AES_256_GCM) {
+        policy->auth_tag_len = 16;
+      } else {
+        policy->auth_tag_len = 0;
+      }
       break;
   }
 
@@ -268,8 +283,13 @@ cipher_key_size (GstSrtpCipherType cipher)
     case GST_SRTP_CIPHER_AES_256_ICM:
       size = SRTP_AES_ICM_256_KEY_LEN_WSALT;
       break;
+    case GST_SRTP_CIPHER_AES_128_GCM:
+      size = SRTP_AES_GCM_128_KEY_LEN_WSALT;
+      break;
+    case GST_SRTP_CIPHER_AES_256_GCM:
+      size = SRTP_AES_GCM_256_KEY_LEN_WSALT;
+      break;
     case GST_SRTP_CIPHER_NULL:
-      size = 0;
       break;
     default:
       g_assert_not_reached ();
@@ -288,6 +308,9 @@ plugin_init (GstPlugin * plugin)
 
   if (!gst_srtp_dec_plugin_init (plugin))
     return FALSE;
+
+  gst_type_mark_as_plugin_api (GST_TYPE_SRTP_AUTH_TYPE, 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_SRTP_CIPHER_TYPE, 0);
 
   return TRUE;
 }

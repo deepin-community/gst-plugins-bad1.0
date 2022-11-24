@@ -113,7 +113,7 @@ typedef struct
   gulong video_pad_probe_block_id;
 
   /* The current running time of this item; updated with every audio buffer if
-   * this item has audio; otherwise it's updated withe very video buffer */
+   * this item has audio; otherwise it's updated with very video buffer */
   guint64 running_time;
 } PlayoutItem;
 
@@ -863,7 +863,7 @@ playout_app_activate_item (PlayoutItem * item)
      * fit within the output video size without any cropping */
     gst_video_sink_center_rect (item->video_irect, item->app->video_orect,
         &item->video_orect, TRUE);
-    GST_DEBUG ("%s: w: %i, h: %i, x: %i, y: %i\n", item->fn,
+    GST_DEBUG ("%s: w: %i, h: %i, x: %i, y: %i", item->fn,
         item->video_orect.w, item->video_orect.h, item->video_orect.x,
         item->video_orect.y);
     g_object_set (sinkpad, "width", item->video_orect.w, "height",
@@ -873,9 +873,9 @@ playout_app_activate_item (PlayoutItem * item)
     /* If this is not the last item, on EOS, continue to aggregate using the
      * last buffer till the pad is released */
     if (item->app->play_queue->len != (item->app->play_queue_current + 2))
-      g_object_set (sinkpad, "ignore-eos", TRUE, NULL);
+      g_object_set (sinkpad, "repeat-after-eos", TRUE, NULL);
     else
-      GST_DEBUG ("%s: last item, not setting ignore-eos", item->fn);
+      GST_DEBUG ("%s: last item, not setting repeat-after-eos", item->fn);
     gst_pad_link (item->video_pad, sinkpad);
 
     if (app->elapsed_duration > 0) {

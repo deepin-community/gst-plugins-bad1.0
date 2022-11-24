@@ -158,7 +158,7 @@ gst_dx9screencapsrc_class_init (GstDX9ScreenCapSrcClass * klass)
 static void
 gst_dx9screencapsrc_init (GstDX9ScreenCapSrc * src)
 {
-  /* Set src element inital values... */
+  /* Set src element initial values... */
   src->surface = NULL;
   src->d3d9_device = NULL;
   src->capture_x = 0;
@@ -168,7 +168,7 @@ gst_dx9screencapsrc_init (GstDX9ScreenCapSrc * src)
 
   src->monitor = 0;
   src->show_cursor = FALSE;
-  src->monitor_info.cbSize = sizeof(MONITORINFO);
+  src->monitor_info.cbSize = sizeof (MONITORINFO);
 
   gst_base_src_set_format (GST_BASE_SRC (src), GST_FORMAT_TIME);
   gst_base_src_set_live (GST_BASE_SRC (src), TRUE);
@@ -322,7 +322,7 @@ gst_dx9screencapsrc_get_caps (GstBaseSrc * bsrc, GstCaps * filter)
 
   if (src->monitor >= IDirect3D9_GetAdapterCount (g_d3d9)) {
     GST_ELEMENT_ERROR (src, RESOURCE, NOT_FOUND,
-      ("Specified monitor with index %d not found", src->monitor), (NULL));
+        ("Specified monitor with index %d not found", src->monitor), (NULL));
     return NULL;
   }
 
@@ -400,7 +400,7 @@ gst_dx9screencapsrc_start (GstBaseSrc * bsrc)
 
   if (src->monitor >= IDirect3D9_GetAdapterCount (g_d3d9)) {
     GST_ELEMENT_ERROR (src, RESOURCE, NOT_FOUND,
-      ("Specified monitor with index %d not found", src->monitor), (NULL));
+        ("Specified monitor with index %d not found", src->monitor), (NULL));
     return FALSE;
   }
 
@@ -509,17 +509,17 @@ gst_dx9screencapsrc_create (GstPushSrc * push_src, GstBuffer ** buf)
     GST_DEBUG_OBJECT (src, "Waiting for next frame time %" G_GUINT64_FORMAT,
         buf_time);
     ret = gst_clock_id_wait (id, NULL);
-    GST_OBJECT_LOCK (src);
 
+    GST_OBJECT_LOCK (src);
     gst_clock_id_unref (id);
     src->clock_id = NULL;
+    GST_OBJECT_UNLOCK (src);
+
     if (ret == GST_CLOCK_UNSCHEDULED) {
       /* Got woken up by the unlock function */
-      GST_OBJECT_UNLOCK (src);
       gst_object_unref (clock);
       return GST_FLOW_FLUSHING;
     }
-    GST_OBJECT_UNLOCK (src);
 
     /* Duration is a complete 1/fps frame duration */
     buf_dur =
@@ -549,7 +549,7 @@ gst_dx9screencapsrc_create (GstPushSrc * push_src, GstBuffer ** buf)
       new_buf_size, width, height);
 
   /* Do screen capture and put it into buffer...
-   * Aquire front buffer, and lock it
+   * Acquire front buffer, and lock it
    */
   hres =
       IDirect3DDevice9_GetFrontBufferData (src->d3d9_device, 0, src->surface);

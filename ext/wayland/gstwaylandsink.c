@@ -27,8 +27,9 @@
  *
  *  The waylandsink is creating its own window and render the decoded video frames to that.
  *  Setup the Wayland environment as described in
- *  <ulink url="http://wayland.freedesktop.org/building.html">Wayland</ulink> home page.
- *  The current implementaion is based on weston compositor.
+ *  [Wayland](http://wayland.freedesktop.org/building.html) home page.
+ *
+ *  The current implementation is based on weston compositor.
  *
  * ## Example pipelines
  * |[
@@ -61,7 +62,8 @@ enum
 enum
 {
   PROP_0,
-  PROP_DISPLAY
+  PROP_DISPLAY,
+  PROP_FULLSCREEN
 };
 
 GST_DEBUG_CATEGORY (gstwayland_debug);
@@ -69,7 +71,7 @@ GST_DEBUG_CATEGORY (gstwayland_debug);
 
 #define WL_VIDEO_FORMATS \
     "{ BGRx, BGRA, RGBx, xBGR, xRGB, RGBA, ABGR, ARGB, RGB, BGR, " \
-    "RGB16, BGR16, YUY2, YVYU, UYVY, AYUV, NV12, NV21, NV16, " \
+    "RGB16, BGR16, YUY2, YVYU, UYVY, AYUV, NV12, NV21, NV16, NV61, " \
     "YUV9, YVU9, Y41B, I420, YV12, Y42B, v308 }"
 
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
@@ -96,7 +98,7 @@ static GstCaps *gst_wayland_sink_get_caps (GstBaseSink * bsink,
 static gboolean gst_wayland_sink_set_caps (GstBaseSink * bsink, GstCaps * caps);
 static gboolean
 gst_wayland_sink_propose_allocation (GstBaseSink * bsink, GstQuery * query);
-static gboolean gst_wayland_sink_show_frame (GstVideoSink * bsink,
+static GstFlowReturn gst_wayland_sink_show_frame (GstVideoSink * bsink,
     GstBuffer * buffer);
 
 /* VideoOverlay interface */
@@ -202,6 +204,13 @@ gst_wayland_sink_class_init (GstWaylandSinkClass * klass)
       g_param_spec_string ("display", "Wayland Display name", "Wayland "
           "display name to connect to, if not supplied via the GstContext",
           NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (gobject_class, PROP_FULLSCREEN,
+      g_param_spec_boolean ("fullscreen", "Fullscreen",
+          "Whether the surface should be made fullscreen ", FALSE,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  gst_type_mark_as_plugin_api (GST_TYPE_WAYLAND_VIDEO, 0);
 }
 
 static void
@@ -209,6 +218,18 @@ gst_wayland_sink_init (GstWaylandSink * sink)
 {
   g_mutex_init (&sink->display_lock);
   g_mutex_init (&sink->render_lock);
+}
+
+static void
+gst_wayland_sink_set_fullscreen (GstWaylandSink * sink, gboolean fullscreen)
+{
+  if (fullscreen == sink->fullscreen)
+    return;
+
+  g_mutex_lock (&sink->render_lock);
+  sink->fullscreen = fullscreen;
+  gst_wl_window_ensure_fullscreen (sink->window, fullscreen);
+  g_mutex_unlock (&sink->render_lock);
 }
 
 static void
@@ -221,6 +242,11 @@ gst_wayland_sink_get_property (GObject * object,
     case PROP_DISPLAY:
       GST_OBJECT_LOCK (sink);
       g_value_set_string (value, sink->display_name);
+      GST_OBJECT_UNLOCK (sink);
+      break;
+    case PROP_FULLSCREEN:
+      GST_OBJECT_LOCK (sink);
+      g_value_set_boolean (value, sink->fullscreen);
       GST_OBJECT_UNLOCK (sink);
       break;
     default:
@@ -239,6 +265,11 @@ gst_wayland_sink_set_property (GObject * object,
     case PROP_DISPLAY:
       GST_OBJECT_LOCK (sink);
       sink->display_name = g_value_dup_string (value);
+      GST_OBJECT_UNLOCK (sink);
+      break;
+    case PROP_FULLSCREEN:
+      GST_OBJECT_LOCK (sink);
+      gst_wayland_sink_set_fullscreen (sink, g_value_get_boolean (value));
       GST_OBJECT_UNLOCK (sink);
       break;
     default:
@@ -443,6 +474,7 @@ gst_wayland_sink_get_caps (GstBaseSink * bsink, GstCaps * filter)
     GArray *formats;
     gint i;
     guint fmt;
+    GstVideoFormat gfmt;
 
     g_value_init (&shm_list, GST_TYPE_LIST);
     g_value_init (&dmabuf_list, GST_TYPE_LIST);
@@ -450,10 +482,13 @@ gst_wayland_sink_get_caps (GstBaseSink * bsink, GstCaps * filter)
     /* Add corresponding shm formats */
     formats = sink->display->shm_formats;
     for (i = 0; i < formats->len; i++) {
-      g_value_init (&value, G_TYPE_STRING);
       fmt = g_array_index (formats, uint32_t, i);
-      g_value_set_static_string (&value, gst_wl_shm_format_to_string (fmt));
-      gst_value_list_append_and_take_value (&shm_list, &value);
+      gfmt = gst_wl_shm_format_to_video_format (fmt);
+      if (gfmt != GST_VIDEO_FORMAT_UNKNOWN) {
+        g_value_init (&value, G_TYPE_STRING);
+        g_value_set_static_string (&value, gst_video_format_to_string (gfmt));
+        gst_value_list_append_and_take_value (&shm_list, &value);
+      }
     }
 
     gst_structure_take_value (gst_caps_get_structure (caps, 0), "format",
@@ -462,10 +497,13 @@ gst_wayland_sink_get_caps (GstBaseSink * bsink, GstCaps * filter)
     /* Add corresponding dmabuf formats */
     formats = sink->display->dmabuf_formats;
     for (i = 0; i < formats->len; i++) {
-      g_value_init (&value, G_TYPE_STRING);
       fmt = g_array_index (formats, uint32_t, i);
-      g_value_set_static_string (&value, gst_wl_dmabuf_format_to_string (fmt));
-      gst_value_list_append_and_take_value (&dmabuf_list, &value);
+      gfmt = gst_wl_dmabuf_format_to_video_format (fmt);
+      if (gfmt != GST_VIDEO_FORMAT_UNKNOWN) {
+        g_value_init (&value, G_TYPE_STRING);
+        g_value_set_static_string (&value, gst_video_format_to_string (gfmt));
+        gst_value_list_append_and_take_value (&dmabuf_list, &value);
+      }
     }
 
     gst_structure_take_value (gst_caps_get_structure (caps, 1), "format",
@@ -617,7 +655,7 @@ render_last_buffer (GstWaylandSink * sink, gboolean redraw)
   struct wl_surface *surface;
   struct wl_callback *callback;
 
-  wlbuffer = gst_buffer_get_wl_buffer (sink->last_buffer);
+  wlbuffer = gst_buffer_get_wl_buffer (sink->display, sink->last_buffer);
   surface = gst_wl_window_get_wl_surface (sink->window);
 
   sink->redraw_pending = TRUE;
@@ -629,6 +667,16 @@ render_last_buffer (GstWaylandSink * sink, gboolean redraw)
     sink->video_info_changed = FALSE;
   }
   gst_wl_window_render (sink->window, wlbuffer, info);
+}
+
+static void
+on_window_closed (GstWlWindow * window, gpointer user_data)
+{
+  GstWaylandSink *sink = GST_WAYLAND_SINK (user_data);
+
+  /* Handle window closure by posting an error on the bus */
+  GST_ELEMENT_ERROR (sink, RESOURCE, NOT_FOUND,
+      ("Output window was closed"), (NULL));
 }
 
 static GstFlowReturn
@@ -659,7 +707,9 @@ gst_wayland_sink_show_frame (GstVideoSink * vsink, GstBuffer * buffer)
     if (!sink->window) {
       /* if we were not provided a window, create one ourselves */
       sink->window = gst_wl_window_new_toplevel (sink->display,
-          &sink->video_info, &sink->render_lock);
+          &sink->video_info, sink->fullscreen, &sink->render_lock);
+      g_signal_connect_object (sink->window, "closed",
+          G_CALLBACK (on_window_closed), sink, 0);
     }
   }
 
@@ -673,7 +723,7 @@ gst_wayland_sink_show_frame (GstVideoSink * vsink, GstBuffer * buffer)
   if (G_UNLIKELY (sink->window->render_rectangle.w == 0))
     goto no_window_size;
 
-  wlbuffer = gst_buffer_get_wl_buffer (buffer);
+  wlbuffer = gst_buffer_get_wl_buffer (sink->display, buffer);
 
   if (G_LIKELY (wlbuffer && wlbuffer->display == sink->display)) {
     GST_LOG_OBJECT (sink, "buffer %p has a wl_buffer from our display, "
@@ -747,7 +797,7 @@ gst_wayland_sink_show_frame (GstVideoSink * vsink, GstBuffer * buffer)
         gst_buffer_pool_config_set_params (config, caps, sink->video_info.size,
             2, 0);
 
-        /* This is a video pool, it should not fail with basic setings */
+        /* This is a video pool, it should not fail with basic settings */
         if (!gst_buffer_pool_set_config (sink->pool, config) ||
             !gst_buffer_pool_set_active (sink->pool, TRUE))
           goto activate_failed;
@@ -757,7 +807,7 @@ gst_wayland_sink_show_frame (GstVideoSink * vsink, GstBuffer * buffer)
       if (ret != GST_FLOW_OK)
         goto no_buffer;
 
-      wlbuffer = gst_buffer_get_wl_buffer (to_render);
+      wlbuffer = gst_buffer_get_wl_buffer (sink->display, to_render);
 
       /* attach a wl_buffer if there isn't one yet */
       if (G_UNLIKELY (!wlbuffer)) {

@@ -28,15 +28,14 @@
 /**
  * SECTION:element-modplug
  * 
- * Modplug uses the <ulink url="http://modplug-xmms.sourceforge.net/">modplug</ulink>
- * library to decode tracked music in the MOD/S3M/XM/IT and related formats.
+ * Modplug uses the [modplug](http://modplug-xmms.sourceforge.net/) library to
+ * decode tracked music in the MOD/S3M/XM/IT and related formats.
  * 
- * <refsect2>
- * <title>Example pipeline</title>
+ * ## Example pipeline
+ *
  * |[
  * gst-launch-1.0 -v filesrc location=1990s-nostalgia.xm ! modplug ! audioconvert ! alsasink
  * ]| Play a FastTracker xm file.
- * </refsect2>
  */
 
 #ifdef HAVE_CONFIG_H
@@ -299,11 +298,15 @@ gst_modplug_src_query (GstPad * pad, GstObject * parent, GstQuery * query)
       gst_query_parse_position (query, &format, NULL);
       if (format == GST_FORMAT_TIME) {
         gint64 pos;
+        guint32 max;
 
-        pos = (modplug->song_length * modplug->mSoundFile->GetCurrentPos ());
-        pos /= modplug->mSoundFile->GetMaxPosition ();
-        gst_query_set_position (query, format, pos);
-        res = TRUE;
+	max = modplug->mSoundFile->GetMaxPosition();
+	if (max > 0) {
+          pos = (modplug->song_length * modplug->mSoundFile->GetCurrentPos ()) /
+            max;
+          gst_query_set_position (query, format, pos);
+          res = TRUE;
+        }
       }
     }
       break;

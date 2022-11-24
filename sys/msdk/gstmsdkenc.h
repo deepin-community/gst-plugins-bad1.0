@@ -99,11 +99,15 @@ struct _GstMsdkEnc
 
   /* MFX context */
   GstMsdkContext *context;
+  GstMsdkContext *old_context;
   mfxVideoParam param;
   guint num_surfaces;
   guint num_tasks;
   MsdkEncTask *tasks;
   guint next_task;
+  /* Extra frames for encoding, set by each element,
+   * the default value is 0 */
+  guint num_extra_frames;
 
   gboolean has_vpp;
   mfxVideoParam vpp_param;
@@ -127,6 +131,7 @@ struct _GstMsdkEnc
   GstBufferPool *msdk_converted_pool;
   GstVideoInfo aligned_info;
   gboolean use_video_memory;
+  gboolean use_dmabuf;
   gboolean initialized;
 
   /* element properties */
@@ -154,6 +159,8 @@ struct _GstMsdkEnc
   gint16 adaptive_b;
 
   gboolean reconfig;
+
+  guint16 codename;
 };
 
 struct _GstMsdkEncClass
@@ -163,6 +170,19 @@ struct _GstMsdkEncClass
   gboolean (*set_format) (GstMsdkEnc * encoder);
   gboolean (*configure) (GstMsdkEnc * encoder);
   GstCaps *(*set_src_caps) (GstMsdkEnc * encoder);
+  /* Return TRUE if vpp is required before encoding
+   * @info (in), input video info
+   * @out_format (out), a pointer to the output format of vpp, which is set
+   * when return TRUE
+   */
+  gboolean (*need_conversion) (GstMsdkEnc * encoder, GstVideoInfo * info,
+      GstVideoFormat * out_format);
+
+  /* Return TRUE if sub class requires a recofnig */
+  gboolean (*need_reconfig) (GstMsdkEnc * encoder, GstVideoCodecFrame * frame);
+
+  /* Allow sub class set extra frame parameters */
+  void (*set_extra_params) (GstMsdkEnc * encoder, GstVideoCodecFrame * frame);
 };
 
 struct _MsdkEncTask
@@ -187,6 +207,9 @@ gst_msdkenc_get_common_property (GObject * object, guint prop_id,
 void
 gst_msdkenc_ensure_extended_coding_options (GstMsdkEnc * thiz);
 
+gboolean
+gst_msdkenc_get_roi_params (GstMsdkEnc * thiz,
+    GstVideoCodecFrame * frame, mfxExtEncoderROI * encoder_roi);
 G_END_DECLS
 
 #endif /* __GST_MSDKENC_H__ */

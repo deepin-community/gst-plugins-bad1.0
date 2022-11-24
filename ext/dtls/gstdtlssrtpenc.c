@@ -28,6 +28,7 @@
 #endif
 
 #include "gstdtlssrtpenc.h"
+#include "gstdtlsconnection.h"
 
 #include <stdio.h>
 
@@ -76,12 +77,15 @@ enum
 {
   PROP_0,
   PROP_IS_CLIENT,
+  PROP_CONNECTION_STATE,
+  PROP_RTP_SYNC,
   NUM_PROPERTIES
 };
 
 static GParamSpec *properties[NUM_PROPERTIES];
 
 #define DEFAULT_IS_CLIENT FALSE
+#define DEFAULT_RTP_SYNC FALSE
 
 static gboolean transform_enum (GBinding *, const GValue * source_value,
     GValue * target_value, GEnumClass *);
@@ -126,8 +130,7 @@ gst_dtls_srtp_enc_class_init (GstDtlsSrtpEncClass * klass)
 
   signals[SIGNAL_ON_KEY_SET] =
       g_signal_new ("on-key-set", G_TYPE_FROM_CLASS (klass),
-      G_SIGNAL_RUN_LAST, 0, NULL, NULL,
-      g_cclosure_marshal_generic, G_TYPE_NONE, 0);
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 
   properties[PROP_IS_CLIENT] =
       g_param_spec_boolean ("is-client",
@@ -136,6 +139,19 @@ gst_dtls_srtp_enc_class_init (GstDtlsSrtpEncClass * klass)
       "client and initiate the handshake",
       DEFAULT_IS_CLIENT,
       GST_PARAM_MUTABLE_READY | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+  properties[PROP_CONNECTION_STATE] =
+      g_param_spec_enum ("connection-state",
+      "Connection State",
+      "Current connection state",
+      GST_DTLS_TYPE_CONNECTION_STATE,
+      GST_DTLS_CONNECTION_STATE_NEW, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+
+
+  properties[PROP_RTP_SYNC] =
+      g_param_spec_boolean ("rtp-sync", "Synchronize RTP",
+      "Synchronize RTP to the pipeline clock before merging with RTCP",
+      DEFAULT_RTP_SYNC, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (gobject_class, NUM_PROPERTIES, properties);
 
@@ -154,6 +170,15 @@ gst_dtls_srtp_enc_class_init (GstDtlsSrtpEncClass * klass)
 }
 
 static void
+on_connection_state_changed (GObject * object, GParamSpec * pspec,
+    gpointer user_data)
+{
+  GstDtlsSrtpEnc *self = GST_DTLS_SRTP_ENC (user_data);
+
+  g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_CONNECTION_STATE]);
+}
+
+static void
 gst_dtls_srtp_enc_init (GstDtlsSrtpEnc * self)
 {
   GstElementClass *klass = GST_ELEMENT_GET_CLASS (GST_ELEMENT (self));
@@ -161,15 +186,20 @@ gst_dtls_srtp_enc_init (GstDtlsSrtpEnc * self)
   gboolean ret;
 
 /*
-                 +--------------------+     +-----------------+
-     rtp_sink-R-o|rtp_sink     rtp_src|o-R-o|                 |
-                 |       srtpenc      |     |                 |
-    rtcp_sink-R-o|srtcp_sink  rtcp_src|o-R-o|                 |
-                 +--------------------+     |     funnel      |o---src
-                                            |                 |
-                 +--------------------+     |                 |
-    data_sink-R-o|       dtlsenc      |o---o|                 |
-                 +--------------------+     +-----------------+
+                 +--------------------+    +--------------+     +-----------------+
+     rtp_sink-R-o|rtp_sink     rtp_src|o-R-o   clocksync  |o-R-o|                 |
+                 |       srtpenc      |    +--------------+     |                 |
+                 |                    |                         |                 |
+    rtcp_sink-R-o|srtcp_sink  rtcp_src|o-----------R-----------o|                 |
+                 +--------------------+                         |     funnel      |o---src
+                                                                |                 |
+                 +--------------------+                         |                 |
+    data_sink-R-o|       dtlsenc      |o-----------------------o|                 |
+                 +--------------------+                         +-----------------+
+
+    The clocksync element is tied to the sync property. If sync=true, RTP output will be
+    synchronised to the clock, so it doesn't slow down RTCP traffic by being synched later
+    in the pipeline
 */
 
   self->srtp_enc = gst_element_factory_make ("srtpenc", NULL);
@@ -215,6 +245,9 @@ gst_dtls_srtp_enc_init (GstDtlsSrtpEnc * self)
   }
 
   g_object_set (self->srtp_enc, "random-key", TRUE, NULL);
+
+  g_signal_connect (self->bin.dtls_element, "notify::connection-state",
+      G_CALLBACK (on_connection_state_changed), self);
 
   g_object_bind_property (G_OBJECT (self), "key", self->srtp_enc, "key",
       G_BINDING_DEFAULT);
@@ -269,6 +302,9 @@ gst_dtls_srtp_enc_set_property (GObject * object,
             "tried to set is-client after disabling DTLS");
       }
       break;
+    case PROP_RTP_SYNC:
+      self->rtp_sync = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (self, prop_id, pspec);
   }
@@ -289,6 +325,13 @@ gst_dtls_srtp_enc_get_property (GObject * object,
         GST_WARNING_OBJECT (self,
             "tried to get is-client after disabling DTLS");
       }
+      break;
+    case PROP_CONNECTION_STATE:
+      g_object_get_property (G_OBJECT (self->bin.dtls_element),
+          "connection-state", value);
+      break;
+    case PROP_RTP_SYNC:
+      g_value_set_boolean (value, self->rtp_sync);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (self, prop_id, pspec);
@@ -332,13 +375,32 @@ gst_dtls_srtp_enc_request_new_pad (GstElement * element,
   g_return_val_if_fail (self->srtp_enc, NULL);
 
   if (templ == gst_element_class_get_pad_template (klass, "rtp_sink_%d")) {
+    gchar *clocksync_name;
+    GstElement *clocksync;
+
+    sscanf (name, "rtp_sink_%d", &pad_n);
+
+    clocksync_name = g_strdup_printf ("clocksync_%d", pad_n);
+    clocksync = gst_element_factory_make ("clocksync", clocksync_name);
+    g_free (clocksync_name);
+
+    if (clocksync == NULL) {
+      goto fail_create;
+    }
+
+    g_object_bind_property (self, "rtp-sync", clocksync, "sync",
+        G_BINDING_SYNC_CREATE);
+
+    gst_bin_add (GST_BIN (self), clocksync);
+    gst_element_sync_state_with_parent (clocksync);
+
     target_pad = gst_element_get_request_pad (self->srtp_enc, name);
     g_return_val_if_fail (target_pad, NULL);
 
-    sscanf (GST_PAD_NAME (target_pad), "rtp_sink_%d", &pad_n);
     srtp_src_name = g_strdup_printf ("rtp_src_%d", pad_n);
 
-    gst_element_link_pads (self->srtp_enc, srtp_src_name, self->funnel, NULL);
+    gst_element_link_pads (self->srtp_enc, srtp_src_name, clocksync, NULL);
+    gst_element_link_pads (clocksync, "src", self->funnel, NULL);
 
     g_free (srtp_src_name);
 
@@ -376,6 +438,11 @@ gst_dtls_srtp_enc_request_new_pad (GstElement * element,
   }
 
   return ghost_pad;
+
+fail_create:
+  GST_ELEMENT_ERROR (self, CORE, MISSING_PLUGIN, NULL,
+      ("%s", "Failed to create internal clocksync element"));
+  return NULL;
 }
 
 static void

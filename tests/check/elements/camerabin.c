@@ -25,7 +25,6 @@
 #  include "config.h"
 #endif
 
-#include <unistd.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gst/gst.h>
@@ -257,7 +256,8 @@ enum
   PROP_LENS_FOCUS,
   PROP_MIN_EXPOSURE_TIME,
   PROP_MAX_EXPORURE_TIME,
-  PROP_NOISE_REDUCTION
+  PROP_NOISE_REDUCTION,
+  PROP_EXPOSURE_MODE
 };
 
 static gboolean
@@ -425,6 +425,8 @@ gst_test_video_src_class_init (GstTestVideoSrcClass * klass)
       GST_PHOTOGRAPHY_PROP_MAX_EXPOSURE_TIME);
   g_object_class_override_property (gobject_class, PROP_NOISE_REDUCTION,
       GST_PHOTOGRAPHY_PROP_NOISE_REDUCTION);
+  g_object_class_override_property (gobject_class, PROP_EXPOSURE_MODE,
+      GST_PHOTOGRAPHY_PROP_EXPOSURE_MODE);
 }
 
 static void

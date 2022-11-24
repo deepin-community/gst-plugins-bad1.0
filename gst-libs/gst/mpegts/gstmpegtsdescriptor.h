@@ -1,7 +1,7 @@
 /*
- * gstmpegtsdescriptor.h - 
+ * gstmpegtsdescriptor.h -
  * Copyright (C) 2013 Edward Hervey
- * 
+ *
  * Authors:
  *   Edward Hervey <edward@collabora.com>
  *
@@ -233,7 +233,7 @@ typedef enum {
   GST_MTS_DESC_ISDB_CONTENT_AVAILABILITY        = 0xde,
   /* ... */
   GST_MTS_DESC_ISDB_SERVICE_GROUP               = 0xe0
-  
+
 } GstMpegtsISDBDescriptorType;
 
 typedef struct _GstMpegtsDescriptor GstMpegtsDescriptor;
@@ -353,6 +353,16 @@ struct _GstMpegtsLogicalChannelDescriptor
   guint                   nb_channels;
   GstMpegtsLogicalChannel channels[64];
 };
+
+#define GST_TYPE_MPEGTS_LOGICAL_CHANNEL_DESCRIPTOR (gst_mpegts_logical_channel_descriptor_get_type())
+
+GST_MPEGTS_API
+GType gst_mpegts_logical_channel_descriptor_get_type(void);
+
+#define GST_TYPE_MPEGTS_LOGICAL_CHANNEL (gst_mpegts_logical_channel_get_type())
+
+GST_MPEGTS_API
+GType gst_mpegts_logical_channel_get_type(void);
 
 /* FIXME : Maybe make two methods. One for getting the number of channels,
  * and the other for getting the content for one channel ? */

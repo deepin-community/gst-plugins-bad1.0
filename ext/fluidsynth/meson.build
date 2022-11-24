@@ -1,4 +1,4 @@
-fluidsynth_dep = dependency('fluidsynth', version : '>= 1.0', required : false)
+fluidsynth_dep = dependency('fluidsynth', version : '>= 1.0', required : get_option('fluidsynth'))
 
 if fluidsynth_dep.found()
   gstfluidsynth = library('gstfluidsynthmidi',
@@ -9,4 +9,6 @@ if fluidsynth_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstfluidsynth, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstfluidsynth]
 endif

@@ -48,8 +48,11 @@ enum
 {
   PROP_0,
   PROP_DEVICE,
-  PROP_DEVICE_NAME
+  PROP_DEVICE_NAME,
+  PROP_DEVICE_INDEX
 };
+
+#define DEFAULT_PROP_DEVICE_INDEX 0
 
 
 static void gst_dshowaudiosrc_dispose (GObject * gobject);
@@ -122,6 +125,13 @@ gst_dshowaudiosrc_class_init (GstDshowAudioSrcClass * klass)
           "Human-readable name of the sound device", NULL,
           static_cast < GParamFlags > (G_PARAM_READWRITE)));
 
+  g_object_class_install_property
+      (gobject_class, PROP_DEVICE_INDEX,
+      g_param_spec_int ("device-index", "Device index",
+          "Index of the enumerated audio device", 0, G_MAXINT,
+          DEFAULT_PROP_DEVICE_INDEX,
+          static_cast < GParamFlags > (G_PARAM_READWRITE)));
+
   gst_element_class_add_static_pad_template (gstelement_class, &src_template);
 
   gst_element_class_set_static_metadata (gstelement_class,
@@ -138,6 +148,7 @@ gst_dshowaudiosrc_init (GstDshowAudioSrc * src)
 {
   src->device = NULL;
   src->device_name = NULL;
+  src->device_index = DEFAULT_PROP_DEVICE_INDEX;
   src->audio_cap_filter = NULL;
   src->dshow_fakesink = NULL;
   src->media_filter = NULL;
@@ -209,7 +220,7 @@ gst_dshowaudiosrc_set_property (GObject * object, guint prop_id,
         src->device = NULL;
       }
       if (g_value_get_string (value)) {
-        src->device = g_strdup (g_value_get_string (value));
+        src->device = g_value_dup_string (value);;
       }
       break;
     }
@@ -220,8 +231,13 @@ gst_dshowaudiosrc_set_property (GObject * object, guint prop_id,
         src->device_name = NULL;
       }
       if (g_value_get_string (value)) {
-        src->device_name = g_strdup (g_value_get_string (value));
+        src->device_name = g_value_dup_string (value);;
       }
+      break;
+    }
+    case PROP_DEVICE_INDEX:
+    {
+      src->device_index = g_value_get_int (value);
       break;
     }
     default:
@@ -234,7 +250,25 @@ static void
 gst_dshowaudiosrc_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec)
 {
+  GstDshowAudioSrc *src;
 
+  g_return_if_fail (GST_IS_DSHOWAUDIOSRC (object));
+  src = GST_DSHOWAUDIOSRC (object);
+
+  switch (prop_id) {
+    case PROP_DEVICE:
+      g_value_set_string (value, src->device);
+      break;
+    case PROP_DEVICE_NAME:
+      g_value_set_string (value, src->device_name);
+      break;
+    case PROP_DEVICE_INDEX:
+      g_value_set_int (value, src->device_index);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
 }
 
 static GstCaps *
@@ -254,7 +288,7 @@ gst_dshowaudiosrc_get_caps (GstBaseSrc * basesrc, GstCaps * filter)
 
   src->device =
       gst_dshow_getdevice_from_devicename (&CLSID_AudioInputDeviceCategory,
-      &src->device_name);
+      &src->device_name, &src->device_index);
   if (!src->device) {
     GST_ERROR ("No audio device found.");
     return NULL;
@@ -473,7 +507,7 @@ gst_dshowaudiosrc_prepare (GstAudioSrc * asrc, GstAudioRingBufferSpec * spec)
     src->is_running = FALSE;
   }
 
-  /* search the negociated caps in our caps list to get its index and the corresponding mediatype */
+  /* search the negotiated caps in our caps list to get its index and the corresponding mediatype */
   if (gst_caps_is_subset (spec->caps, src->caps)) {
     guint i = 0;
     gint res = -1;

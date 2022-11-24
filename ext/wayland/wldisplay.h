@@ -24,8 +24,10 @@
 #include <gst/gst.h>
 #include <gst/video/video.h>
 #include <wayland-client.h>
+#include "xdg-shell-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
+#include "fullscreen-shell-unstable-v1-client-protocol.h"
 
 G_BEGIN_DECLS
 
@@ -45,13 +47,16 @@ struct _GstWlDisplay
 
   /* public objects */
   struct wl_display *display;
+  struct wl_display *display_wrapper;
   struct wl_event_queue *queue;
 
   /* globals */
   struct wl_registry *registry;
   struct wl_compositor *compositor;
   struct wl_subcompositor *subcompositor;
-  struct wl_shell *shell;
+  struct wl_shell *wl_shell;
+  struct xdg_wm_base *xdg_wm_base;
+  struct zwp_fullscreen_shell_v1 *fullscreen_shell;
   struct wl_shm *shm;
   struct wp_viewporter *viewporter;
   struct zwp_linux_dmabuf_v1 *dmabuf;
@@ -80,8 +85,10 @@ GstWlDisplay *gst_wl_display_new_existing (struct wl_display * display,
     gboolean take_ownership, GError ** error);
 
 /* see wlbuffer.c for explanation */
-void gst_wl_display_register_buffer (GstWlDisplay * self, gpointer buf);
-void gst_wl_display_unregister_buffer (GstWlDisplay * self, gpointer buf);
+void gst_wl_display_register_buffer (GstWlDisplay * self, gpointer gstmem,
+    gpointer wlbuffer);
+void gst_wl_display_unregister_buffer (GstWlDisplay * self, gpointer gstmem);
+gpointer gst_wl_display_lookup_buffer (GstWlDisplay * self, gpointer gstmem);
 
 gboolean gst_wl_display_check_format_for_shm (GstWlDisplay * display,
     GstVideoFormat format);

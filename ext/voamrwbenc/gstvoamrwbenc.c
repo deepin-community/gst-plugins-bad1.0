@@ -23,7 +23,7 @@
  * @see_also: #GstAmrWbDec, #GstAmrWbParse
  *
  * AMR wideband encoder based on the
- * <ulink url="http://www.penguin.cz/~utx/amr">reference codec implementation</ulink>.
+ * [reference codec implementation](http://www.penguin.cz/~utx/amr).
  *
  * ## Example launch line
  * |[
@@ -183,6 +183,8 @@ gst_voamrwbenc_class_init (GstVoAmrWbEncClass * klass)
 
   GST_DEBUG_CATEGORY_INIT (gst_voamrwbenc_debug, "voamrwbenc", 0,
       "voamrwb encoder");
+
+  gst_type_mark_as_plugin_api (GST_VOAMRWBENC_BANDMODE_TYPE, 0);
 }
 
 static void

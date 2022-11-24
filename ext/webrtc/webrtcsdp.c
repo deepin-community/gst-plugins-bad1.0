@@ -24,9 +24,9 @@
 #include "webrtcsdp.h"
 
 #include "utils.h"
-#include "gstwebrtcbin.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 #define IS_EMPTY_SDP_ATTRIBUTE(val) (val == NULL || g_strcmp0(val, "") == 0)
 
@@ -44,10 +44,9 @@ _sdp_source_to_string (SDPSource source)
 }
 
 static gboolean
-_check_valid_state_for_sdp_change (GstWebRTCBin * webrtc, SDPSource source,
-    GstWebRTCSDPType type, GError ** error)
+_check_valid_state_for_sdp_change (GstWebRTCSignalingState state,
+    SDPSource source, GstWebRTCSDPType type, GError ** error)
 {
-  GstWebRTCSignalingState state = webrtc->signaling_state;
 #define STATE(val) GST_WEBRTC_SIGNALING_STATE_ ## val
 #define TYPE(val) GST_WEBRTC_SDP_TYPE_ ## val
 
@@ -82,14 +81,14 @@ _check_valid_state_for_sdp_change (GstWebRTCBin * webrtc, SDPSource source,
     return TRUE;
 
   {
-    gchar *state = _enum_value_to_string (GST_TYPE_WEBRTC_SIGNALING_STATE,
-        webrtc->signaling_state);
+    gchar *state_str = _enum_value_to_string (GST_TYPE_WEBRTC_SIGNALING_STATE,
+        state);
     gchar *type_str = _enum_value_to_string (GST_TYPE_WEBRTC_SDP_TYPE, type);
     g_set_error (error, GST_WEBRTC_BIN_ERROR,
         GST_WEBRTC_BIN_ERROR_INVALID_STATE,
-        "Not in the correct state (%s) for setting %s %s description", state,
-        _sdp_source_to_string (source), type_str);
-    g_free (state);
+        "Not in the correct state (%s) for setting %s %s description",
+        state_str, _sdp_source_to_string (source), type_str);
+    g_free (state_str);
     g_free (type_str);
   }
 
@@ -100,8 +99,8 @@ _check_valid_state_for_sdp_change (GstWebRTCBin * webrtc, SDPSource source,
 }
 
 static gboolean
-_check_sdp_crypto (GstWebRTCBin * webrtc, SDPSource source,
-    GstWebRTCSessionDescription * sdp, GError ** error)
+_check_sdp_crypto (SDPSource source, GstWebRTCSessionDescription * sdp,
+    GError ** error)
 {
   const gchar *message_fingerprint, *fingerprint;
   const GstSDPKey *key;
@@ -145,9 +144,8 @@ _check_sdp_crypto (GstWebRTCBin * webrtc, SDPSource source,
   return TRUE;
 }
 
-#if 0
-static gboolean
-_session_has_attribute_key (const GstSDPMessage * msg, const gchar * key)
+gboolean
+_message_has_attribute_key (const GstSDPMessage * msg, const gchar * key)
 {
   int i;
   for (i = 0; i < gst_sdp_message_attributes_len (msg); i++) {
@@ -160,6 +158,7 @@ _session_has_attribute_key (const GstSDPMessage * msg, const gchar * key)
   return FALSE;
 }
 
+#if 0
 static gboolean
 _session_has_attribute_key_value (const GstSDPMessage * msg, const gchar * key,
     const gchar * value)
@@ -213,7 +212,7 @@ _media_has_mid (const GstSDPMedia * media, guint media_idx, GError ** error)
   return TRUE;
 }
 
-static const gchar *
+const gchar *
 _media_get_ice_ufrag (const GstSDPMessage * msg, guint media_idx)
 {
   const gchar *ice_ufrag;
@@ -228,7 +227,7 @@ _media_get_ice_ufrag (const GstSDPMessage * msg, guint media_idx)
   return ice_ufrag;
 }
 
-static const gchar *
+const gchar *
 _media_get_ice_pwd (const GstSDPMessage * msg, guint media_idx)
 {
   const gchar *ice_pwd;
@@ -278,46 +277,35 @@ _media_has_dtls_id (const GstSDPMedia * media, guint media_idx, GError ** error)
 }
 #endif
 gboolean
-validate_sdp (GstWebRTCBin * webrtc, SDPSource source,
+validate_sdp (GstWebRTCSignalingState state, SDPSource source,
     GstWebRTCSessionDescription * sdp, GError ** error)
 {
-#if 0
   const gchar *group, *bundle_ice_ufrag = NULL, *bundle_ice_pwd = NULL;
   gchar **group_members = NULL;
   gboolean is_bundle = FALSE;
-#endif
   int i;
 
-  if (!_check_valid_state_for_sdp_change (webrtc, source, sdp->type, error))
+  if (!_check_valid_state_for_sdp_change (state, source, sdp->type, error))
     return FALSE;
-  if (!_check_sdp_crypto (webrtc, source, sdp, error))
+  if (!_check_sdp_crypto (source, sdp, error))
     return FALSE;
 /* not explicitly required
   if (ICE && !_check_trickle_ice (sdp->sdp))
-    return FALSE;
+    return FALSE;*/
   group = gst_sdp_message_get_attribute_val (sdp->sdp, "group");
-  is_bundle = g_str_has_prefix (group, "BUNDLE");
+  is_bundle = group && g_str_has_prefix (group, "BUNDLE");
   if (is_bundle)
-    group_members = g_strsplit (&group[6], " ", -1);*/
+    group_members = g_strsplit (&group[6], " ", -1);
 
   for (i = 0; i < gst_sdp_message_medias_len (sdp->sdp); i++) {
     const GstSDPMedia *media = gst_sdp_message_get_media (sdp->sdp, i);
-#if 0
     const gchar *mid;
-    gboolean media_in_bundle = FALSE, first_media_in_bundle = FALSE;
-    gboolean bundle_only = FALSE;
-#endif
+    gboolean media_in_bundle = FALSE;
     if (!_media_has_mid (media, i, error))
       goto fail;
-#if 0
     mid = gst_sdp_media_get_attribute_val (media, "mid");
-    media_in_bundle = is_bundle && g_strv_contains (group_members, mid);
-    if (media_in_bundle)
-      bundle_only =
-          gst_sdp_media_get_attribute_val (media, "bundle-only") != NULL;
-    first_media_in_bundle = media_in_bundle
-        && g_strcmp0 (mid, group_members[0]) == 0;
-#endif
+    media_in_bundle = is_bundle
+        && g_strv_contains ((const gchar **) group_members, mid);
     if (!_media_get_ice_ufrag (sdp->sdp, i)) {
       g_set_error (error, GST_WEBRTC_BIN_ERROR, GST_WEBRTC_BIN_ERROR_BAD_SDP,
           "media %u is missing or contains an empty \'ice-ufrag\' attribute",
@@ -331,15 +319,14 @@ validate_sdp (GstWebRTCBin * webrtc, SDPSource source,
     }
     if (!_media_has_setup (media, i, error))
       goto fail;
-#if 0
-    /* check paramaters in bundle are the same */
+    /* check parameters in bundle are the same */
     if (media_in_bundle) {
       const gchar *ice_ufrag =
           gst_sdp_media_get_attribute_val (media, "ice-ufrag");
       const gchar *ice_pwd = gst_sdp_media_get_attribute_val (media, "ice-pwd");
       if (!bundle_ice_ufrag)
         bundle_ice_ufrag = ice_ufrag;
-      else if (!g_strcmp0 (bundle_ice_ufrag, ice_ufrag) != 0) {
+      else if (g_strcmp0 (bundle_ice_ufrag, ice_ufrag) != 0) {
         g_set_error (error, GST_WEBRTC_BIN_ERROR, GST_WEBRTC_BIN_ERROR_BAD_SDP,
             "media %u has different ice-ufrag values in bundle. "
             "%s != %s", i, bundle_ice_ufrag, ice_ufrag);
@@ -347,22 +334,21 @@ validate_sdp (GstWebRTCBin * webrtc, SDPSource source,
       }
       if (!bundle_ice_pwd) {
         bundle_ice_pwd = ice_pwd;
-      } else if (g_strcmp0 (bundle_ice_pwd, ice_pwd) == 0) {
+      } else if (g_strcmp0 (bundle_ice_pwd, ice_pwd) != 0) {
         g_set_error (error, GST_WEBRTC_BIN_ERROR, GST_WEBRTC_BIN_ERROR_BAD_SDP,
-            "media %u has different ice-ufrag values in bundle. "
-            "%s != %s", i, bundle_ice_ufrag, ice_ufrag);
+            "media %u has different ice-pwd values in bundle. "
+            "%s != %s", i, bundle_ice_pwd, ice_pwd);
         goto fail;
       }
     }
-#endif
   }
 
-//  g_strv_free (group_members);
+  g_strfreev (group_members);
 
   return TRUE;
 
 fail:
-//  g_strv_free (group_members);
+  g_strfreev (group_members);
   return FALSE;
 }
 
@@ -411,6 +397,8 @@ GstWebRTCRTPTransceiverDirection
 _intersect_answer_directions (GstWebRTCRTPTransceiverDirection offer,
     GstWebRTCRTPTransceiverDirection answer)
 {
+  if (offer == DIR (INACTIVE) || answer == DIR (INACTIVE))
+    return DIR (INACTIVE);
   if (offer == DIR (SENDONLY) && answer == DIR (SENDRECV))
     return DIR (RECVONLY);
   if (offer == DIR (SENDONLY) && answer == DIR (RECVONLY))
@@ -425,6 +413,10 @@ _intersect_answer_directions (GstWebRTCRTPTransceiverDirection offer,
     return DIR (SENDONLY);
   if (offer == DIR (SENDRECV) && answer == DIR (RECVONLY))
     return DIR (RECVONLY);
+  if (offer == DIR (RECVONLY) && answer == DIR (RECVONLY))
+    return DIR (INACTIVE);
+  if (offer == DIR (SENDONLY) && answer == DIR (SENDONLY))
+    return DIR (INACTIVE);
 
   return DIR (NONE);
 }
@@ -445,11 +437,13 @@ _media_replace_direction (GstSDPMedia * media,
 
     if (g_strcmp0 (attr->key, "sendonly") == 0
         || g_strcmp0 (attr->key, "sendrecv") == 0
-        || g_strcmp0 (attr->key, "recvonly") == 0) {
+        || g_strcmp0 (attr->key, "recvonly") == 0
+        || g_strcmp0 (attr->key, "inactive") == 0) {
       GstSDPAttribute new_attr = { 0, };
       GST_TRACE ("replace %s with %s", attr->key, dir_str);
       gst_sdp_attribute_set (&new_attr, dir_str, "");
       gst_sdp_media_replace_attribute (media, i, &new_attr);
+      g_free (dir_str);
       return;
     }
   }
@@ -713,4 +707,231 @@ _generate_ice_credentials (gchar ** ufrag, gchar ** password)
     (*password)[i] =
         ice_credential_chars[g_random_int_range (0,
             strlen (ice_credential_chars))];
+}
+
+int
+_get_sctp_port_from_media (const GstSDPMedia * media)
+{
+  int i;
+  const gchar *format;
+  gchar *endptr;
+
+  if (gst_sdp_media_formats_len (media) != 1) {
+    /* only exactly one format is supported */
+    return -1;
+  }
+
+  format = gst_sdp_media_get_format (media, 0);
+
+  if (g_strcmp0 (format, "webrtc-datachannel") == 0) {
+    /* draft-ietf-mmusic-sctp-sdp-21, e.g. Firefox 63 and later */
+
+    for (i = 0; i < gst_sdp_media_attributes_len (media); i++) {
+      const GstSDPAttribute *attr = gst_sdp_media_get_attribute (media, i);
+
+      if (g_strcmp0 (attr->key, "sctp-port") == 0) {
+        gint64 port = g_ascii_strtoll (attr->value, &endptr, 10);
+        if (endptr == attr->value) {
+          /* conversion error */
+          return -1;
+        }
+        return port;
+      }
+    }
+  } else {
+    /* draft-ietf-mmusic-sctp-sdp-05, e.g. Chrome as recent as 75 */
+    gint64 port = g_ascii_strtoll (format, &endptr, 10);
+    if (endptr == format) {
+      /* conversion error */
+      return -1;
+    }
+
+    for (i = 0; i < gst_sdp_media_attributes_len (media); i++) {
+      const GstSDPAttribute *attr = gst_sdp_media_get_attribute (media, i);
+
+      if (g_strcmp0 (attr->key, "sctpmap") == 0 && atoi (attr->value) == port) {
+        /* a=sctpmap:5000 webrtc-datachannel 256 */
+        gchar **parts = g_strsplit (attr->value, " ", 3);
+        if (!parts[1] || g_strcmp0 (parts[1], "webrtc-datachannel") != 0) {
+          port = -1;
+        }
+        g_strfreev (parts);
+        return port;
+      }
+    }
+  }
+
+  return -1;
+}
+
+guint64
+_get_sctp_max_message_size_from_media (const GstSDPMedia * media)
+{
+  int i;
+
+  for (i = 0; i < gst_sdp_media_attributes_len (media); i++) {
+    const GstSDPAttribute *attr = gst_sdp_media_get_attribute (media, i);
+
+    if (g_strcmp0 (attr->key, "max-message-size") == 0)
+      return atoi (attr->value);
+  }
+
+  return 65536;
+}
+
+gboolean
+_message_media_is_datachannel (const GstSDPMessage * msg, guint media_id)
+{
+  const GstSDPMedia *media;
+
+  if (!msg)
+    return FALSE;
+
+  if (gst_sdp_message_medias_len (msg) <= media_id)
+    return FALSE;
+
+  media = gst_sdp_message_get_media (msg, media_id);
+
+  if (g_strcmp0 (gst_sdp_media_get_media (media), "application") != 0)
+    return FALSE;
+
+  if (gst_sdp_media_formats_len (media) != 1)
+    return FALSE;
+
+  if (g_strcmp0 (gst_sdp_media_get_format (media, 0),
+          "webrtc-datachannel") != 0)
+    return FALSE;
+
+  return TRUE;
+}
+
+guint
+_message_get_datachannel_index (const GstSDPMessage * msg)
+{
+  guint i;
+
+  for (i = 0; i < gst_sdp_message_medias_len (msg); i++) {
+    if (_message_media_is_datachannel (msg, i)) {
+      g_assert (i < G_MAXUINT);
+      return i;
+    }
+  }
+
+  return G_MAXUINT;
+}
+
+void
+_get_ice_credentials_from_sdp_media (const GstSDPMessage * sdp, guint media_idx,
+    gchar ** ufrag, gchar ** pwd)
+{
+  int i;
+
+  *ufrag = NULL;
+  *pwd = NULL;
+
+  {
+    /* search in the corresponding media section */
+    const GstSDPMedia *media = gst_sdp_message_get_media (sdp, media_idx);
+    const gchar *tmp_ufrag =
+        gst_sdp_media_get_attribute_val (media, "ice-ufrag");
+    const gchar *tmp_pwd = gst_sdp_media_get_attribute_val (media, "ice-pwd");
+    if (tmp_ufrag && tmp_pwd) {
+      *ufrag = g_strdup (tmp_ufrag);
+      *pwd = g_strdup (tmp_pwd);
+      return;
+    }
+  }
+
+  /* then in the sdp message itself */
+  for (i = 0; i < gst_sdp_message_attributes_len (sdp); i++) {
+    const GstSDPAttribute *attr = gst_sdp_message_get_attribute (sdp, i);
+
+    if (g_strcmp0 (attr->key, "ice-ufrag") == 0) {
+      g_assert (!*ufrag);
+      *ufrag = g_strdup (attr->value);
+    } else if (g_strcmp0 (attr->key, "ice-pwd") == 0) {
+      g_assert (!*pwd);
+      *pwd = g_strdup (attr->value);
+    }
+  }
+  if (!*ufrag && !*pwd) {
+    /* Check in the medias themselves. According to JSEP, they should be
+     * identical FIXME: only for bundle-d streams */
+    for (i = 0; i < gst_sdp_message_medias_len (sdp); i++) {
+      const GstSDPMedia *media = gst_sdp_message_get_media (sdp, i);
+      const gchar *tmp_ufrag =
+          gst_sdp_media_get_attribute_val (media, "ice-ufrag");
+      const gchar *tmp_pwd = gst_sdp_media_get_attribute_val (media, "ice-pwd");
+      if (tmp_ufrag && tmp_pwd) {
+        *ufrag = g_strdup (tmp_ufrag);
+        *pwd = g_strdup (tmp_pwd);
+        break;
+      }
+    }
+  }
+}
+
+gboolean
+_parse_bundle (GstSDPMessage * sdp, GStrv * bundled)
+{
+  const gchar *group;
+  gboolean ret = FALSE;
+
+  group = gst_sdp_message_get_attribute_val (sdp, "group");
+
+  if (group && g_str_has_prefix (group, "BUNDLE ")) {
+    *bundled = g_strsplit (group + strlen ("BUNDLE "), " ", 0);
+
+    if (!(*bundled)[0]) {
+      GST_ERROR ("Invalid format for BUNDLE group, expected at least "
+          "one mid (%s)", group);
+      g_strfreev (*bundled);
+      *bundled = NULL;
+      goto done;
+    }
+  } else {
+    ret = TRUE;
+    goto done;
+  }
+
+  ret = TRUE;
+
+done:
+  return ret;
+}
+
+gboolean
+_get_bundle_index (GstSDPMessage * sdp, GStrv bundled, guint * idx)
+{
+  gboolean ret = FALSE;
+  guint i;
+
+  for (i = 0; i < gst_sdp_message_medias_len (sdp); i++) {
+    const GstSDPMedia *media = gst_sdp_message_get_media (sdp, i);
+    const gchar *mid = gst_sdp_media_get_attribute_val (media, "mid");
+
+    if (!g_strcmp0 (mid, bundled[0])) {
+      *idx = i;
+      ret = TRUE;
+      break;
+    }
+  }
+
+  return ret;
+}
+
+gboolean
+_media_is_bundle_only (const GstSDPMedia * media)
+{
+  int i;
+
+  for (i = 0; i < gst_sdp_media_attributes_len (media); i++) {
+    const GstSDPAttribute *attr = gst_sdp_media_get_attribute (media, i);
+
+    if (g_strcmp0 (attr->key, "bundle-only") == 0) {
+      return TRUE;
+    }
+  }
+
+  return FALSE;
 }

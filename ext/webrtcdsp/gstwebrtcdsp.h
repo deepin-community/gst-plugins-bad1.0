@@ -28,6 +28,11 @@
 #include <gst/base/gstbasetransform.h>
 #include <gst/audio/audio.h>
 
+#ifndef GST_USE_UNSTABLE_API
+#define GST_USE_UNSTABLE_API
+#endif
+#include <gst/audio/gstplanaraudioadapter.h>
+
 G_BEGIN_DECLS
 
 #define GST_TYPE_WEBRTC_DSP            (gst_webrtc_dsp_get_type())

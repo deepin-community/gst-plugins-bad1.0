@@ -25,10 +25,11 @@ install_headers(gstplayer_headers, subdir : 'gstreamer-' + api_version + '/gst/p
 
 gstplayer = library('gstplayer-' + api_version,
   gstplayer_sources,
-  c_args : gst_plugins_bad_args,
+  c_args : gst_plugins_bad_args + ['-DBUILDING_GST_PLAYER'],
   include_directories : [configinc, libsinc],
   version : libversion,
   soversion : soversion,
+  darwin_versions : osxversion,
   install : true,
   dependencies : [gstbase_dep, gstvideo_dep, gstaudio_dep,
                   gsttag_dep, gstpbutils_dep],

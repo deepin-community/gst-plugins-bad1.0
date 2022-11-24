@@ -38,7 +38,7 @@ GType gst_webrtc_session_description_get_type (void);
  * @type: the #GstWebRTCSDPType of the description
  * @sdp: the #GstSDPMessage of the description
  *
- * See <ulink url="https://www.w3.org/TR/webrtc/#rtcsessiondescription-class">https://www.w3.org/TR/webrtc/#rtcsessiondescription-class</ulink>
+ * See <https://www.w3.org/TR/webrtc/#rtcsessiondescription-class>
  */
 struct _GstWebRTCSessionDescription
 {
@@ -52,6 +52,9 @@ GST_WEBRTC_API
 GstWebRTCSessionDescription *       gst_webrtc_session_description_copy     (const GstWebRTCSessionDescription * src);
 GST_WEBRTC_API
 void                                gst_webrtc_session_description_free     (GstWebRTCSessionDescription * desc);
+
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(GstWebRTCSessionDescription, gst_webrtc_session_description_free)
 
 G_END_DECLS
 

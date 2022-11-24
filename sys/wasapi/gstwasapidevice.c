@@ -48,7 +48,7 @@ gst_wasapi_device_provider_class_init (GstWasapiDeviceProviderClass * klass)
 static void
 gst_wasapi_device_provider_init (GstWasapiDeviceProvider * provider)
 {
-  CoInitialize (NULL);
+  CoInitializeEx (NULL, COINIT_MULTITHREADED);
 }
 
 static void
@@ -63,7 +63,7 @@ gst_wasapi_device_provider_probe (GstDeviceProvider * provider)
   GstWasapiDeviceProvider *self = GST_WASAPI_DEVICE_PROVIDER (provider);
   GList *devices = NULL;
 
-  if (!gst_wasapi_util_get_devices (GST_ELEMENT (self), TRUE, &devices))
+  if (!gst_wasapi_util_get_devices (GST_OBJECT (self), TRUE, &devices))
     GST_ERROR_OBJECT (self, "Failed to enumerate devices");
 
   return devices;

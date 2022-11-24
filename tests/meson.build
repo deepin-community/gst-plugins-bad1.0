@@ -1,6 +1,7 @@
-# FIXME: make check work on windows
-if host_machine.system() != 'windows'
+if not get_option('tests').disabled() and gstcheck_dep.found()
   subdir('check')
+  subdir('icles')
 endif
-
-subdir('examples')
+if not get_option('examples').disabled()
+  subdir('examples')
+endif

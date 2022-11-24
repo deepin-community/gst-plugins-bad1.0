@@ -365,6 +365,12 @@ gst_openh264enc_class_init (GstOpenh264EncClass * klass)
       g_param_spec_enum ("complexity", "Complexity / quality / speed tradeoff",
           "Complexity", GST_TYPE_OPENH264ENC_COMPLEXITY, DEFAULT_COMPLEXITY,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  gst_type_mark_as_plugin_api (GST_TYPE_OPENH264ENC_COMPLEXITY, (GstPluginAPIFlags) 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_OPENH264ENC_DEBLOCKING_MODE, (GstPluginAPIFlags) 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_OPENH264ENC_SLICE_MODE, (GstPluginAPIFlags) 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_RC_MODES, (GstPluginAPIFlags) 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_USAGE_TYPE, (GstPluginAPIFlags) 0);
 }
 
 static void
@@ -739,7 +745,7 @@ gst_openh264enc_set_format (GstVideoEncoder * encoder,
   enc_params.bEnableSceneChangeDetect = openh264enc->scene_change_detection;
   enc_params.bEnableFrameSkip = openh264enc->enable_frame_skip;
   enc_params.bEnableLongTermReference = 0;
-#if OPENH264_MINOR >= 4
+#if (OPENH264_MAJOR > 1 || (OPENH264_MAJOR == 1 && OPENH264_MINOR >= 4))
   enc_params.eSpsPpsIdStrategy = CONSTANT_ID;
 #else
   enc_params.bEnableSpsPpsIdAddition = 0;
@@ -828,7 +834,6 @@ gst_openh264enc_handle_frame (GstVideoEncoder * encoder,
   gint ret;
   SFrameBSInfo frame_info;
   gfloat fps;
-  GstMapInfo map;
   gint i, j;
   gsize buf_length = 0;
 
@@ -971,7 +976,7 @@ gst_openh264enc_handle_frame (GstVideoEncoder * encoder,
 
   frame->output_buffer =
       gst_video_encoder_allocate_output_buffer (encoder, buf_length);
-  gst_buffer_map (frame->output_buffer, &map, GST_MAP_WRITE);
+
 
   buf_length = 0;
   for (i = 0; i < frame_info.iLayerNum; i++) {
@@ -979,11 +984,9 @@ gst_openh264enc_handle_frame (GstVideoEncoder * encoder,
     for (j = 0; j < frame_info.sLayerInfo[i].iNalCount; j++) {
       layer_size += frame_info.sLayerInfo[i].pNalLengthInByte[j];
     }
-    memcpy (map.data + buf_length, frame_info.sLayerInfo[i].pBsBuf, layer_size);
+    gst_buffer_fill (frame->output_buffer, buf_length, frame_info.sLayerInfo[i].pBsBuf, layer_size);
     buf_length += layer_size;
   }
-
-  gst_buffer_unmap (frame->output_buffer, &map);
 
   GST_LOG_OBJECT (openh264enc, "openh264 picture %scoded OK!",
       (ret != cmResultSuccess) ? "NOT " : "");

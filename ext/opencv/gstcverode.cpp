@@ -46,12 +46,11 @@
  *
  * Erodes the image with the cvErode OpenCV function.
  *
- * <refsect2>
- * <title>Example launch line</title>
+ * Example launch line
+ *
  * |[
  * gst-launch-1.0 videotestsrc ! cverode ! videoconvert ! autovideosink
  * ]|
- * </refsect2>
  */
 
 #ifdef HAVE_CONFIG_H
@@ -59,7 +58,8 @@
 #endif
 
 #include "gstcverode.h"
-#include <opencv2/imgproc/imgproc_c.h>
+#include <opencv2/imgproc.hpp>
+
 
 GST_DEBUG_CATEGORY_STATIC (gst_cv_erode_debug);
 #define GST_CAT_DEFAULT gst_cv_erode_debug
@@ -67,7 +67,7 @@ GST_DEBUG_CATEGORY_STATIC (gst_cv_erode_debug);
 G_DEFINE_TYPE (GstCvErode, gst_cv_erode, GST_TYPE_CV_DILATE_ERODE);
 
 static GstFlowReturn gst_cv_erode_transform_ip (GstOpencvVideoFilter *
-    filter, GstBuffer * buf, IplImage * img);
+    filter, GstBuffer * buf, cv::Mat img);
 
 /* initialize the cverode's class */
 static void
@@ -88,7 +88,7 @@ gst_cv_erode_class_init (GstCvErodeClass * klass)
 
 /* initialize the new element
  * instantiate pads and add them to element
- * set pad calback functions
+ * set pad callback functions
  * initialize instance structure
  */
 static void
@@ -98,11 +98,11 @@ gst_cv_erode_init (GstCvErode * filter)
 
 static GstFlowReturn
 gst_cv_erode_transform_ip (GstOpencvVideoFilter * base, GstBuffer * buf,
-    IplImage * img)
+    cv::Mat img)
 {
   GstCvDilateErode *filter = GST_CV_DILATE_ERODE (base);
 
-  cvErode (img, img, NULL, filter->iterations);
+  cv::erode (img, img, cv::Mat (), cv::Point (-1, -1), filter->iterations);
 
   return GST_FLOW_OK;
 }

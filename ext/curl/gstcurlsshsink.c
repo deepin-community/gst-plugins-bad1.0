@@ -21,7 +21,6 @@
  * SECTION:element-curlsshsink
  * @title: curlsshsink
  * @short_description: sink that uploads data to a server using libcurl
- * @see_also:
  *
  * This is a network sink that uses libcurl.
  *
@@ -121,8 +120,6 @@ gst_curl_ssh_sink_class_init (GstCurlSshSinkClass * klass)
   GST_DEBUG_CATEGORY_INIT (gst_curl_ssh_sink_debug, "curlsshsink", 0,
       "curl ssh sink element");
 
-  GST_DEBUG_OBJECT (klass, "class_init");
-
   gst_element_class_set_static_metadata (element_class,
       "Curl SSH sink", "Sink/Network",
       "Upload data over SSH/SFTP using libcurl", "Sorin L. <sorin@axis.com>");
@@ -175,6 +172,9 @@ gst_curl_ssh_sink_class_init (GstCurlSshSinkClass * klass)
           "SSH accept unknown host",
           "Accept an unknown remote public host key",
           FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  gst_type_mark_as_plugin_api (GST_TYPE_CURL_SSH_SINK_AUTH_TYPE, 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_CURL_SSH_SINK, 0);
 }
 
 static void

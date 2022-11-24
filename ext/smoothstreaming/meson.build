@@ -5,7 +5,7 @@ smoothstreaming_sources = [
   'gstsmoothstreaming-plugin.c',
 ]
 
-xml28_dep = dependency('libxml-2.0', version : '>= 2.8', required : false)
+xml28_dep = dependency('libxml-2.0', version : '>= 2.8', required : get_option('smoothstreaming'))
 
 if xml28_dep.found()
   gstmss = library('gstsmoothstreaming',
@@ -18,4 +18,6 @@ if xml28_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstmss, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstmss]
 endif

@@ -10,6 +10,7 @@ vparse_sources = [
   'gstpngparse.c',
   'gstvc1parse.c',
   'gsth265parse.c',
+  'gstvideoparseutils.c',
   'gstjpeg2000parse.c',
 ]
 
@@ -21,3 +22,5 @@ gstvideoparsersbad = library('gstvideoparsersbad',
   install : true,
   install_dir : plugins_install_dir,
 )
+pkgconfig.generate(gstvideoparsersbad, install_dir : plugins_pkgconfig_install_dir)
+plugins += [gstvideoparsersbad]

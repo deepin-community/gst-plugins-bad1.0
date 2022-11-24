@@ -1,4 +1,4 @@
-chromaprint_dep = dependency('libchromaprint', required : false)
+chromaprint_dep = dependency('libchromaprint', required : get_option('chromaprint'))
 
 if chromaprint_dep.found()
   gstchromaprint = library('gstchromaprint',
@@ -9,4 +9,6 @@ if chromaprint_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstchromaprint, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstchromaprint]
 endif

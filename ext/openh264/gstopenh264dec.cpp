@@ -28,10 +28,20 @@
 #endif
 
 #include "gstopenh264dec.h"
+
+#include <wels/codec_ver.h>
+#define OPENH264_VERSION_CHECK(maj,min) ((OPENH264_MAJOR > (maj)) || (OPENH264_MAJOR == (maj) && OPENH264_MINOR >= (min)))
+
 #include <gst/gst.h>
 #include <gst/video/video.h>
 #include <gst/video/gstvideodecoder.h>
 #include <string.h>             /* for memcpy */
+
+#if OPENH264_VERSION_CHECK (1,9)
+#define HAVE_OPENH264_MAIN_PROFILE 1
+#else
+#define HAVE_OPENH264_MAIN_PROFILE 0
+#endif
 
 GST_DEBUG_CATEGORY_STATIC (gst_openh264dec_debug_category);
 #define GST_CAT_DEFAULT gst_openh264dec_debug_category
@@ -50,15 +60,21 @@ static GstFlowReturn gst_openh264dec_handle_frame (GstVideoDecoder * decoder,
 static gboolean gst_openh264dec_decide_allocation (GstVideoDecoder * decoder,
     GstQuery * query);
 
-/* pad templates */
+#if HAVE_OPENH264_MAIN_PROFILE
+#define SUPPORTED_PROFILE_STR "profile=(string){ constrained-baseline, baseline, main, high }"
+#else
+#define SUPPORTED_PROFILE_STR "profile=(string){ constrained-baseline, baseline }"
+#endif
 
+/* pad templates */
 static GstStaticPadTemplate gst_openh264dec_sink_template =
 GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS
     ("video/x-h264, stream-format=(string)byte-stream, alignment=(string)au, "
-        "profile=(string){ constrained-baseline, baseline}"));
+      SUPPORTED_PROFILE_STR
+    ));
 
 static GstStaticPadTemplate gst_openh264dec_src_template =
 GST_STATIC_PAD_TEMPLATE ("src",
@@ -109,6 +125,28 @@ gst_openh264dec_init (GstOpenh264Dec * openh264dec)
   gst_video_decoder_set_needs_format (GST_VIDEO_DECODER (openh264dec), TRUE);
 }
 
+#ifndef GST_DISABLE_GST_DEBUG
+static void
+openh264_trace_cb (void *ctx, int level, const char *string)
+{
+  GObject *o = G_OBJECT (ctx);
+  GstDebugLevel lvl = GST_LEVEL_WARNING;
+
+  if (level >= WELS_LOG_DETAIL)
+    lvl = GST_LEVEL_LOG;
+  else if (level >= WELS_LOG_DEBUG)
+    lvl = GST_LEVEL_DEBUG;
+  else if (level >= WELS_LOG_INFO)
+    lvl = GST_LEVEL_INFO;
+  else if (level >= WELS_LOG_WARNING)
+    lvl = GST_LEVEL_WARNING;
+  else if (level >= WELS_LOG_ERROR)
+    lvl = GST_LEVEL_ERROR;
+
+  gst_debug_log (GST_CAT_DEFAULT, lvl, "", "", 0, o, "%s", string);
+}
+#endif
+
 static gboolean
 gst_openh264dec_start (GstVideoDecoder * decoder)
 {
@@ -122,6 +160,19 @@ gst_openh264dec_start (GstVideoDecoder * decoder)
     openh264dec->decoder = NULL;
   }
   WelsCreateDecoder (&(openh264dec->decoder));
+
+#ifndef GST_DISABLE_GST_DEBUG
+  {
+    int log_level = WELS_LOG_WARNING;
+    WelsTraceCallback log_cb = openh264_trace_cb;
+
+    openh264dec->decoder->SetOption (DECODER_OPTION_TRACE_LEVEL, &log_level);
+    openh264dec->decoder->SetOption (DECODER_OPTION_TRACE_CALLBACK,
+        (void *) &log_cb);
+    openh264dec->decoder->SetOption (DECODER_OPTION_TRACE_CALLBACK_CONTEXT,
+        (void *) &decoder);
+  }
+#endif
 
   dec_param.uiTargetDqLayer = 255;
   dec_param.eEcActiveIdc = ERROR_CON_FRAME_COPY;
@@ -203,63 +254,90 @@ gst_openh264dec_handle_frame (GstVideoDecoder * decoder,
   guint8 *p;
   guint row_stride, component_width, component_height, src_width, row;
 
-  if (frame) {
+  if (frame == NULL) {
+#if OPENH264_VERSION_CHECK (1,9)
+    /* Called with no videoframe for EOS logic. Drain out */
+    int end_of_stream = 1;
+    memset (&dst_buf_info, 0, sizeof (SBufferInfo));
+
+    openh264dec->decoder->SetOption (DECODER_OPTION_END_OF_STREAM,
+        &end_of_stream);
+    ret = openh264dec->decoder->FlushFrame (yuvdata, &dst_buf_info);
+
+    if (ret != dsErrorFree || dst_buf_info.iBufferStatus != 1) {
+      GST_DEBUG_OBJECT (decoder, "No more frames to retrieve at EOS");
+      return GST_FLOW_EOS;
+    }
+#else
+    return GST_FLOW_EOS;
+#endif
+  } else {
     if (!gst_buffer_map (frame->input_buffer, &map_info, GST_MAP_READ)) {
       GST_ERROR_OBJECT (openh264dec, "Cannot map input buffer!");
       gst_video_codec_frame_unref (frame);
       return GST_FLOW_ERROR;
     }
 
-    GST_LOG_OBJECT (openh264dec, "handle frame, %d",
+    GST_LOG_OBJECT (openh264dec, "handle frame, 1st NAL type %d",
         map_info.size > 4 ? map_info.data[4] & 0x1f : -1);
 
     memset (&dst_buf_info, 0, sizeof (SBufferInfo));
+    /* Use the unsigned long long OpenH264 timestamp to store the system_frame_number
+     * to track the original frame through any OpenH264 reordering */
+    dst_buf_info.uiInBsTimeStamp = frame->system_frame_number;
+
+    GST_LOG_OBJECT (decoder, "Submitting frame with PTS %" GST_TIME_FORMAT
+        " and frame ref %" G_GUINT64_FORMAT,
+        GST_TIME_ARGS (frame->pts), (guint64) frame->system_frame_number);
+
     ret =
-        openh264dec->decoder->DecodeFrame2 (map_info.data, map_info.size,
+        openh264dec->decoder->DecodeFrameNoDelay (map_info.data, map_info.size,
         yuvdata, &dst_buf_info);
-
-    if (ret == dsNoParamSets) {
-      GST_DEBUG_OBJECT (openh264dec, "Requesting a key unit");
-      gst_pad_push_event (GST_VIDEO_DECODER_SINK_PAD (decoder),
-          gst_video_event_new_upstream_force_key_unit (GST_CLOCK_TIME_NONE,
-              FALSE, 0));
-    }
-
-    if (ret != dsErrorFree && ret != dsNoParamSets) {
-      GST_DEBUG_OBJECT (openh264dec, "Requesting a key unit");
-      gst_pad_push_event (GST_VIDEO_DECODER_SINK_PAD (decoder),
-          gst_video_event_new_upstream_force_key_unit (GST_CLOCK_TIME_NONE,
-              FALSE, 0));
-      GST_LOG_OBJECT (openh264dec, "error decoding nal, return code: %d", ret);
-    }
-
     gst_buffer_unmap (frame->input_buffer, &map_info);
-    if (ret != dsErrorFree)
-      return gst_video_decoder_drop_frame (decoder, frame);
+
+    if (ret != dsErrorFree) {
+      /* Request a key unit from upstream */
+      GST_DEBUG_OBJECT (openh264dec, "Requesting a key unit");
+      gst_pad_push_event (GST_VIDEO_DECODER_SINK_PAD (decoder),
+          gst_video_event_new_upstream_force_key_unit (GST_CLOCK_TIME_NONE,
+              FALSE, 0));
+
+      GST_LOG_OBJECT (openh264dec, "error decoding nal, return code: %d", ret);
+      gst_video_codec_frame_unref (frame);
+
+      /* Get back the frame that was reported as errored */
+      frame =
+          gst_video_decoder_get_frame (decoder, dst_buf_info.uiOutYuvTimeStamp);
+      if (frame) {
+        GST_LOG_OBJECT (decoder,
+            "Dropping errored frame ref %" G_GUINT64_FORMAT,
+            (guint64) dst_buf_info.uiOutYuvTimeStamp);
+        return gst_video_decoder_drop_frame (decoder, frame);
+      }
+      return GST_FLOW_OK;
+    }
 
     gst_video_codec_frame_unref (frame);
     frame = NULL;
-  } else {
-    memset (&dst_buf_info, 0, sizeof (SBufferInfo));
-    ret = openh264dec->decoder->DecodeFrame2 (NULL, 0, yuvdata, &dst_buf_info);
-    if (ret != dsErrorFree) {
-      return GST_FLOW_EOS;
+
+    /* No output available yet */
+    if (dst_buf_info.iBufferStatus != 1) {
+      GST_LOG_OBJECT (decoder, "No buffer decoded yet");
+      return GST_FLOW_OK;
     }
   }
 
-  /* FIXME: openh264 has no way for us to get a connection
-   * between the input and output frames, we just have to
-   * guess based on the input. Fortunately openh264 can
-   * only do baseline profile. */
-  frame = gst_video_decoder_get_oldest_frame (decoder);
-  if (!frame) {
-    /* Can only happen in finish() */
-    return GST_FLOW_EOS;
-  }
+  GST_LOG_OBJECT (decoder, "Got back frame with frame ref %" G_GUINT64_FORMAT,
+      (guint64) dst_buf_info.uiOutYuvTimeStamp);
 
-  /* No output available yet */
-  if (dst_buf_info.iBufferStatus != 1) {
-    gst_video_codec_frame_unref (frame);
+  /* OpenH264 lets us pass an int reference through
+   * so we can retrieve the input frame now */
+  frame = gst_video_decoder_get_frame (decoder, dst_buf_info.uiOutYuvTimeStamp);
+  if (!frame) {
+    /* Where did our frame go? This is a reference tracking error. */
+    GST_WARNING_OBJECT (decoder,
+        "Failed to look up frame ref %" G_GUINT64_FORMAT,
+        (guint64) dst_buf_info.uiOutYuvTimeStamp);
     return GST_FLOW_OK;
   }
 

@@ -1,90 +1,81 @@
 Source: gst-plugins-bad1.0
 Section: libs
-Priority: extra
-Maintainer: Deepin Developer <deepin-dev@deepin.org>
-Uploaders: Deepin Packages Builder <packages@deepin.org>
-Build-Depends: autoconf (>= 2.69),
-               automake (>= 1.14),
-               autopoint (>= 0.17),
-               autotools-dev,
-               cdbs (>= 0.4.93),
-               debhelper (>= 9),
-               dh-autoreconf,
+Priority: optional
+Maintainer: Maintainers of GStreamer packages <gst-plugins-bad1.0@packages.debian.org>
+Uploaders: Sebastian Dröge <slomo@debian.org>,
+           Sjoerd Simons <sjoerd@debian.org>
+Build-Depends: debhelper,
+               debhelper-compat (= 13),
                dpkg-dev (>= 1.15.1),
+               pkg-config (>= 0.11.0),
+               meson (>= 0.48),
+               xvfb,
+               xauth,
+               libglib2.0-dev (>= 2.44),
+               libgstreamer1.0-dev (>= 1.18.0),
+               libgstreamer-plugins-base1.0-dev (>= 1.18.0),
+               gstreamer1.0-plugins-base (>= 1.18.0),
+               gstreamer1.0-plugins-good (>= 1.18.0),
+               liborc-0.4-dev (>= 1:0.4.24),
                flite-dev,
-               gir1.2-freedesktop,
-               gir1.2-glib-2.0,
-               gir1.2-gst-plugins-base-1.0,
-               gir1.2-gstreamer-1.0,
-               gobject-introspection (>= 0.9.12-4~),
-               libasound2-dev (>= 0.9.1) [linux-any],
-               libcdaudio-dev [linux-any],
-               libdc1394-22-dev (>= 2.0.0) [linux-any],
-               libgudev-1.0-dev (>= 143) [linux-any],
-               libusb-1.0-0-dev [linux-any],
-               libbluetooth-dev (>= 5) [linux-any],
-               libsbc-dev (>= 1.1) [linux-any],
-               libwayland-dev (>= 1.4.0) [linux-any],
-               libdrm-dev (>= 2.4.55) [linux-any],
-               wayland-protocols (>= 1.4) [linux-any],
-               libvulkan-dev [linux-any],
-               libgstreamer1.0-dev (>= 1.14.4),
-               gstreamer1.0-doc,
-               gstreamer1.0-plugins-base (>= 1.14.4),
-               gstreamer1.0-plugins-base-doc,
-               gtk-doc-tools (>= 1.12),
                ladspa-sdk,
+               libaom-dev,
                libass-dev (>= 0.10.4),
-               libbs2b-dev,
+               libbs2b-dev (>= 3.1.0),
                libbz2-dev,
                libcairo2-dev,
                libchromaprint-dev,
-               libcurl4-gnutls-dev (>= 7.35.0),
+               libcurl4-gnutls-dev (>= 7.55.0),
+               libssh2-1-dev (>= 1.4.3),
                libdca-dev,
-               libde265-dev,
+               libde265-dev (>= 0.9),
                libdvdnav-dev (>= 4.1.2) [!hurd-any],
                libexempi-dev,
                libexif-dev (>= 0.6.16),
                libfaad-dev (>= 2.7),
                libfluidsynth-dev (>= 1.0),
-               libgirepository1.0-dev (>= 0.9.12-4~),
                libglib2.0-dev (>= 2.40),
                libgme-dev,
                libgnutls28-dev (>= 2.11.3),
                libgsm1-dev,
-               libgstreamer-plugins-base1.0-dev (>= 1.14.4),
                libgtk-3-dev (>= 3.15.0),
                libiptcdata0-dev (>= 1.0.2),
                libkate-dev (>= 0.1.7),
                liblcms2-dev (>= 2.7),
-               liblilv-dev (>= 0.16),
-               libmjpegtools-dev,
+               liblilv-dev (>= 0.22),
+               libmjpegtools-dev (>= 2.0.0),
                libmms-dev (>= 0.4),
                libmodplug-dev,
                libmpcdec-dev,
+               libltc-dev (>= 1.1.4),
                libnice-dev (>= 0.1.14),
                libofa0-dev (>= 0.9.3),
                libopenal-dev (>= 1:1.14),
-               libopencv-dev (>= 2.3.0),
+               libopencv-dev (>= 3.0.0) [amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa hurd-i386 m68k powerpc ppc64 riscv64],
+               opencv-data [amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa hurd-i386 m68k powerpc ppc64 riscv64],
+               libwpebackend-fdo-1.0-dev (>= 1.6.0) [amd64 arm64 armel armhf hppa i386 mipsel ppc64 ppc64el s390x sparc64 x32],
+               libwpewebkit-1.0-dev (>= 2.28.0) [amd64 arm64 armel armhf hppa i386 mipsel ppc64 ppc64el s390x sparc64 x32],
                libopenexr-dev,
-               libopenjp2-7-dev (>= 2.1),
+               libopenjp2-7-dev (>= 2.2),
                libopenmpt-dev,
                libopus-dev (>= 0.9.4),
+               libopenni2-dev (>= 0.26) [linux-any],
                liborc-0.4-dev (>= 1:0.4.17),
+               libpango1.0-dev (>= 1.22),
                libpng-dev,
                librsvg2-dev (>= 2.36.2),
                librtmp-dev,
                libsndfile1-dev (>= 1.0.16),
                libsoundtouch-dev (>= 1.5.0),
-               libspandsp-dev,
+               libspandsp-dev (>= 0.0.6),
+               libsrt-gnutls-dev,
                libsrtp2-dev (>= 2.1),
-               libssl-dev,
-               libtool (>= 2.2.6),
+               libssl-dev (>= 1.0.1),
                libvo-aacenc-dev,
                libvo-amrwbenc-dev,
                libwebp-dev (>= 0.2.1),
                libwebrtc-audio-processing-dev (>= 0.2),
-               libwildmidi-dev (>= 0.2.3),
+               libwildmidi-dev (>= 0.4.2),
                libx11-dev,
                libx11-xcb-dev,
                libx265-dev,
@@ -92,19 +83,38 @@ Build-Depends: autoconf (>= 2.69),
                libxvidcore-dev,
                libzbar-dev (>= 0.9),
                libzvbi-dev,
-               nettle-dev,
-               pkg-config (>= 0.11.0)
-Standards-Version: 3.9.3
+               nettle-dev (>= 3),
+               libasound2-dev (>= 0.9.1) [linux-any],
+               libdc1394-dev (>= 2.2.5) [linux-any],
+               libgudev-1.0-dev (>= 143) [linux-any],
+               libusb-1.0-0-dev [linux-any],
+               libbluetooth-dev (>= 5) [linux-any],
+               libsbc-dev (>= 1.1) [linux-any],
+               libwayland-dev (>= 1.11.0) [linux-any],
+               libdrm-dev (>= 2.4.98) [linux-any],
+               libva-dev (>= 1.6) [linux-any],
+               wayland-protocols (>= 1.4) [linux-any],
+               libmfx-dev [amd64],
+               gobject-introspection (>= 0.9.12-4~),
+               libgirepository1.0-dev (>= 0.9.12-4~),
+               gir1.2-freedesktop,
+               gir1.2-glib-2.0,
+               gir1.2-gst-plugins-base-1.0,
+               gir1.2-gstreamer-1.0
+Standards-Version: 4.5.0
+Vcs-Git: https://salsa.debian.org/gstreamer-team/gst-plugins-bad1.0.git
+Vcs-Browser: https://salsa.debian.org/gstreamer-team/gst-plugins-bad1.0/
 Homepage: https://gstreamer.freedesktop.org
 
-Package: gstreamer1.0-plugins-bad-doc
-Architecture: all
-Multi-Arch: foreign
-Section: doc
-Depends: ${misc:Depends},
-         gstreamer1.0-doc,
-         gstreamer1.0-plugins-base-doc
-Description: GStreamer documentation for plugins from the "bad" set
+Package: gstreamer1.0-plugins-bad-apps
+Architecture: any
+Section: utils
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         ${perl:Depends},
+         gstreamer1.0-plugins-bad (= ${binary:Version})
+Conflicts: pitivi (<< 0.9999)
+Description: GStreamer helper programs from the "bad" set
  GStreamer is a streaming media framework, based on graphs of filters
  which operate on media data.  Applications using this library can do
  anything from real-time sound processing to playing videos, and just
@@ -112,13 +122,12 @@ Description: GStreamer documentation for plugins from the "bad" set
  that new data types or processing capabilities can be added simply by
  installing new plug-ins.
  .
- GStreamer Bad Plug-ins is a set of plug-ins that aren't up to par compared
- to the rest. They might be close to being good quality, but they're missing
- something - be it a good code review, some documentation, a set of tests, a
- real live maintainer, or some actual wide use.
- .
- This package contains the documentation for plugins from the "bad" set.
- 
+ This package contains helper programs from the "bad" set, a set of
+ plug-ins that aren't up to par compared to the rest. They might be
+ close to being good quality, but they're missing something - be it a
+ good code review, some documentation, a set of tests, a real live
+ maintainer, or some actual wide use.
+
 Package: gstreamer1.0-plugins-bad
 Architecture: any
 Multi-Arch: same
@@ -157,15 +166,16 @@ Description: GStreamer plugins from the "bad" set
  real live maintainer, or some actual wide use.
 
 Package: gstreamer1.0-opencv
-Architecture: any
+Architecture: amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa hurd-i386 m68k powerpc ppc64 riscv64
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
          gstreamer1.0-plugins-base,
          libgstreamer-plugins-bad1.0-0 (= ${binary:Version}),
          libgstreamer-opencv1.0-0 (= ${binary:Version}),
-Conflicts: gstreamer1.0-plugins-bad (<< 1.13.1)
-Replaces: gstreamer1.0-plugins-bad (<< 1.13.1)
+Conflicts: gstreamer1.0-plugins-bad (<< 1.17.2~)
+Replaces: gstreamer1.0-plugins-bad (<< 1.17.2~)
+Recommends: opencv-data
 XB-GStreamer-Version: ${gstreamer:Version}
 XB-GStreamer-Elements: ${gstreamer:Elements}
 XB-GStreamer-URI-Sources: ${gstreamer:URISources}
@@ -187,16 +197,17 @@ Description: GStreamer OpenCV plugins
  .
  This package contains the OpenCV plugins.
 
-Package: gstreamer1.0-plugins-bad-dbg
-Architecture: any
+Package: gstreamer1.0-wpe
+Architecture: amd64 arm64 armel armhf hppa i386 mipsel ppc64 ppc64el s390x sparc64 x32
 Multi-Arch: same
-Section: debug
-Priority: extra
-Depends: gstreamer1.0-plugins-bad (= ${binary:Version}),
-         ${misc:Depends}
-Replaces: gstreamer1.0-plugins-base-dbg (<< 0.11.94), gstreamer1.0-plugins-good (<< 1.1.2)
-Breaks: gstreamer1.0-plugins-base-dbg (<< 0.11.94), gstreamer1.0-plugins-good (<< 1.1.2)
-Description: GStreamer plugins from the "bad" set (debug symbols)
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+         gstreamer1.0-plugins-base,
+         libgstreamer-plugins-bad1.0-0 (= ${binary:Version}),
+XB-GStreamer-Version: ${gstreamer:Version}
+XB-GStreamer-Elements: ${gstreamer:Elements}
+XB-GStreamer-URI-Sources: ${gstreamer:URISources}
+Description: GStreamer WPEWebKit plugin
  GStreamer is a streaming media framework, based on graphs of filters
  which operate on media data.  Applications using this library can do
  anything from real-time sound processing to playing videos, and just
@@ -204,19 +215,22 @@ Description: GStreamer plugins from the "bad" set (debug symbols)
  that new data types or processing capabilities can be added simply by
  installing new plug-ins.
  .
- This package contains unstripped shared libraries. It is provided primarily
- to provide a backtrace with names in a debugger, this makes it somewhat
- easier to interpret core dumps. The libraries are installed in
- /usr/lib/debug and are automatically used by gdb.
+ GStreamer Bad Plug-ins is a set of plug-ins that aren't up to par compared
+ to the rest. They might be close to being good quality, but they're missing
+ something - be it a good code review, some documentation, a set of tests, a
+ real live maintainer, or some actual wide use.
+ .
+ This package contains the WPEWebKit plugin.
 
 Package: libgstreamer-plugins-bad1.0-0
 Architecture: any
 Section: libs
-Priority: extra
+Priority: optional
 Multi-Arch: same
 Pre-Depends: ${misc:Pre-Depends}
 Depends: ${misc:Depends},
          ${shlibs:Depends},
+Conflicts: pitivi (<< 0.9999)
 Description: GStreamer libraries from the "bad" set
  GStreamer is a streaming media framework, based on graphs of filters
  which operate on media data.  Applications using this library can do
@@ -234,9 +248,9 @@ Description: GStreamer libraries from the "bad" set
  is not guaranteed to be stable.
 
 Package: libgstreamer-opencv1.0-0
-Architecture: any
+Architecture: amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa hurd-i386 m68k powerpc ppc64 riscv64
 Section: libs
-Priority: extra
+Priority: optional
 Multi-Arch: same
 Pre-Depends: ${misc:Pre-Depends}
 Depends: ${misc:Depends},
@@ -262,14 +276,15 @@ Package: libgstreamer-plugins-bad1.0-dev
 Architecture: any
 Multi-Arch: same
 Section: libdevel
-Priority: extra
+Priority: optional
 Depends: ${misc:Depends},
          libgstreamer-plugins-bad1.0-0 (= ${binary:Version}),
-         libgstreamer-opencv1.0-0 (= ${binary:Version}),
+         libgstreamer-opencv1.0-0 (= ${binary:Version}) [amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa hurd-i386 m68k powerpc ppc64 riscv64],
          libgstreamer1.0-dev,
          libgstreamer-plugins-base1.0-dev,
          gir1.2-gst-plugins-bad-1.0 (= ${binary:Version}),
-         libopencv-dev (>= 2.3.0)
+         libopencv-dev (>= 2.3.0) [amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa hurd-i386 m68k powerpc ppc64 riscv64]
+Conflicts: pitivi (<< 0.9999)
 Description: GStreamer development files for libraries from the "bad" set
  GStreamer is a streaming media framework, based on graphs of filters
  which operate on media data.  Applications using this library can do
@@ -309,4 +324,3 @@ Description: GObject introspection data for the GStreamer libraries from the "ba
  This package contains introspection data for the GStreamer libraries from
  the "bad" set. It can be used by packages using the GIRepository format to
  generate dynamic bindings.
-

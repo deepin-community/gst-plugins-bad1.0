@@ -97,9 +97,9 @@ gint gst_msdk_context_get_fd (GstMsdkContext * context);
 typedef struct _GstMsdkAllocResponse GstMsdkAllocResponse;
 
 struct _GstMsdkAllocResponse {
-  mfxFrameAllocResponse *response;
+  gint refcount;
+  mfxFrameAllocResponse response;
   mfxFrameAllocRequest request;
-  mfxMemId *mem_ids;
   GList *surfaces_avail;
   GList *surfaces_used;
   GList *surfaces_locked;
@@ -141,6 +141,10 @@ gst_msdk_context_get_shared_async_depth (GstMsdkContext * context);
 
 void
 gst_msdk_context_add_shared_async_depth (GstMsdkContext * context, gint async_depth);
+
+void
+gst_msdk_context_set_frame_allocator (GstMsdkContext * context,
+    mfxFrameAllocator * allocator);
 
 G_END_DECLS
 

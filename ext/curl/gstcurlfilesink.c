@@ -21,7 +21,6 @@
  * SECTION:element-curlfilesink
  * @title: curlfilesink
  * @short_description: sink that uploads data to a server using libcurl
- * @see_also:
  *
  * This is a network sink that uses libcurl as a client to upload data to
  * a local or network drive.
@@ -105,7 +104,6 @@ gst_curl_file_sink_class_init (GstCurlFileSinkClass * klass)
 
   GST_DEBUG_CATEGORY_INIT (gst_curl_file_sink_debug, "curlfilesink", 0,
       "curl file sink element");
-  GST_DEBUG_OBJECT (klass, "class_init");
 
   gst_element_class_set_static_metadata (element_class,
       "Curl file sink",

@@ -25,9 +25,14 @@
 #include "utils.h"
 #include "webrtctransceiver.h"
 
+#define GST_CAT_DEFAULT webrtc_transceiver_debug
+GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
+
 #define webrtc_transceiver_parent_class parent_class
-G_DEFINE_TYPE (WebRTCTransceiver, webrtc_transceiver,
-    GST_TYPE_WEBRTC_RTP_TRANSCEIVER);
+G_DEFINE_TYPE_WITH_CODE (WebRTCTransceiver, webrtc_transceiver,
+    GST_TYPE_WEBRTC_RTP_TRANSCEIVER,
+    GST_DEBUG_CATEGORY_INIT (webrtc_transceiver_debug,
+        "webrtctransceiver", 0, "webrtctransceiver"););
 
 #define DEFAULT_FEC_TYPE GST_WEBRTC_FEC_TYPE_NONE
 #define DEFAULT_DO_NACK FALSE
@@ -67,6 +72,34 @@ webrtc_transceiver_set_transport (WebRTCTransceiver * trans,
   if (rtp_trans->receiver)
     gst_object_replace ((GstObject **) & rtp_trans->receiver->rtcp_transport,
         (GstObject *) stream->rtcp_transport);
+}
+
+GstWebRTCDTLSTransport *
+webrtc_transceiver_get_dtls_transport (GstWebRTCRTPTransceiver * trans)
+{
+  g_return_val_if_fail (WEBRTC_IS_TRANSCEIVER (trans), NULL);
+
+  if (trans->sender) {
+    return trans->sender->transport;
+  } else if (trans->receiver) {
+    return trans->receiver->transport;
+  }
+
+  return NULL;
+}
+
+GstWebRTCDTLSTransport *
+webrtc_transceiver_get_rtcp_dtls_transport (GstWebRTCRTPTransceiver * trans)
+{
+  g_return_val_if_fail (WEBRTC_IS_TRANSCEIVER (trans), NULL);
+
+  if (trans->sender) {
+    return trans->sender->rtcp_transport;
+  } else if (trans->receiver) {
+    return trans->receiver->rtcp_transport;
+  }
+
+  return NULL;
 }
 
 static void
@@ -137,6 +170,8 @@ webrtc_transceiver_finalize (GObject * object)
   if (trans->local_rtx_ssrc_map)
     gst_structure_free (trans->local_rtx_ssrc_map);
   trans->local_rtx_ssrc_map = NULL;
+
+  gst_caps_replace (&trans->last_configured_caps, NULL);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }

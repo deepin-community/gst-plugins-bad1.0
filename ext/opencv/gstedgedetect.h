@@ -47,7 +47,7 @@
 #define __GST_EDGE_DETECT_H__
 
 #include <gst/opencv/gstopencvvideofilter.h>
-#include <opencv2/core/core_c.h>
+#include <opencv2/core.hpp>
 
 G_BEGIN_DECLS
 /* #defines don't like whitespacey bits */
@@ -75,8 +75,8 @@ struct _GstEdgeDetect
   int threshold2;
   int aperture;
 
-  IplImage *cvEdge;
-  IplImage *cvGray;
+  cv::Mat cvEdge;
+  cv::Mat cvGray;
 };
 
 struct _GstEdgeDetectClass

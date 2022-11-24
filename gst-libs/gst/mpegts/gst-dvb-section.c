@@ -28,6 +28,9 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -47,7 +50,7 @@
 /*
  * TODO
  *
- * * Check minimum size for section parsing in the various 
+ * * Check minimum size for section parsing in the various
  *   gst_mpegts_section_get_<tabld>() methods
  *
  * * Implement parsing code for

@@ -22,180 +22,164 @@
 #include "config.h"
 #endif
 
-#include "gstsrt.h"
+#include "gstsrtsrc.h"
+#include "gstsrtsink.h"
 
-#include "gstsrtclientsrc.h"
-#include "gstsrtserversrc.h"
-#include "gstsrtclientsink.h"
-#include "gstsrtserversink.h"
+GST_DEBUG_CATEGORY_STATIC (gst_debug_srtlib);
+GST_DEBUG_CATEGORY (gst_debug_srtobject);
+#define GST_CAT_DEFAULT gst_debug_srtobject
 
-#define GST_CAT_DEFAULT gst_debug_srt
-GST_DEBUG_CATEGORY (GST_CAT_DEFAULT);
+#ifndef GST_REMOVE_DEPRECATED
 
-SRTSOCKET
-gst_srt_client_connect_full (GstElement * elem, int sender,
-    const gchar * host, guint16 port, int rendez_vous,
-    const gchar * bind_address, guint16 bind_port, int latency,
-    GSocketAddress ** socket_address, gint * poll_id, gchar * passphrase,
-    int key_length)
+#define GST_TYPE_SRT_CLIENT_SRC gst_srt_client_src_get_type()
+#define GST_TYPE_SRT_SERVER_SRC gst_srt_server_src_get_type()
+
+#define GST_TYPE_SRT_CLIENT_SINK gst_srt_client_sink_get_type()
+#define GST_TYPE_SRT_SERVER_SINK gst_srt_server_sink_get_type()
+
+typedef GstSRTSrc GstSRTClientSrc;
+typedef GstSRTSrcClass GstSRTClientSrcClass;
+
+typedef GstSRTSrc GstSRTServerSrc;
+typedef GstSRTSrcClass GstSRTServerSrcClass;
+
+typedef GstSRTSink GstSRTClientSink;
+typedef GstSRTSinkClass GstSRTClientSinkClass;
+
+typedef GstSRTSink GstSRTServerSink;
+typedef GstSRTSinkClass GstSRTServerSinkClass;
+
+static GType gst_srt_client_src_get_type (void);
+static GType gst_srt_server_src_get_type (void);
+static GType gst_srt_client_sink_get_type (void);
+static GType gst_srt_server_sink_get_type (void);
+
+G_DEFINE_TYPE (GstSRTClientSrc, gst_srt_client_src, GST_TYPE_SRT_SRC);
+G_DEFINE_TYPE (GstSRTServerSrc, gst_srt_server_src, GST_TYPE_SRT_SRC);
+G_DEFINE_TYPE (GstSRTClientSink, gst_srt_client_sink, GST_TYPE_SRT_SINK);
+G_DEFINE_TYPE (GstSRTServerSink, gst_srt_server_sink, GST_TYPE_SRT_SINK);
+
+static void
+gst_srt_client_src_init (GstSRTClientSrc * src)
 {
-  SRTSOCKET sock = SRT_INVALID_SOCK;
-  GError *error = NULL;
-  gpointer sa;
-  size_t sa_len;
-
-  if (host == NULL) {
-    GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ, ("Invalid host"),
-        ("Unspecified NULL host"));
-    goto failed;
-  }
-
-  *socket_address = g_inet_socket_address_new_from_string (host, port);
-
-  if (*socket_address == NULL) {
-    GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ, ("Invalid host"),
-        ("Failed to parse host"));
-    goto failed;
-  }
-
-  sa_len = g_socket_address_get_native_size (*socket_address);
-  sa = g_alloca (sa_len);
-  if (!g_socket_address_to_native (*socket_address, sa, sa_len, &error)) {
-    GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ, ("Invalid address"),
-        ("cannot resolve address (reason: %s)", error->message));
-    goto failed;
-  }
-
-  sock = srt_socket (g_socket_address_get_family (*socket_address), SOCK_DGRAM,
-      0);
-  if (sock == SRT_ERROR) {
-    GST_ELEMENT_ERROR (elem, LIBRARY, INIT, (NULL),
-        ("failed to create SRT socket (reason: %s)", srt_getlasterror_str ()));
-    goto failed;
-  }
-
-  /* Make sure TSBPD mode is enable (SRT mode) */
-  srt_setsockopt (sock, 0, SRTO_TSBPDMODE, &(int) {
-      1}, sizeof (int));
-
-  /* This is a sink, we're always a receiver */
-  srt_setsockopt (sock, 0, SRTO_SENDER, &sender, sizeof (int));
-
-  srt_setsockopt (sock, 0, SRTO_TSBPDDELAY, &latency, sizeof (int));
-
-  srt_setsockopt (sock, 0, SRTO_RENDEZVOUS, &rendez_vous, sizeof (int));
-
-  if (passphrase != NULL && passphrase[0] != '\0') {
-    srt_setsockopt (sock, 0, SRTO_PASSPHRASE, passphrase, strlen (passphrase));
-    srt_setsockopt (sock, 0, SRTO_PBKEYLEN, &key_length, sizeof (int));
-  }
-
-  if (bind_address || bind_port || rendez_vous) {
-    gpointer bsa;
-    size_t bsa_len;
-    GSocketAddress *b_socket_address = NULL;
-
-    if (bind_address == NULL)
-      bind_address = "0.0.0.0";
-
-    if (rendez_vous)
-      bind_port = port;
-
-    b_socket_address = g_inet_socket_address_new_from_string (bind_address,
-        bind_port);
-
-    if (b_socket_address == NULL) {
-      GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ, ("Invalid bind address"),
-          ("Failed to parse bind address: %s:%d", bind_address, bind_port));
-      goto failed;
-    }
-
-    bsa_len = g_socket_address_get_native_size (b_socket_address);
-    bsa = g_alloca (bsa_len);
-    if (!g_socket_address_to_native (b_socket_address, bsa, bsa_len, &error)) {
-      GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ, ("Invalid bind address"),
-          ("Can't parse bind address to sockaddr: %s", error->message));
-      g_clear_object (&b_socket_address);
-      goto failed;
-    }
-    g_clear_object (&b_socket_address);
-
-    if (srt_bind (sock, bsa, bsa_len) == SRT_ERROR) {
-      GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ,
-          ("Can't bind to address"),
-          ("Can't bind to %s:%d (reason: %s)", bind_address, bind_port,
-              srt_getlasterror_str ()));
-      goto failed;
-    }
-  }
-
-  *poll_id = srt_epoll_create ();
-  if (*poll_id == -1) {
-    GST_ELEMENT_ERROR (elem, LIBRARY, INIT, (NULL),
-        ("failed to create poll id for SRT socket (reason: %s)",
-            srt_getlasterror_str ()));
-    goto failed;
-  }
-
-  srt_epoll_add_usock (*poll_id, sock, &(int) {
-      SRT_EPOLL_OUT});
-
-  if (srt_connect (sock, sa, sa_len) == SRT_ERROR) {
-    GST_ELEMENT_ERROR (elem, RESOURCE, OPEN_READ, ("Connection error"),
-        ("failed to connect to host (reason: %s)", srt_getlasterror_str ()));
-    goto failed;
-  }
-
-  return sock;
-
-failed:
-  if (*poll_id != SRT_ERROR) {
-    srt_epoll_release (*poll_id);
-    *poll_id = SRT_ERROR;
-  }
-
-  if (sock != SRT_INVALID_SOCK) {
-    srt_close (sock);
-    sock = SRT_INVALID_SOCK;
-  }
-
-  g_clear_error (&error);
-  g_clear_object (socket_address);
-
-  return SRT_INVALID_SOCK;
 }
 
-SRTSOCKET
-gst_srt_client_connect (GstElement * elem, int sender,
-    const gchar * host, guint16 port, int rendez_vous,
-    const gchar * bind_address, guint16 bind_port, int latency,
-    GSocketAddress ** socket_address, gint * poll_id)
+static void
+gst_srt_client_src_class_init (GstSRTClientSrcClass * klass)
 {
-  return gst_srt_client_connect_full (elem, sender, host, port,
-      rendez_vous, bind_address, bind_port, latency, socket_address, poll_id,
-      NULL, 0);
 }
+
+static void
+gst_srt_server_src_init (GstSRTServerSrc * src)
+{
+}
+
+static void
+gst_srt_server_src_class_init (GstSRTServerSrcClass * klass)
+{
+}
+
+static void
+gst_srt_client_sink_init (GstSRTClientSink * sink)
+{
+}
+
+static void
+gst_srt_client_sink_class_init (GstSRTClientSinkClass * klass)
+{
+}
+
+static void
+gst_srt_server_sink_init (GstSRTServerSink * sink)
+{
+}
+
+static void
+gst_srt_server_sink_class_init (GstSRTServerSinkClass * klass)
+{
+}
+
+#endif
+
+#ifndef GST_DISABLE_GST_DEBUG
+static void
+gst_srt_log_handler (void *opaque, int level, const char *file, int line,
+    const char *area, const char *message)
+{
+  GstDebugLevel gst_level;
+
+  switch (level) {
+    case LOG_CRIT:
+      gst_level = GST_LEVEL_ERROR;
+      break;
+
+    case LOG_ERR:
+      gst_level = GST_LEVEL_WARNING;
+      break;
+
+    case LOG_WARNING:
+      gst_level = GST_LEVEL_INFO;
+      break;
+
+    case LOG_NOTICE:
+      gst_level = GST_LEVEL_DEBUG;
+      break;
+
+    case LOG_DEBUG:
+      gst_level = GST_LEVEL_LOG;
+      break;
+
+    default:
+      gst_level = GST_LEVEL_FIXME;
+      break;
+  }
+
+  if (G_UNLIKELY (gst_level <= _gst_debug_min)) {
+    gst_debug_log (gst_debug_srtlib, gst_level, file, area, line, NULL, "%s",
+        message);
+  }
+}
+#endif
 
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "srt", 0, "SRT Common code");
+  GST_DEBUG_CATEGORY_INIT (gst_debug_srtobject, "srtobject", 0, "SRT Object");
+  GST_DEBUG_CATEGORY_INIT (gst_debug_srtlib, "srtlib", 0, "SRT Library");
 
-  if (!gst_element_register (plugin, "srtclientsrc", GST_RANK_PRIMARY,
+#ifndef GST_DISABLE_GST_DEBUG
+  srt_setloghandler (NULL, gst_srt_log_handler);
+  srt_setlogflags (SRT_LOGF_DISABLE_TIME | SRT_LOGF_DISABLE_THREADNAME |
+      SRT_LOGF_DISABLE_SEVERITY | SRT_LOGF_DISABLE_EOL);
+  srt_setloglevel (LOG_DEBUG);
+#endif
+
+  if (!gst_element_register (plugin, "srtsrc", GST_RANK_PRIMARY,
+          GST_TYPE_SRT_SRC))
+    return FALSE;
+
+  if (!gst_element_register (plugin, "srtsink", GST_RANK_PRIMARY,
+          GST_TYPE_SRT_SINK))
+    return FALSE;
+
+  /* deprecated */
+#ifndef GST_REMOVE_DEPRECATED
+  if (!gst_element_register (plugin, "srtclientsrc", GST_RANK_NONE,
           GST_TYPE_SRT_CLIENT_SRC))
     return FALSE;
 
-  if (!gst_element_register (plugin, "srtserversrc", GST_RANK_PRIMARY,
+  if (!gst_element_register (plugin, "srtserversrc", GST_RANK_NONE,
           GST_TYPE_SRT_SERVER_SRC))
     return FALSE;
 
-  if (!gst_element_register (plugin, "srtclientsink", GST_RANK_PRIMARY,
+  if (!gst_element_register (plugin, "srtclientsink", GST_RANK_NONE,
           GST_TYPE_SRT_CLIENT_SINK))
     return FALSE;
 
-  if (!gst_element_register (plugin, "srtserversink", GST_RANK_PRIMARY,
+  if (!gst_element_register (plugin, "srtserversink", GST_RANK_NONE,
           GST_TYPE_SRT_SERVER_SINK))
     return FALSE;
+#endif
 
   return TRUE;
 }

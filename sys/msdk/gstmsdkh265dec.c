@@ -33,24 +33,28 @@
 #  include <config.h>
 #endif
 
-#ifdef HAVE_LIBMFX
-#  include <mfx/mfxplugin.h>
-#else
-#  include "mfxplugin.h"
-#endif
-
 #include "gstmsdkh265dec.h"
+#include "gstmsdkvideomemory.h"
 
 GST_DEBUG_CATEGORY_EXTERN (gst_msdkh265dec_debug);
 #define GST_CAT_DEFAULT gst_msdkh265dec_debug
 
+#define COMMON_FORMAT \
+  "{ NV12, P010_10LE, YUY2, Y210, VUYA, Y410, P012_LE, Y212_LE, Y412_LE }"
+
+/* TODO: update both sink and src dynamically */
 static GstStaticPadTemplate sink_factory = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS ("video/x-h265, "
         "width = (int) [ 1, MAX ], height = (int) [ 1, MAX ], "
-        "stream-format = (string) byte-stream , alignment = (string) au , "
-        "profile = (string) main ")
+        "stream-format = (string) byte-stream , alignment = (string) au ")
+    );
+
+static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
+    GST_PAD_SRC,
+    GST_PAD_ALWAYS,
+    GST_STATIC_CAPS (GST_MSDK_CAPS_STR (COMMON_FORMAT, COMMON_FORMAT))
     );
 
 #define gst_msdkh265dec_parent_class parent_class
@@ -61,7 +65,6 @@ gst_msdkh265dec_configure (GstMsdkDec * decoder)
 {
   GstMsdkH265Dec *h265dec = GST_MSDKH265DEC (decoder);
   mfxSession session;
-  mfxStatus status;
   const mfxPluginUID *uid;
 
   session = gst_msdk_context_get_session (decoder->context);
@@ -71,42 +74,93 @@ gst_msdkh265dec_configure (GstMsdkDec * decoder)
   else
     uid = &MFX_PLUGINID_HEVCD_SW;
 
-  status = MFXVideoUSER_Load (session, uid, 1);
-  if (status < MFX_ERR_NONE) {
-    GST_ERROR_OBJECT (h265dec, "Media SDK Plugin load failed (%s)",
-        msdk_status_to_string (status));
+  if (!gst_msdk_load_plugin (session, uid, 1, "msdkh265dec"))
     return FALSE;
-  } else if (status > MFX_ERR_NONE) {
-    GST_WARNING_OBJECT (h265dec, "Media SDK Plugin load warning: %s",
-        msdk_status_to_string (status));
-  }
 
   decoder->param.mfx.CodecId = MFX_CODEC_HEVC;
-  decoder->param.mfx.CodecProfile = MFX_PROFILE_HEVC_MAIN;
+
+  /* This is a deprecated attribute in msdk-2017 version, but some
+   * customers still using this for low-latency streaming of non-b-frame
+   * encoded streams */
+  decoder->param.mfx.DecodedOrder = h265dec->output_order;
   return TRUE;
+}
+
+static void
+gst_msdkdec_h265_set_property (GObject * object, guint prop_id,
+    const GValue * value, GParamSpec * pspec)
+{
+  GstMsdkH265Dec *thiz = GST_MSDKH265DEC (object);
+  GstState state;
+
+  GST_OBJECT_LOCK (thiz);
+  state = GST_STATE (thiz);
+
+  if (!gst_msdkdec_prop_check_state (state, pspec)) {
+    GST_WARNING_OBJECT (thiz, "setting property in wrong state");
+    GST_OBJECT_UNLOCK (thiz);
+    return;
+  }
+  switch (prop_id) {
+    case GST_MSDKDEC_PROP_OUTPUT_ORDER:
+      thiz->output_order = g_value_get_enum (value);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+  GST_OBJECT_UNLOCK (thiz);
+  return;
+}
+
+static void
+gst_msdkdec_h265_get_property (GObject * object, guint prop_id, GValue * value,
+    GParamSpec * pspec)
+{
+  GstMsdkH265Dec *thiz = GST_MSDKH265DEC (object);
+
+  GST_OBJECT_LOCK (thiz);
+  switch (prop_id) {
+    case GST_MSDKDEC_PROP_OUTPUT_ORDER:
+      g_value_set_enum (value, thiz->output_order);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+  GST_OBJECT_UNLOCK (thiz);
 }
 
 static void
 gst_msdkh265dec_class_init (GstMsdkH265DecClass * klass)
 {
+  GObjectClass *gobject_class;
   GstElementClass *element_class;
   GstMsdkDecClass *decoder_class;
 
+  gobject_class = G_OBJECT_CLASS (klass);
   element_class = GST_ELEMENT_CLASS (klass);
   decoder_class = GST_MSDKDEC_CLASS (klass);
+
+  gobject_class->set_property = gst_msdkdec_h265_set_property;
+  gobject_class->get_property = gst_msdkdec_h265_get_property;
 
   decoder_class->configure = GST_DEBUG_FUNCPTR (gst_msdkh265dec_configure);
 
   gst_element_class_set_static_metadata (element_class,
       "Intel MSDK H265 decoder",
-      "Codec/Decoder/Video",
+      "Codec/Decoder/Video/Hardware",
       "H265 video decoder based on Intel Media SDK",
       "Scott D Phillips <scott.d.phillips@intel.com>");
 
+  gst_msdkdec_prop_install_output_oder_property (gobject_class);
+
   gst_element_class_add_static_pad_template (element_class, &sink_factory);
+  gst_element_class_add_static_pad_template (element_class, &src_factory);
 }
 
 static void
 gst_msdkh265dec_init (GstMsdkH265Dec * thiz)
 {
+  thiz->output_order = PROP_OUTPUT_ORDER_DEFAULT;
 }

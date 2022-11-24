@@ -410,9 +410,16 @@ gst_sdp_demux_create_stream (GstSDPDemux * demux, GstSDPMessage * sdp, gint idx)
       }
     }
   }
-  if (!(conn = gst_sdp_media_get_connection (media, 0))) {
-    if (!(conn = gst_sdp_message_get_connection (sdp)))
+
+  if (gst_sdp_media_connections_len (media) > 0) {
+    if (!(conn = gst_sdp_media_get_connection (media, 0))) {
+      /* We should not reach this based on the check above */
       goto no_connection;
+    }
+  } else {
+    if (!(conn = gst_sdp_message_get_connection (sdp))) {
+      goto no_connection;
+    }
   }
 
   if (!conn->address)
@@ -489,7 +496,7 @@ new_session_pad (GstElement * session, GstPad * pad, GstSDPDemux * demux)
 {
   gchar *name, *pad_name;
   GstPadTemplate *template;
-  gint id, ssrc, pt;
+  guint id, ssrc, pt;
   GList *lstream;
   GstSDPStream *stream;
   gboolean all_added;
@@ -502,12 +509,14 @@ new_session_pad (GstElement * session, GstPad * pad, GstSDPDemux * demux)
   if (sscanf (name, "recv_rtp_src_%u_%u_%u", &id, &ssrc, &pt) != 3)
     goto unknown_stream;
 
-  GST_DEBUG_OBJECT (demux, "stream: %u, SSRC %d, PT %d", id, ssrc, pt);
+  GST_DEBUG_OBJECT (demux, "stream: %u, SSRC %u, PT %u", id, ssrc, pt);
 
   stream =
-      find_stream (demux, GINT_TO_POINTER (id), (gpointer) find_stream_by_id);
+      find_stream (demux, GUINT_TO_POINTER (id), (gpointer) find_stream_by_id);
   if (stream == NULL)
     goto unknown_stream;
+
+  stream->ssrc = ssrc;
 
   /* no need for a timeout anymore now */
   g_object_set (G_OBJECT (stream->udpsrc[0]), "timeout", (guint64) 0, NULL);
@@ -611,7 +620,7 @@ unknown_stream:
 }
 
 static void
-gst_sdp_demux_do_stream_eos (GstSDPDemux * demux, guint session)
+gst_sdp_demux_do_stream_eos (GstSDPDemux * demux, guint session, guint32 ssrc)
 {
   GstSDPStream *stream;
 
@@ -626,6 +635,9 @@ gst_sdp_demux_do_stream_eos (GstSDPDemux * demux, guint session)
 
   if (stream->eos)
     goto was_eos;
+
+  if (stream->ssrc != ssrc)
+    goto wrong_ssrc;
 
   stream->eos = TRUE;
   gst_sdp_demux_stream_push_event (demux, stream, gst_event_new_eos ());
@@ -642,6 +654,11 @@ was_eos:
     GST_DEBUG_OBJECT (demux, "stream for session %u was already EOS", session);
     return;
   }
+wrong_ssrc:
+  {
+    GST_DEBUG_OBJECT (demux, "unkown SSRC %08x for session %u", ssrc, session);
+    return;
+  }
 }
 
 static void
@@ -651,7 +668,7 @@ on_bye_ssrc (GstElement * manager, guint session, guint32 ssrc,
   GST_DEBUG_OBJECT (demux, "SSRC %08x in session %u received BYE", ssrc,
       session);
 
-  gst_sdp_demux_do_stream_eos (demux, session);
+  gst_sdp_demux_do_stream_eos (demux, session, ssrc);
 }
 
 static void
@@ -660,7 +677,7 @@ on_timeout (GstElement * manager, guint session, guint32 ssrc,
 {
   GST_DEBUG_OBJECT (demux, "SSRC %08x in session %u timed out", ssrc, session);
 
-  gst_sdp_demux_do_stream_eos (demux, session);
+  gst_sdp_demux_do_stream_eos (demux, session, ssrc);
 }
 
 /* try to get and configure a manager */

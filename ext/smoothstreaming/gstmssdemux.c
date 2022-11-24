@@ -358,6 +358,14 @@ _create_pad (GstMssDemux * mssdemux, GstMssStream * manifeststream)
   GstPad *srcpad = NULL;
   GstMssStreamType streamtype;
   GstPadTemplate *tmpl = NULL;
+  GstCaps *caps = NULL;
+
+  caps = gst_mss_stream_get_caps (manifeststream);
+
+  if (!caps) {
+    GST_WARNING_OBJECT (mssdemux, "not creating pad for unrecognized stream");
+    return NULL;
+  }
 
   streamtype = gst_mss_stream_get_type (manifeststream);
   GST_DEBUG_OBJECT (mssdemux, "Found stream of type: %s",
@@ -489,7 +497,7 @@ gst_mss_demux_setup_streams (GstAdaptiveDemux * demux)
 
     if (protected) {
       GstBuffer *protection_buffer =
-          gst_buffer_new_wrapped ((gpointer) protection_data,
+          gst_buffer_new_wrapped (g_strdup (protection_data),
           strlen (protection_data));
       GstEvent *event =
           gst_event_new_protection (protection_system_id, protection_buffer,

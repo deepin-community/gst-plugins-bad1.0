@@ -65,9 +65,9 @@
  * @title: festival
  *
  * This element connects to a
- * <ulink url="http://www.festvox.org/festival/index.html">festival</ulink>
- * server process and uses it to synthesize speech. Festival need to run already
- * in server mode, started as <screen>festival --server</screen>
+ * [festival](http://www.festvox.org/festival/index.html) server process and
+ * uses it to synthesize speech. Festival need to run already in server mode,
+ * started as `festival --server`
  *
  * ## Example pipeline
  * |[
@@ -396,7 +396,7 @@ socket_receive_file_to_buff (int fd, int *size)
 {
   /* Receive file (probably a waveform file) from socket using   */
   /* Festival key stuff technique, but long winded I know, sorry */
-  /* but will receive any file without closeing the stream or    */
+  /* but will receive any file without closing the stream or    */
   /* using OOB data                                              */
   static const char file_stuff_key[] = "ft_StUfF_key";  /* must == Festival's key */
   char *buff;

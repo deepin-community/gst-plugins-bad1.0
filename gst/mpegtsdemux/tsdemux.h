@@ -76,6 +76,7 @@ struct _GstTSDemux
   gint requested_program_number; /* Required program number (ignore:-1) */
   guint program_number;
   gboolean emit_statistics;
+  gint latency; /* latency in ms */
 
   /*< private >*/
   gint program_generation; /* Incremented each time we switch program 0..15 */
@@ -84,7 +85,6 @@ struct _GstTSDemux
 					* the new program becomes active */
 
   /* segments to be sent */
-  GstSegment segment;
   GstEvent *segment_event;
   gboolean reset_segment;
 

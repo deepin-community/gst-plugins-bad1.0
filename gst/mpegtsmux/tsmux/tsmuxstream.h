@@ -1,5 +1,5 @@
-/* 
- * Copyright 2006 BBC and Fluendo S.A. 
+/*
+ * Copyright 2006 BBC and Fluendo S.A.
  *
  * This library is licensed under 4 different licenses and you
  * can choose to use it under the terms of any one of them. The
@@ -7,7 +7,7 @@
  * license.
  *
  * MPL:
- * 
+ *
  * The contents of this file are subject to the Mozilla Public License
  * Version 1.1 (the "License"); you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
@@ -56,17 +56,17 @@
  * Unless otherwise indicated, Source Code is licensed under MIT license.
  * See further explanation attached in License Statement (distributed in the file
  * LICENSE).
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
  * this software and associated documentation files (the "Software"), to deal in
  * the Software without restriction, including without limitation the rights to
  * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
  * of the Software, and to permit persons to whom the Software is furnished to do
  * so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -91,6 +91,7 @@ typedef enum TsMuxStreamState TsMuxStreamState;
 typedef struct TsMuxStreamBuffer TsMuxStreamBuffer;
 
 typedef void (*TsMuxStreamBufferReleaseFunc) (guint8 *data, void *user_data);
+typedef void (*TsMuxStreamGetESDescriptorsFunc) (TsMuxStream *stream, GstMpegtsPMTStream *pmt_stream, void *user_data);
 
 /* Stream type assignments
  *
@@ -159,12 +160,14 @@ enum TsMuxStreamState {
 struct TsMuxStream {
   TsMuxStreamState state;
   TsMuxPacketInfo pi;
-  TsMuxStreamType stream_type;
+  guint stream_type;
 
   /* stream_id (13818-1) */
   guint8 id;
   /* extended stream id (13818-1 Amdt 2) */
   guint8 id_extended;
+  /* array index in program array */
+  gint program_array_index;
 
   gboolean is_video_stream;
 
@@ -180,6 +183,10 @@ struct TsMuxStream {
 
   /* helper to release collected buffers */
   TsMuxStreamBufferReleaseFunc buffer_release;
+
+  /* Override or extend the default Elementary Stream descriptors */
+  TsMuxStreamGetESDescriptorsFunc get_es_descrs;
+  void *get_es_descrs_data;
 
   /* optional fixed PES size for stream type */
   guint16 pes_payload_size;
@@ -197,10 +204,12 @@ struct TsMuxStream {
   gint64 last_dts;
   gint64 last_pts;
 
+  gint64 first_ts;
+
   /* count of programs using this as PCR */
   gint   pcr_ref;
-  /* last time PCR written */
-  gint64 last_pcr;
+  /* Next time PCR should be written */
+  gint64 next_pcr;
 
   /* audio parameters for stream
    * (used in stream descriptor) */
@@ -230,17 +239,21 @@ struct TsMuxStream {
 };
 
 /* stream management */
-TsMuxStream *	tsmux_stream_new 		(guint16 pid, TsMuxStreamType stream_type);
+TsMuxStream *	tsmux_stream_new 		(guint16 pid, guint stream_type);
 void 		tsmux_stream_free 		(TsMuxStream *stream);
 
 guint16         tsmux_stream_get_pid            (TsMuxStream *stream);
 
-void 		tsmux_stream_set_buffer_release_func 	(TsMuxStream *stream, 
+void 		tsmux_stream_set_buffer_release_func 	(TsMuxStream *stream,
        							 TsMuxStreamBufferReleaseFunc func);
+
+void 		tsmux_stream_set_get_es_descriptors_func 	(TsMuxStream *stream,
+                                                   TsMuxStreamGetESDescriptorsFunc func,
+                                                   void *user_data);
 
 /* Add a new buffer to the pool of available bytes. If pts or dts are not -1, they
  * indicate the PTS or DTS of the first access unit within this packet */
-void 		tsmux_stream_add_data 		(TsMuxStream *stream, guint8 *data, guint len, 
+void 		tsmux_stream_add_data 		(TsMuxStream *stream, guint8 *data, guint len,
        						 void *user_data, gint64 pts, gint64 dts,
                                                  gboolean random_access);
 
@@ -250,13 +263,15 @@ gboolean	tsmux_stream_is_pcr 		(TsMuxStream *stream);
 
 gboolean 	tsmux_stream_at_pes_start 	(TsMuxStream *stream);
 void 		tsmux_stream_get_es_descrs 	(TsMuxStream *stream, GstMpegtsPMTStream *pmt_stream);
+void    tsmux_stream_default_get_es_descrs (TsMuxStream * stream, GstMpegtsPMTStream * pmt_stream);
 
 gint 		tsmux_stream_bytes_in_buffer 	(TsMuxStream *stream);
 gint 		tsmux_stream_bytes_avail 	(TsMuxStream *stream);
 gboolean 	tsmux_stream_initialize_pes_packet (TsMuxStream *stream);
 gboolean 	tsmux_stream_get_data 		(TsMuxStream *stream, guint8 *buf, guint len);
 
-guint64 	tsmux_stream_get_pts 		(TsMuxStream *stream);
+gint64 	tsmux_stream_get_pts 		(TsMuxStream *stream);
+gint64 	tsmux_stream_get_dts 		(TsMuxStream *stream);
 
 G_END_DECLS
 

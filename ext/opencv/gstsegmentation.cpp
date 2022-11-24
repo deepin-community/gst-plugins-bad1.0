@@ -7,7 +7,7 @@
  *  and adapted. Its license reads:
  *  "Oct. 3, 2008
  *   Right to use this code in any way you want without warrenty, support or
- *   any guarentee of it working. "
+ *   any guarantee of it working. "
  *
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -72,18 +72,17 @@
  * mixture model for real-time tracking with shadow detection", Proc. 2nd
  * European Workshop on Advanced Video-Based Surveillance Systems, 2001
  * [5] http://opencv.itseez.com/modules/video/doc/motion_analysis_and_object_tracking.html#backgroundsubtractormog2
- * [6] Z.Zivkovic, "Improved adaptive Gausian mixture model for background
+ * [6] Z.Zivkovic, "Improved adaptive Gaussian mixture model for background
  * subtraction", International Conference Pattern Recognition, UK, August, 2004.
  * [7] Z.Zivkovic, F. van der Heijden, "Efficient Adaptive Density Estimation
  * per Image Pixel for the Task of Background Subtraction", Pattern Recognition
  * Letters, vol. 27, no. 7, pages 773-780, 2006.
  *
- * <refsect2>
- * <title>Example launch line</title>
+ * ## Example launch line
+ *
  * |[
  * gst-launch-1.0  v4l2src device=/dev/video0 ! videoconvert ! segmentation test-mode=true method=2 ! videoconvert ! ximagesink
  * ]|
- * </refsect2>
  */
 
 #ifdef HAVE_CONFIG_H
@@ -91,15 +90,13 @@
 #endif
 
 #include "gstsegmentation.h"
-#include <opencv2/imgproc/imgproc_c.h>
+#include <opencv2/imgproc.hpp>
 
 GST_DEBUG_CATEGORY_STATIC (gst_segmentation_debug);
 #define GST_CAT_DEFAULT gst_segmentation_debug
 
 using namespace cv;
-#if (CV_MAJOR_VERSION >= 3)
-  using namespace cv::bgsegm;
-#endif
+
 /* Filter signals and args */
 enum
 {
@@ -155,19 +152,20 @@ static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
     GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE ("RGBA")));
 
 
-static void gst_segmentation_set_property (GObject * object, guint prop_id,
+static void
+gst_segmentation_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);
-static void gst_segmentation_get_property (GObject * object, guint prop_id,
+static void
+gst_segmentation_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec);
 
-static GstFlowReturn gst_segmentation_transform_ip (GstOpencvVideoFilter * filter,
-    GstBuffer * buffer, IplImage * img);
+static GstFlowReturn gst_segmentation_transform_ip (GstOpencvVideoFilter *
+    filter, GstBuffer * buffer, Mat img);
 
-static gboolean gst_segmentation_stop (GstBaseTransform * basesrc);
-static gboolean gst_segmentation_set_caps (GstOpencvVideoFilter * filter, gint in_width,
-    gint in_height, gint in_depth, gint in_channels,
-    gint out_width, gint out_height, gint out_depth, gint out_channels);
-static void gst_segmentation_release_all_pointers (GstSegmentation * filter);
+static void gst_segmentation_finalize (GObject * object);
+static gboolean gst_segmentation_set_caps (GstOpencvVideoFilter * filter,
+    gint in_width, gint in_height, int in_cv_type, gint out_width,
+    gint out_height, int out_cv_type);
 
 /* Codebook algorithm + connected components functions*/
 static int update_codebook (unsigned char *p, codeBook * c,
@@ -175,14 +173,12 @@ static int update_codebook (unsigned char *p, codeBook * c,
 static int clear_stale_entries (codeBook * c);
 static unsigned char background_diff (unsigned char *p, codeBook * c,
     int numChannels, int *minMod, int *maxMod);
-static void find_connected_components (IplImage * mask, int poly1_hull0,
-    float perimScale, CvMemStorage * mem_storage, CvSeq * contours);
+static void find_connected_components (Mat mask, int poly1_hull0,
+    float perimScale);
 
 /* MOG (Mixture-of-Gaussians functions */
-static int initialise_mog (GstSegmentation * filter);
 static int run_mog_iteration (GstSegmentation * filter);
 static int run_mog2_iteration (GstSegmentation * filter);
-static int finalise_mog (GstSegmentation * filter);
 
 /* initialize the segmentation's class */
 static void
@@ -190,16 +186,15 @@ gst_segmentation_class_init (GstSegmentationClass * klass)
 {
   GObjectClass *gobject_class;
   GstElementClass *element_class = GST_ELEMENT_CLASS (klass);
-  GstBaseTransformClass *basesrc_class = GST_BASE_TRANSFORM_CLASS (klass);
   GstOpencvVideoFilterClass *cvfilter_class =
       (GstOpencvVideoFilterClass *) klass;
 
   gobject_class = (GObjectClass *) klass;
 
+  gobject_class->finalize = gst_segmentation_finalize;
   gobject_class->set_property = gst_segmentation_set_property;
   gobject_class->get_property = gst_segmentation_get_property;
 
-  basesrc_class->stop = gst_segmentation_stop;
 
   cvfilter_class->cv_trans_ip_func = gst_segmentation_transform_ip;
   cvfilter_class->cv_set_caps = gst_segmentation_set_caps;
@@ -231,11 +226,12 @@ gst_segmentation_class_init (GstSegmentationClass * klass)
   gst_element_class_add_static_pad_template (element_class, &src_factory);
   gst_element_class_add_static_pad_template (element_class, &sink_factory);
 
+  gst_type_mark_as_plugin_api (GST_TYPE_SEGMENTATION_METHOD, (GstPluginAPIFlags) 0);
 }
 
 /* initialize the new element
  * instantiate pads and add them to element
- * set pad calback functions
+ * set pad callback functions
  * initialize instance structure
  */
 static void
@@ -294,28 +290,24 @@ gst_segmentation_get_property (GObject * object, guint prop_id,
 
 static gboolean
 gst_segmentation_set_caps (GstOpencvVideoFilter * filter, gint in_width,
-    gint in_height, gint in_depth, gint in_channels,
-    gint out_width, gint out_height, gint out_depth, gint out_channels)
+    gint in_height, int in_cv_type,
+    gint out_width, gint out_height, int out_cv_type)
 {
   GstSegmentation *segmentation = GST_SEGMENTATION (filter);
-  CvSize size;
+  Size size;
 
-  size = cvSize (in_width, in_height);
+  size = Size (in_width, in_height);
   segmentation->width = in_width;
   segmentation->height = in_height;
 
-  if (NULL != segmentation->cvRGB)
-    gst_segmentation_release_all_pointers (segmentation);
+  segmentation->cvRGB.create (size, CV_8UC3);
+  segmentation->cvYUV.create (size, CV_8UC3);
 
-  segmentation->cvRGB = cvCreateImage (size, IPL_DEPTH_8U, 3);
-  segmentation->cvYUV = cvCreateImage (size, IPL_DEPTH_8U, 3);
+  segmentation->cvFG = Mat::zeros (size, CV_8UC1);
 
-  segmentation->cvFG = cvCreateImage (size, IPL_DEPTH_8U, 1);
-  cvZero (segmentation->cvFG);
-
-  segmentation->ch1 = cvCreateImage (size, IPL_DEPTH_8U, 1);
-  segmentation->ch2 = cvCreateImage (size, IPL_DEPTH_8U, 1);
-  segmentation->ch3 = cvCreateImage (size, IPL_DEPTH_8U, 1);
+  segmentation->ch1.create (size, CV_8UC1);
+  segmentation->ch2.create (size, CV_8UC1);
+  segmentation->ch3.create (size, CV_8UC1);
 
   /* Codebook method */
   segmentation->TcodeBook = (codeBook *)
@@ -328,42 +320,34 @@ gst_segmentation_set_caps (GstOpencvVideoFilter * filter, gint in_width,
   segmentation->learning_interval = (int) (1.0 / segmentation->learning_rate);
 
   /* Mixture-of-Gaussians (mog) methods */
-  initialise_mog (segmentation);
+  segmentation->mog = bgsegm::createBackgroundSubtractorMOG ();
+  segmentation->mog2 = createBackgroundSubtractorMOG2 ();
 
   return TRUE;
 }
 
 /* Clean up */
-static gboolean
-gst_segmentation_stop (GstBaseTransform * basesrc)
-{
-  GstSegmentation *filter = GST_SEGMENTATION (basesrc);
-
-  if (filter->cvRGB != NULL)
-    gst_segmentation_release_all_pointers (filter);
-
-  return TRUE;
-}
-
 static void
-gst_segmentation_release_all_pointers (GstSegmentation * filter)
+gst_segmentation_finalize (GObject * object)
 {
-  cvReleaseImage (&filter->cvRGB);
-  cvReleaseImage (&filter->cvYUV);
-  cvReleaseImage (&filter->cvFG);
-  cvReleaseImage (&filter->ch1);
-  cvReleaseImage (&filter->ch2);
-  cvReleaseImage (&filter->ch3);
+  GstSegmentation *filter = GST_SEGMENTATION (object);
 
-  cvReleaseMemStorage (&filter->mem_storage);
-
+  filter->cvRGB.release ();
+  filter->cvYUV.release ();
+  filter->cvFG.release ();
+  filter->ch1.release ();
+  filter->ch2.release ();
+  filter->ch3.release ();
+  filter->mog.release ();
+  filter->mog2.release ();
   g_free (filter->TcodeBook);
-  finalise_mog (filter);
+
+  G_OBJECT_CLASS (gst_segmentation_parent_class)->finalize (object);
 }
 
 static GstFlowReturn
-gst_segmentation_transform_ip (GstOpencvVideoFilter * cvfilter, GstBuffer * buffer,
-        IplImage * img)
+gst_segmentation_transform_ip (GstOpencvVideoFilter * cvfilter,
+    GstBuffer * buffer, Mat img)
 {
   GstSegmentation *filter = GST_SEGMENTATION (cvfilter);
   int j;
@@ -371,8 +355,8 @@ gst_segmentation_transform_ip (GstOpencvVideoFilter * cvfilter, GstBuffer * buff
   filter->framecount++;
 
   /*  Image preprocessing: color space conversion etc */
-  cvCvtColor (img, filter->cvRGB, CV_RGBA2RGB);
-  cvCvtColor (filter->cvRGB, filter->cvYUV, CV_RGB2YCrCb);
+  cvtColor (img, filter->cvRGB, COLOR_RGBA2RGB);
+  cvtColor (filter->cvRGB, filter->cvYUV, COLOR_RGB2YCrCb);
 
   /* Create and update a fg/bg model using a codebook approach following the
    * opencv O'Reilly book [1] implementation of the algo described in [2].
@@ -384,19 +368,20 @@ gst_segmentation_transform_ip (GstOpencvVideoFilter * cvfilter, GstBuffer * buff
   if (METHOD_BOOK == filter->method) {
     unsigned cbBounds[3] = { 10, 5, 5 };
     int minMod[3] = { 20, 20, 20 }, maxMod[3] = {
-    20, 20, 20};
+      20, 20, 20
+    };
 
     if (filter->framecount < 30) {
       /* Learning background phase: update_codebook on every frame */
       for (j = 0; j < filter->width * filter->height; j++) {
-        update_codebook ((unsigned char *) filter->cvYUV->imageData + j * 3,
+        update_codebook (filter->cvYUV.data + j * 3,
             (codeBook *) & (filter->TcodeBook[j]), cbBounds, 3);
       }
     } else {
       /*  this updating is responsible for FG becoming BG again */
       if (filter->framecount % filter->learning_interval == 0) {
         for (j = 0; j < filter->width * filter->height; j++) {
-          update_codebook ((uchar *) filter->cvYUV->imageData + j * 3,
+          update_codebook (filter->cvYUV.data + j * 3,
               (codeBook *) & (filter->TcodeBook[j]), cbBounds, 3);
         }
       }
@@ -407,18 +392,17 @@ gst_segmentation_transform_ip (GstOpencvVideoFilter * cvfilter, GstBuffer * buff
 
       for (j = 0; j < filter->width * filter->height; j++) {
         if (background_diff
-            ((uchar *) filter->cvYUV->imageData + j * 3,
+            (filter->cvYUV.data + j * 3,
                 (codeBook *) & (filter->TcodeBook[j]), 3, minMod, maxMod)) {
-          filter->cvFG->imageData[j] = (char) 255;
+          filter->cvFG.data[j] = (char) 255;
         } else {
-          filter->cvFG->imageData[j] = 0;
+          filter->cvFG.data[j] = 0;
         }
       }
     }
 
     /* 3rd param is the smallest area to show: (w+h)/param , in pixels */
-    find_connected_components (filter->cvFG, 1, 10000,
-        filter->mem_storage, filter->contours);
+    find_connected_components (filter->cvFG, 1, 10000);
 
   }
   /* Create the foreground and background masks using BackgroundSubtractorMOG [1],
@@ -438,7 +422,7 @@ gst_segmentation_transform_ip (GstOpencvVideoFilter * cvfilter, GstBuffer * buff
    * OpenCV MOG2 implements the algorithm described in [2] and [3].
    *
    * [1] http://opencv.itseez.com/modules/video/doc/motion_analysis_and_object_tracking.html#backgroundsubtractormog2
-   * [2] Z.Zivkovic, "Improved adaptive Gausian mixture model for background
+   * [2] Z.Zivkovic, "Improved adaptive Gaussian mixture model for background
    * subtraction", International Conference Pattern Recognition, UK, Aug 2004.
    * [3] Z.Zivkovic, F. van der Heijden, "Efficient Adaptive Density Estimation
    * per Image Pixel for the Task of Background Subtraction", Pattern
@@ -448,15 +432,19 @@ gst_segmentation_transform_ip (GstOpencvVideoFilter * cvfilter, GstBuffer * buff
   }
 
   /*  if we want to test_mode, just overwrite the output */
-  if (filter->test_mode) {
-    cvCvtColor (filter->cvFG, filter->cvRGB, CV_GRAY2RGB);
+  std::vector < cv::Mat > channels (3);
 
-    cvSplit (filter->cvRGB, filter->ch1, filter->ch2, filter->ch3, NULL);
+  if (filter->test_mode) {
+    cvtColor (filter->cvFG, filter->cvRGB, COLOR_GRAY2RGB);
+
+    split (filter->cvRGB, channels);
   } else
-    cvSplit (img, filter->ch1, filter->ch2, filter->ch3, NULL);
+    split (img, channels);
+
+  channels.push_back (filter->cvFG);
 
   /*  copy anyhow the fg/bg to the alpha channel in the output image */
-  cvMerge (filter->ch1, filter->ch2, filter->ch3, filter->cvFG, img);
+  merge (channels, img);
 
 
   return GST_FLOW_OK;
@@ -643,7 +631,7 @@ clear_stale_entries (codeBook * c)
   maxMod Add this (possibly negative) number onto
 
   max level when determining if new pixel is foreground
-  minMod Subract this (possibly negative) number from
+  minMod Subtract this (possibly negative) number from
   min level when determining if new pixel is foreground
 
   NOTES:
@@ -712,89 +700,53 @@ background_diff (unsigned char *p, codeBook * c, int numChannels,
 /* How many iterations of erosion and/or dilation there should be */
 #define CVCLOSE_ITR 1
 static void
-find_connected_components (IplImage * mask, int poly1_hull0, float perimScale,
-    CvMemStorage * mem_storage, CvSeq * contours)
+find_connected_components (Mat mask, int poly1_hull0, float perimScale)
 {
-  CvContourScanner scanner;
-  CvSeq *c;
-  int numCont = 0;
   /* Just some convenience variables */
-  const CvScalar CVX_WHITE = CV_RGB (0xff, 0xff, 0xff);
-  const CvScalar CVX_BLACK = CV_RGB (0x00, 0x00, 0x00);
+  const Scalar CVX_WHITE = CV_RGB (0xff, 0xff, 0xff);
+  //const Scalar CVX_BLACK = CV_RGB (0x00, 0x00, 0x00);
+  int idx = 0;
 
   /* CLEAN UP RAW MASK */
-  cvMorphologyEx (mask, mask, 0, 0, CV_MOP_OPEN, CVCLOSE_ITR);
-  cvMorphologyEx (mask, mask, 0, 0, CV_MOP_CLOSE, CVCLOSE_ITR);
+  morphologyEx (mask, mask, MORPH_OPEN, Mat (), Point (-1, -1), CVCLOSE_ITR);
+  morphologyEx (mask, mask, MORPH_CLOSE, Mat (), Point (-1, -1), CVCLOSE_ITR);
   /* FIND CONTOURS AROUND ONLY BIGGER REGIONS */
-  if (mem_storage == NULL) {
-    mem_storage = cvCreateMemStorage (0);
-  } else {
-    cvClearMemStorage (mem_storage);
-  }
 
-  scanner = cvStartFindContours (mask, mem_storage, sizeof (CvContour),
-      CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE, cvPoint (0, 0));
+  std::vector < std::vector < Point > >contours;
+  std::vector < std::vector < Point > >to_draw;
+  std::vector < Vec4i > hierarchy;
+  findContours (mask, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE,
+      Point (0, 0));
+  if (contours.size () == 0)
+    return;
 
-  while ((c = cvFindNextContour (scanner)) != NULL) {
-    double len = cvContourArea (c, CV_WHOLE_SEQ, 0);
-    /* calculate perimeter len threshold: */
-    double q = (mask->height + mask->width) / perimScale;
-    /* Get rid of blob if its perimeter is too small: */
-    if (len < q) {
-      cvSubstituteContour (scanner, NULL);
-    } else {
-      /* Smooth its edges if its large enough */
-      CvSeq *c_new;
+  for (; idx >= 0; idx = hierarchy[idx][0]) {
+    const std::vector < Point > &c = contours[idx];
+    double len = fabs (contourArea (Mat (c)));
+    double q = (mask.size ().height + mask.size ().width) / perimScale;
+    if (len >= q) {
+      std::vector < Point > c_new;
       if (poly1_hull0) {
-        /* Polygonal approximation */
-        c_new =
-            cvApproxPoly (c, sizeof (CvContour), mem_storage, CV_POLY_APPROX_DP,
-            CVCONTOUR_APPROX_LEVEL, 0);
+        approxPolyDP (c, c_new, CVCONTOUR_APPROX_LEVEL, (hierarchy[idx][2] < 0
+                && hierarchy[idx][3] < 0));
       } else {
-        /* Convex Hull of the segmentation */
-        c_new = cvConvexHull2 (c, mem_storage, CV_CLOCKWISE, 1);
+        convexHull (c, c_new, true, true);
       }
-      cvSubstituteContour (scanner, c_new);
-      numCont++;
+      to_draw.push_back (c_new);
     }
   }
-  contours = cvEndFindContours (&scanner);
 
-  /* PAINT THE FOUND REGIONS BACK INTO THE IMAGE */
-  cvZero (mask);
-  /* DRAW PROCESSED CONTOURS INTO THE MASK */
-  for (c = contours; c != NULL; c = c->h_next)
-    cvDrawContours (mask, c, CVX_WHITE, CVX_BLACK, -1, CV_FILLED, 8, cvPoint (0,
-            0));
+  mask.setTo (Scalar::all (0));
+  if (to_draw.size () > 0) {
+    drawContours (mask, to_draw, -1, CVX_WHITE, FILLED);
+  }
+
 }
 #endif /*ifdef CODE_FROM_OREILLY_BOOK */
-
-
-int
-initialise_mog (GstSegmentation * filter)
-{
-  filter->img_input_as_cvMat = (void *) new Mat (cvarrToMat (filter->cvYUV, false));
-  filter->img_fg_as_cvMat = (void *) new Mat (cvarrToMat(filter->cvFG, false));
-
-#if (CV_MAJOR_VERSION >= 3)
-  filter->mog = bgsegm::createBackgroundSubtractorMOG ();
-  filter->mog2 = createBackgroundSubtractorMOG2 ();
-#else
-  filter->mog = (void *) new BackgroundSubtractorMOG ();
-  filter->mog2 = (void *) new BackgroundSubtractorMOG2 ();
-#endif
-
-  return (0);
-}
 
 int
 run_mog_iteration (GstSegmentation * filter)
 {
-  ((cv::Mat *) filter->img_input_as_cvMat)->data =
-      (uchar *) filter->cvYUV->imageData;
-  ((cv::Mat *) filter->img_fg_as_cvMat)->data =
-      (uchar *) filter->cvFG->imageData;
-
   /*
      BackgroundSubtractorMOG [1], Gaussian Mixture-based Background/Foreground
      Segmentation Algorithm. OpenCV MOG implements the algorithm described in [2].
@@ -805,15 +757,7 @@ run_mog_iteration (GstSegmentation * filter)
      European Workshop on Advanced Video-Based Surveillance Systems, 2001
    */
 
-#if (CV_MAJOR_VERSION >= 3)
-  filter->mog->apply (*((Mat *) filter->
-          img_input_as_cvMat), *((Mat *) filter->img_fg_as_cvMat),
-      filter->learning_rate);
-#else
-  (*((BackgroundSubtractorMOG *) filter->mog)) (*((Mat *) filter->
-          img_input_as_cvMat), *((Mat *) filter->img_fg_as_cvMat),
-      filter->learning_rate);
-#endif
+  filter->mog->apply (filter->cvYUV, filter->cvFG, filter->learning_rate);
 
   return (0);
 }
@@ -821,48 +765,20 @@ run_mog_iteration (GstSegmentation * filter)
 int
 run_mog2_iteration (GstSegmentation * filter)
 {
-  ((Mat *) filter->img_input_as_cvMat)->data =
-       (uchar *) filter->cvYUV->imageData;
-  ((Mat *) filter->img_fg_as_cvMat)->data =
-       (uchar *) filter->cvFG->imageData;
-
   /*
      BackgroundSubtractorMOG2 [1], Gaussian Mixture-based Background/Foreground
      segmentation algorithm. OpenCV MOG2 implements the algorithm described in
      [2] and [3].
 
      [1] http://opencv.itseez.com/modules/video/doc/motion_analysis_and_object_tracking.html#backgroundsubtractormog2
-     [2] Z.Zivkovic, "Improved adaptive Gausian mixture model for background
+     [2] Z.Zivkovic, "Improved adaptive Gaussian mixture model for background
      subtraction", International Conference Pattern Recognition, UK, August, 2004.
      [3] Z.Zivkovic, F. van der Heijden, "Efficient Adaptive Density Estimation per
      Image Pixel for the Task of Background Subtraction", Pattern Recognition
      Letters, vol. 27, no. 7, pages 773-780, 2006.
    */
 
-#if (CV_MAJOR_VERSION >= 3)
-  filter->mog2->apply (*((Mat *) filter->
-          img_input_as_cvMat), *((Mat *) filter->img_fg_as_cvMat),
-      filter->learning_rate);
-#else
-  (*((BackgroundSubtractorMOG *) filter->mog2)) (*((Mat *) filter->
-          img_input_as_cvMat), *((Mat *) filter->img_fg_as_cvMat),
-      filter->learning_rate);
-#endif
+  filter->mog2->apply (filter->cvYUV, filter->cvFG, filter->learning_rate);
 
-  return (0);
-}
-
-int
-finalise_mog (GstSegmentation * filter)
-{
-  delete (Mat *) filter->img_input_as_cvMat;
-  delete (Mat *) filter->img_fg_as_cvMat;
-#if (CV_MAJOR_VERSION >= 3)
-  filter->mog.release ();
-  filter->mog2.release ();
-#else
-  delete (BackgroundSubtractorMOG *) filter->mog;
-  delete (BackgroundSubtractorMOG2 *) filter->mog2;
-#endif
   return (0);
 }

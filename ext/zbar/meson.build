@@ -1,4 +1,4 @@
-zbar_dep = dependency('zbar', version : '>= 0.9', required : false)
+zbar_dep = dependency('zbar', version : '>= 0.9', required : get_option('zbar'))
 if zbar_dep.found()
   gstzbar = library('gstzbar',
     'gstzbar.c',
@@ -8,4 +8,6 @@ if zbar_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstzbar, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstzbar]
 endif

@@ -1,5 +1,4 @@
-ass_dep = dependency('libass', version : '>= 0.10.2', required : false)
-
+ass_dep = dependency('libass', version : '>= 0.10.2', required : get_option('assrender'))
 if ass_dep.found()
   gstassrender = library('gstassrender',
     'gstassrender.c',
@@ -10,4 +9,6 @@ if ass_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstassrender, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstassrender]
 endif

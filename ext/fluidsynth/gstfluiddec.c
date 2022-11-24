@@ -25,7 +25,7 @@
  * @see_also: timidity, wildmidi
  *
  * This element renders midi-events as audio streams using
- * <ulink url="http://fluidsynth.sourceforge.net//">Fluidsynth</ulink>.
+ * [Fluidsynth](http://fluidsynth.sourceforge.net/).
  * It offers better sound quality compared to the timidity or wildmidi element.
  *
  * ## Example pipeline
@@ -53,6 +53,11 @@
 #include <gst/audio/audio.h>
 
 #include "gstfluiddec.h"
+
+#define GST_HAVE_FLUIDSYNTH_VERSION(major,minor,micro) \
+  (FLUIDSYNTH_VERSION_MAJOR > (major) || \
+  (FLUIDSYNTH_VERSION_MAJOR == (major) && FLUIDSYNTH_VERSION_MINOR > (minor)) || \
+  (FLUIDSYNTH_VERSION_MAJOR == (major) && FLUIDSYNTH_VERSION_MINOR == (minor) && FLUIDSYNTH_VERSION_MICRO >= (micro)))
 
 GST_DEBUG_CATEGORY_STATIC (gst_fluid_dec_debug);
 #define GST_CAT_DEFAULT gst_fluid_dec_debug
@@ -112,32 +117,6 @@ static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
 #define parent_class gst_fluid_dec_parent_class
 G_DEFINE_TYPE (GstFluidDec, gst_fluid_dec, GST_TYPE_ELEMENT);
 
-/* fluid_synth log handler */
-static void
-gst_fluid_synth_error_log_function (int level, char *message, void *data)
-{
-  GST_ERROR ("%s", message);
-}
-
-static void
-gst_fluid_synth_warning_log_function (int level, char *message, void *data)
-{
-  GST_WARNING ("%s", message);
-}
-
-static void
-gst_fluid_synth_info_log_function (int level, char *message, void *data)
-{
-  GST_INFO ("%s", message);
-}
-
-static void
-gst_fluid_synth_debug_log_function (int level, char *message, void *data)
-{
-  GST_DEBUG ("%s", message);
-}
-
-
 /* initialize the plugin's class */
 static void
 gst_fluid_dec_class_init (GstFluidDecClass * klass)
@@ -185,23 +164,6 @@ gst_fluid_dec_class_init (GstFluidDecClass * klass)
       "Midi Synthesizer Element", "Wim Taymans <wim.taymans@gmail.com>");
 
   gstelement_class->change_state = gst_fluid_dec_change_state;
-
-#ifndef GST_DISABLE_GST_DEBUG
-  fluid_set_log_function (FLUID_PANIC, gst_fluid_synth_error_log_function,
-      NULL);
-  fluid_set_log_function (FLUID_ERR, gst_fluid_synth_warning_log_function,
-      NULL);
-  fluid_set_log_function (FLUID_WARN, gst_fluid_synth_warning_log_function,
-      NULL);
-  fluid_set_log_function (FLUID_INFO, gst_fluid_synth_info_log_function, NULL);
-  fluid_set_log_function (FLUID_DBG, gst_fluid_synth_debug_log_function, NULL);
-#else
-  fluid_set_log_function (FLUID_PANIC, NULL, NULL);
-  fluid_set_log_function (FLUID_ERR, NULL, NULL);
-  fluid_set_log_function (FLUID_WARN, NULL, NULL);
-  fluid_set_log_function (FLUID_INFO, NULL, NULL);
-  fluid_set_log_function (FLUID_DBG, NULL, NULL);
-#endif
 }
 
 /* initialize the new element
@@ -228,6 +190,11 @@ gst_fluid_dec_init (GstFluidDec * filter)
   filter->synth_polyphony = DEFAULT_SYNTH_POLYPHONY;
 
   filter->settings = new_fluid_settings ();
+
+  /* http://www.fluidsynth.org/api/fluidsettings.xml */
+  fluid_settings_setnum (filter->settings, "synth.sample-rate", FLUID_DEC_RATE);
+
+  /* FIXME: Initialize after caps negotiation so we can support more rates */
   filter->synth = new_fluid_synth (filter->settings);
   filter->sf = -1;
 
@@ -315,8 +282,6 @@ gst_fluid_dec_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
           "rate", G_TYPE_INT, FLUID_DEC_RATE,
           "channels", G_TYPE_INT, 2,
           "layout", G_TYPE_STRING, "interleaved", NULL);
-
-      fluid_synth_set_sample_rate (fluiddec->synth, FLUID_DEC_RATE);
 
       res = gst_pad_push_event (fluiddec->srcpad, gst_event_new_caps (caps));
       gst_caps_unref (caps);
@@ -527,8 +492,9 @@ gst_fluid_dec_open (GstFluidDec * fluiddec)
         fluiddec->soundfont);
   } else {
     gint i, j;
-    /* ubuntu/debian in sounds/sf2, fedora in soundfonts */
-    static const gchar *paths[] = { "sounds/sf2/", "soundfonts/", NULL };
+    /* ubuntu/debian in sounds/sf[23], fedora in soundfonts */
+    static const gchar *paths[] =
+        { "sounds/sf3/", "sounds/sf2/", "soundfonts/", NULL };
 
     sharedirs = g_get_system_data_dirs ();
 
@@ -714,11 +680,70 @@ gst_fluid_dec_get_property (GObject * object, guint prop_id,
   }
 }
 
+/* fluid_synth log handler */
+static void
+gst_fluid_synth_error_log_function (int level, const char *message, void *data)
+{
+  GST_ERROR ("%s", message);
+}
+
+static void
+gst_fluid_synth_warning_log_function (int level, const char *message,
+    void *data)
+{
+  GST_WARNING ("%s", message);
+}
+
+static void
+gst_fluid_synth_info_log_function (int level, const char *message, void *data)
+{
+  GST_INFO ("%s", message);
+}
+
+static void
+gst_fluid_synth_debug_log_function (int level, const char *message, void *data)
+{
+  GST_DEBUG ("%s", message);
+}
+
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
   GST_DEBUG_CATEGORY_INIT (gst_fluid_dec_debug, "fluiddec",
       0, "Fluidsynth MIDI decoder plugin");
+
+  /* We modify FluidSynth's global state here; let's hope nobody tries to use
+   * it natively alongside this plugin. */
+
+#ifndef GST_DISABLE_GST_DEBUG
+  fluid_set_log_function (FLUID_PANIC,
+      (fluid_log_function_t) gst_fluid_synth_error_log_function, NULL);
+  fluid_set_log_function (FLUID_ERR,
+      (fluid_log_function_t) gst_fluid_synth_warning_log_function, NULL);
+  fluid_set_log_function (FLUID_WARN,
+      (fluid_log_function_t) gst_fluid_synth_warning_log_function, NULL);
+  fluid_set_log_function (FLUID_INFO,
+      (fluid_log_function_t) gst_fluid_synth_info_log_function, NULL);
+  fluid_set_log_function (FLUID_DBG,
+      (fluid_log_function_t) gst_fluid_synth_debug_log_function, NULL);
+#else
+  fluid_set_log_function (FLUID_PANIC, NULL, NULL);
+  fluid_set_log_function (FLUID_ERR, NULL, NULL);
+  fluid_set_log_function (FLUID_WARN, NULL, NULL);
+  fluid_set_log_function (FLUID_INFO, NULL, NULL);
+  fluid_set_log_function (FLUID_DBG, NULL, NULL);
+#endif
+
+#if GST_HAVE_FLUIDSYNTH_VERSION(1, 1, 9)
+  {
+    /* Disable all audio drivers so new_fluid_settings() does not probe them.
+     * This can crash if FluidSynth is already in use. */
+    const char *empty[] = { NULL };
+    if (fluid_audio_driver_register (empty) != FLUID_OK) {
+      GST_WARNING ("Failed to clear audio drivers");
+    }
+  }
+#endif
 
   return gst_element_register (plugin, "fluiddec",
       GST_RANK_SECONDARY, GST_TYPE_FLUID_DEC);

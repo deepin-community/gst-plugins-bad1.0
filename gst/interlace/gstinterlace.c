@@ -94,17 +94,21 @@ struct _GstInterlace
 
   /* state */
   GstVideoInfo info;
+  GstVideoInfo out_info;
   int src_fps_n;
   int src_fps_d;
 
+  GMutex lock;
+  gint new_pattern;
   GstBuffer *stored_frame;
-  gint stored_fields;
-  gint phase_index;
-  int field_index;              /* index of the next field to push, 0=top 1=bottom */
+  guint stored_fields;
+  guint phase_index;
+  guint field_index;            /* index of the next field to push, 0=top 1=bottom */
   GstClockTime timebase;
-  int fields_since_timebase;
+  guint fields_since_timebase;
   guint pattern_offset;         /* initial offset into the pattern */
   gboolean passthrough;
+  gboolean switch_fields;
 };
 
 struct _GstInterlaceClass
@@ -168,22 +172,30 @@ gst_interlace_pattern_get_type (void)
   return interlace_pattern_type;
 }
 
+#define VIDEO_FORMATS "{AYUV,YUY2,UYVY,I420,YV12,Y42B,Y444,NV12,NV21}"
+
 static GstStaticPadTemplate gst_interlace_src_template =
-GST_STATIC_PAD_TEMPLATE ("src",
+    GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE
-        ("{AYUV,YUY2,UYVY,I420,YV12,Y42B,Y444,NV12,NV21}")
-        ",interlace-mode={interleaved,mixed}")
+    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE (VIDEO_FORMATS)
+        ",interlace-mode={interleaved,mixed} ;"
+        GST_VIDEO_CAPS_MAKE_WITH_FEATURES (GST_CAPS_FEATURE_FORMAT_INTERLACED,
+            VIDEO_FORMATS)
+        ",interlace-mode=alternate")
     );
 
 static GstStaticPadTemplate gst_interlace_sink_template =
-GST_STATIC_PAD_TEMPLATE ("sink",
+    GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE
-        ("{AYUV,YUY2,UYVY,I420,YV12,Y42B,Y444,NV12,NV21}")
-    )
+    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE (VIDEO_FORMATS)
+        ",interlace-mode=progressive ;" GST_VIDEO_CAPS_MAKE (VIDEO_FORMATS)
+        ",interlace-mode=interleaved,field-order={top-field-first,bottom-field-first}; "
+        GST_VIDEO_CAPS_MAKE (VIDEO_FORMATS) ",interlace-mode=mixed ;"
+        GST_VIDEO_CAPS_MAKE_WITH_FEATURES (GST_CAPS_FEATURE_FORMAT_INTERLACED,
+            VIDEO_FORMATS)
+        ",interlace-mode=alternate")
     );
 
 GType gst_interlace_get_type (void);
@@ -206,6 +218,9 @@ static gboolean gst_interlace_src_query (GstPad * pad, GstObject * parent,
 
 static GstStateChangeReturn gst_interlace_change_state (GstElement * element,
     GstStateChange transition);
+
+static GstCaps *gst_interlace_caps_double_framerate (GstCaps * caps,
+    gboolean half, gboolean skip_progressive);
 
 #define gst_interlace_parent_class parent_class
 G_DEFINE_TYPE (GstInterlace, gst_interlace, GST_TYPE_ELEMENT);
@@ -254,11 +269,15 @@ gst_interlace_class_init (GstInterlaceClass * klass)
       &gst_interlace_src_template);
 
   element_class->change_state = gst_interlace_change_state;
+
+  gst_type_mark_as_plugin_api (GST_INTERLACE_PATTERN, 0);
 }
 
 static void
 gst_interlace_finalize (GObject * obj)
 {
+  GstInterlace *interlace = GST_INTERLACE (obj);
+  g_mutex_clear (&interlace->lock);
   G_OBJECT_CLASS (parent_class)->finalize (obj);
 }
 
@@ -269,6 +288,7 @@ gst_interlace_reset (GstInterlace * interlace)
   interlace->timebase = GST_CLOCK_TIME_NONE;
   interlace->field_index = 0;
   interlace->passthrough = FALSE;
+  interlace->switch_fields = FALSE;
   if (interlace->stored_frame) {
     gst_buffer_unref (interlace->stored_frame);
     interlace->stored_frame = NULL;
@@ -294,7 +314,10 @@ gst_interlace_init (GstInterlace * interlace)
   interlace->top_field_first = FALSE;
   interlace->allow_rff = FALSE;
   interlace->pattern = GST_INTERLACE_PATTERN_2_3;
+  interlace->new_pattern = GST_INTERLACE_PATTERN_2_3;
   interlace->pattern_offset = 0;
+  interlace->src_fps_n = 0;
+  g_mutex_init (&interlace->lock);
   gst_interlace_reset (interlace);
 }
 
@@ -333,11 +356,16 @@ static const PulldownFormat formats[] = {
 };
 
 static void
-gst_interlace_decorate_buffer (GstInterlace * interlace, GstBuffer * buf,
-    int n_fields, gboolean interlaced)
+gst_interlace_decorate_buffer_ts (GstInterlace * interlace, GstBuffer * buf,
+    int n_fields)
 {
+  gint src_fps_n, src_fps_d;
+  g_mutex_lock (&interlace->lock);
+  src_fps_n = interlace->src_fps_n;
+  src_fps_d = interlace->src_fps_d;
+  g_mutex_unlock (&interlace->lock);
   /* field duration = src_fps_d / (2 * src_fps_n) */
-  if (interlace->src_fps_n == 0) {
+  if (src_fps_n == 0) {
     /* If we don't know the fps, we can't generate timestamps/durations */
     GST_BUFFER_DTS (buf) = GST_CLOCK_TIME_NONE;
     GST_BUFFER_PTS (buf) = GST_CLOCK_TIME_NONE;
@@ -345,13 +373,18 @@ gst_interlace_decorate_buffer (GstInterlace * interlace, GstBuffer * buf,
   } else {
     GST_BUFFER_DTS (buf) = interlace->timebase +
         gst_util_uint64_scale (GST_SECOND,
-        interlace->src_fps_d * interlace->fields_since_timebase,
-        interlace->src_fps_n * 2);
+        src_fps_d * interlace->fields_since_timebase, src_fps_n * 2);
     GST_BUFFER_PTS (buf) = GST_BUFFER_DTS (buf);
     GST_BUFFER_DURATION (buf) =
-        gst_util_uint64_scale (GST_SECOND, interlace->src_fps_d * n_fields,
-        interlace->src_fps_n * 2);
+        gst_util_uint64_scale (GST_SECOND, src_fps_d * n_fields, src_fps_n * 2);
   }
+}
+
+static void
+gst_interlace_decorate_buffer (GstInterlace * interlace, GstBuffer * buf,
+    int n_fields, gboolean interlaced)
+{
+  gst_interlace_decorate_buffer_ts (interlace, buf, n_fields);
 
   if (interlace->field_index == 0) {
     GST_BUFFER_FLAG_SET (buf, GST_VIDEO_BUFFER_FLAG_TFF);
@@ -362,63 +395,187 @@ gst_interlace_decorate_buffer (GstInterlace * interlace, GstBuffer * buf,
   if (n_fields == 1) {
     GST_BUFFER_FLAG_SET (buf, GST_VIDEO_BUFFER_FLAG_ONEFIELD);
   }
+  g_mutex_lock (&interlace->lock);
   if (interlace->pattern > GST_INTERLACE_PATTERN_2_2 && n_fields == 2
       && interlaced) {
     GST_BUFFER_FLAG_SET (buf, GST_VIDEO_BUFFER_FLAG_INTERLACED);
   }
+  g_mutex_unlock (&interlace->lock);
+}
+
+static const gchar *
+interlace_mode_from_pattern (GstInterlace * interlace)
+{
+  GstInterlacePattern pattern;
+  g_mutex_lock (&interlace->lock);
+  pattern = interlace->pattern;
+  g_mutex_unlock (&interlace->lock);
+  if (pattern > GST_INTERLACE_PATTERN_2_2)
+    return "mixed";
+  else
+    return "interleaved";
+}
+
+static GstCaps *
+dup_caps_with_alternate (GstCaps * caps)
+{
+  GstCaps *with_alternate;
+  GstCapsFeatures *features;
+
+  with_alternate = gst_caps_copy (caps);
+  features = gst_caps_features_new (GST_CAPS_FEATURE_FORMAT_INTERLACED, NULL);
+  gst_caps_set_features_simple (with_alternate, features);
+
+  gst_caps_set_simple (with_alternate, "interlace-mode", G_TYPE_STRING,
+      "alternate", NULL);
+
+  return with_alternate;
 }
 
 static gboolean
 gst_interlace_setcaps (GstInterlace * interlace, GstCaps * caps)
 {
   gboolean ret;
-  GstVideoInfo info;
-  GstCaps *othercaps;
+  GstVideoInfo info, out_info;
+  GstCaps *othercaps, *src_peer_caps;
   const PulldownFormat *pdformat;
+  gboolean alternate;
+  int i;
+  int src_fps_n, src_fps_d;
+  GstInterlacePattern pattern;
 
   if (!gst_video_info_from_caps (&info, caps))
     goto caps_error;
 
+  g_mutex_lock (&interlace->lock);
+  interlace->pattern = interlace->new_pattern;
+  pattern = interlace->pattern;
+  g_mutex_unlock (&interlace->lock);
+
+  /* Check if downstream prefers alternate mode */
   othercaps = gst_caps_copy (caps);
-  pdformat = &formats[interlace->pattern];
+  gst_caps_set_simple (othercaps, "interlace-mode", G_TYPE_STRING,
+      interlace_mode_from_pattern (interlace), NULL);
+  gst_caps_append (othercaps, dup_caps_with_alternate (othercaps));
+  if (pattern == GST_INTERLACE_PATTERN_2_2) {
+    for (i = 0; i < gst_caps_get_size (othercaps); ++i) {
+      GstStructure *s;
+
+      s = gst_caps_get_structure (othercaps, i);
+      gst_structure_remove_field (s, "field-order");
+    }
+  } else if (pattern == GST_INTERLACE_PATTERN_1_1 &&
+      GST_VIDEO_INFO_INTERLACE_MODE (&info) ==
+      GST_VIDEO_INTERLACE_MODE_PROGRESSIVE) {
+    /* interlaced will do passthrough, mixed will fail later in the
+     * negotiation */
+    othercaps = gst_interlace_caps_double_framerate (othercaps, TRUE, FALSE);
+  } else if (pattern > GST_INTERLACE_PATTERN_2_2) {
+    GST_FIXME_OBJECT (interlace,
+        "Add calculations for telecine framerate conversions");
+    for (i = 0; i < gst_caps_get_size (othercaps); ++i) {
+      GstStructure *s = gst_caps_get_structure (othercaps, i);
+
+      gst_structure_remove_field (s, "framerate");
+    }
+  }
+  src_peer_caps = gst_pad_peer_query_caps (interlace->srcpad, othercaps);
+  gst_caps_unref (othercaps);
+  othercaps = gst_caps_fixate (src_peer_caps);
+  if (gst_caps_is_empty (othercaps)) {
+    gst_caps_unref (othercaps);
+    goto caps_error;
+  }
+  if (!gst_video_info_from_caps (&out_info, othercaps)) {
+    gst_caps_unref (othercaps);
+    goto caps_error;
+  }
+
+  alternate =
+      GST_VIDEO_INFO_INTERLACE_MODE (&out_info) ==
+      GST_VIDEO_INTERLACE_MODE_ALTERNATE;
+
+  pdformat = &formats[pattern];
 
   interlace->phase_index = interlace->pattern_offset;
 
-  interlace->src_fps_n = info.fps_n * pdformat->ratio_n;
-  interlace->src_fps_d = info.fps_d * pdformat->ratio_d;
+  src_fps_n = info.fps_n * pdformat->ratio_n;
+  src_fps_d = info.fps_d * pdformat->ratio_d;
+  g_mutex_lock (&interlace->lock);
+  interlace->src_fps_n = src_fps_n;
+  interlace->src_fps_d = src_fps_d;
+  g_mutex_unlock (&interlace->lock);
+  GST_DEBUG_OBJECT (interlace, "new framerate %d/%d", src_fps_n, src_fps_d);
 
-  if (interlace->pattern > GST_INTERLACE_PATTERN_2_2) {
-    gst_caps_set_simple (othercaps, "interlace-mode", G_TYPE_STRING, "mixed",
-        NULL);
-  } else {
-    gst_caps_set_simple (othercaps, "interlace-mode", G_TYPE_STRING,
-        "interleaved", NULL);
+  if (alternate) {
+    GST_DEBUG_OBJECT (interlace,
+        "producing alternate stream as requested downstream");
   }
 
-  if (gst_caps_can_intersect (caps, othercaps)) {
+  interlace->switch_fields = FALSE;
+  if (gst_caps_can_intersect (caps, othercaps) &&
+      pattern <= GST_INTERLACE_PATTERN_2_2 &&
+      GST_VIDEO_INFO_INTERLACE_MODE (&info) != GST_VIDEO_INTERLACE_MODE_MIXED) {
+    /* FIXME: field-order is optional in the caps. This means that, if we're
+     * in a non-telecine mode and we have TFF upstream and
+     * top-field-first=FALSE in interlace (or the other way around), AND
+     * field-order isn't mentioned in the caps, we will do passthrough here
+     * and end up outptuting wrong data. Must detect missing field-order info
+     * and not do passthrough in that case, but instead check the
+     * GstVideoBufferFlags at the switch_fields check */
     interlace->passthrough = TRUE;
   } else {
     if (GST_VIDEO_INFO_IS_INTERLACED (&info)) {
-      GST_ERROR_OBJECT (interlace,
-          "Caps %" GST_PTR_FORMAT " not compatible with %" GST_PTR_FORMAT, caps,
-          othercaps);
-      gst_caps_unref (othercaps);
-      goto caps_error;
+      if (pattern == GST_INTERLACE_PATTERN_2_2) {
+        /* There is a chance we'd have to switch fields when in fact doing
+         * passthrough - see FIXME comment above, basically it would
+         * auto-negotiate to passthrough (because field-order is missing from
+         * the caps) */
+        GstCaps *clonedcaps = gst_caps_copy (othercaps);
+        for (i = 0; i < gst_caps_get_size (clonedcaps); ++i) {
+          GstStructure *s = gst_caps_get_structure (clonedcaps, i);
+
+          gst_structure_remove_field (s, "field-order");
+        }
+        if (gst_caps_can_intersect (caps, clonedcaps)) {
+          interlace->switch_fields = TRUE;
+          gst_caps_unref (clonedcaps);
+        } else {
+          gst_caps_unref (clonedcaps);
+          GST_ERROR_OBJECT (interlace,
+              "Caps %" GST_PTR_FORMAT " not compatible with %" GST_PTR_FORMAT,
+              caps, othercaps);
+          gst_caps_unref (othercaps);
+          goto caps_error;
+        }
+      } else {
+        GST_ERROR_OBJECT (interlace,
+            "Caps %" GST_PTR_FORMAT " not compatible with %" GST_PTR_FORMAT,
+            caps, othercaps);
+        gst_caps_unref (othercaps);
+        goto caps_error;
+      }
     }
     interlace->passthrough = FALSE;
-    gst_caps_set_simple (othercaps, "framerate", GST_TYPE_FRACTION,
-        interlace->src_fps_n, interlace->src_fps_d, NULL);
-    if (interlace->pattern <= GST_INTERLACE_PATTERN_2_2) {
+    gst_caps_set_simple (othercaps, "framerate", GST_TYPE_FRACTION, src_fps_n,
+        src_fps_d, NULL);
+    if (pattern <= GST_INTERLACE_PATTERN_2_2 || alternate) {
       gst_caps_set_simple (othercaps, "field-order", G_TYPE_STRING,
           interlace->top_field_first ? "top-field-first" : "bottom-field-first",
           NULL);
     }
+    /* outcaps changed, regenerate out_info */
+    gst_video_info_from_caps (&out_info, othercaps);
   }
+
+  GST_DEBUG_OBJECT (interlace->sinkpad, "set caps %" GST_PTR_FORMAT, caps);
+  GST_DEBUG_OBJECT (interlace->srcpad, "set caps %" GST_PTR_FORMAT, othercaps);
 
   ret = gst_pad_set_caps (interlace->srcpad, othercaps);
   gst_caps_unref (othercaps);
 
   interlace->info = info;
+  interlace->out_info = out_info;
 
   return ret;
 
@@ -496,6 +653,10 @@ gst_interlace_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
     }
 #endif
 
+      if (interlace->stored_frame) {
+        gst_buffer_unref (interlace->stored_frame);
+        interlace->stored_frame = NULL;
+      }
       ret = gst_pad_push_event (interlace->srcpad, event);
       break;
     case GST_EVENT_CAPS:
@@ -558,16 +719,24 @@ gst_interlace_fraction_double (gint * n_out, gint * d_out, gboolean half)
 }
 
 static GstCaps *
-gst_interlace_caps_double_framerate (GstCaps * caps, gboolean half)
+gst_interlace_caps_double_framerate (GstCaps * caps, gboolean half,
+    gboolean skip_progressive)
 {
   guint len;
 
   for (len = gst_caps_get_size (caps); len > 0; len--) {
     GstStructure *s = gst_caps_get_structure (caps, len - 1);
     const GValue *val;
+    const gchar *interlace_mode;
 
     val = gst_structure_get_value (s, "framerate");
     if (!val)
+      continue;
+
+    interlace_mode = gst_structure_get_string (s, "interlace-mode");
+    /* Do not double the framerate for interlaced - we will either passthrough
+     * or fail to negotiate */
+    if (skip_progressive && (g_strcmp0 (interlace_mode, "progressive") != 0))
       continue;
 
     if (G_VALUE_TYPE (val) == GST_TYPE_FRACTION) {
@@ -672,26 +841,69 @@ gst_interlace_getcaps (GstPad * pad, GstInterlace * interlace, GstCaps * filter)
   GstCaps *clean_filter = NULL;
   const char *mode;
   guint i;
+  gint pattern;
 
   otherpad =
       (pad == interlace->srcpad) ? interlace->sinkpad : interlace->srcpad;
 
+  g_mutex_lock (&interlace->lock);
+  pattern = interlace->new_pattern;
+  g_mutex_unlock (&interlace->lock);
+
   if (filter != NULL) {
     clean_filter = gst_caps_copy (filter);
-    clean_filter =
-        gst_interlace_caps_double_framerate (clean_filter,
-        (pad == interlace->sinkpad));
+    if (pattern == GST_INTERLACE_PATTERN_1_1) {
+      clean_filter =
+          gst_interlace_caps_double_framerate (clean_filter,
+          (pad == interlace->sinkpad), TRUE);
+    } else if (pattern != GST_INTERLACE_PATTERN_2_2) {
+      GST_FIXME_OBJECT (interlace,
+          "Add calculations for telecine framerate conversions");
+      for (i = 0; i < gst_caps_get_size (clean_filter); ++i) {
+        GstStructure *s = gst_caps_get_structure (clean_filter, i);
+
+        gst_structure_remove_field (s, "framerate");
+      }
+    }
+
+    if (pad == interlace->sinkpad) {
+      /* @filter may contain the different formats supported upstream.
+       * Those will be used to filter the src pad caps as this element
+       * is not supposed to do any video format conversion.
+       * Add a variant of the filter with the Interlaced feature as we want
+       * to be able to negotiate it if needed.
+       */
+      gst_caps_append (clean_filter, dup_caps_with_alternate (clean_filter));
+    }
+
     for (i = 0; i < gst_caps_get_size (clean_filter); ++i) {
       GstStructure *s;
 
       s = gst_caps_get_structure (clean_filter, i);
       gst_structure_remove_field (s, "interlace-mode");
+      if (pattern == GST_INTERLACE_PATTERN_2_2 && pad == interlace->sinkpad) {
+        gst_structure_remove_field (s, "field-order");
+      }
     }
   }
 
   tcaps = gst_pad_get_pad_template_caps (otherpad);
   othercaps = gst_pad_peer_query_caps (otherpad, clean_filter);
+  othercaps = gst_caps_make_writable (othercaps);
   if (othercaps) {
+    if (pattern == GST_INTERLACE_PATTERN_2_2) {
+      for (i = 0; i < gst_caps_get_size (othercaps); ++i) {
+        GstStructure *s = gst_caps_get_structure (othercaps, i);
+
+        if (pad == interlace->srcpad) {
+          gst_structure_set (s, "field-order", G_TYPE_STRING,
+              interlace->top_field_first ? "top-field-first" :
+              "bottom-field-first", NULL);
+        } else {
+          gst_structure_remove_field (s, "field-order");
+        }
+      }
+    }
     icaps = gst_caps_intersect (othercaps, tcaps);
     gst_caps_unref (othercaps);
     gst_caps_unref (tcaps);
@@ -706,28 +918,68 @@ gst_interlace_getcaps (GstPad * pad, GstInterlace * interlace, GstCaps * filter)
   }
 
   icaps = gst_caps_make_writable (icaps);
-  tcaps = gst_caps_copy (icaps);
-  if (interlace->pattern > GST_INTERLACE_PATTERN_2_2) {
-    mode = "mixed";
+  mode = interlace_mode_from_pattern (interlace);
+
+  if (pad == interlace->srcpad) {
+    /* Set interlace-mode to what the element will produce, so either
+     * mixed/interleaved or alternate if the caps feature is present. */
+    gst_caps_set_simple (icaps, "interlace-mode", G_TYPE_STRING, mode, NULL);
+    icaps = gst_caps_merge (icaps, dup_caps_with_alternate (icaps));
   } else {
-    mode = "interleaved";
-  }
-  gst_caps_set_simple (icaps, "interlace-mode", G_TYPE_STRING,
-      pad == interlace->srcpad ? mode : "progressive", NULL);
-  if (pad == interlace->sinkpad) {
-    gst_caps_set_simple (tcaps, "interlace-mode", G_TYPE_STRING, mode, NULL);
-    icaps = gst_caps_merge (icaps, tcaps);
-    tcaps = NULL;
-  } else {
-    gst_caps_unref (tcaps);
+    GstCaps *interlaced, *alternate;
+
+    /* Sink pad is supposed to receive a progressive stream so remove the
+     * Interlaced feature and set interlace-mode=progressive */
+    for (i = 0; i < gst_caps_get_size (icaps); ++i) {
+      GstCapsFeatures *features;
+      GstStructure *s = gst_caps_get_structure (icaps, i);
+
+      features = gst_caps_get_features (icaps, i);
+      gst_caps_features_remove (features, GST_CAPS_FEATURE_FORMAT_INTERLACED);
+
+      /* Drop field-order field for sinkpad */
+      gst_structure_remove_field (s, "field-order");
+    }
+
+    gst_caps_set_simple (icaps, "interlace-mode", G_TYPE_STRING, "progressive",
+        NULL);
+
+    /* Now add variants of the same caps with the interlace-mode and Interlaced
+     * caps so we can operate in passthrough if needed. */
+    interlaced = gst_caps_copy (icaps);
+    gst_caps_set_simple (interlaced, "interlace-mode", G_TYPE_STRING, mode,
+        NULL);
+    alternate = dup_caps_with_alternate (icaps);
+
+    icaps = gst_caps_merge (icaps, interlaced);
+    icaps = gst_caps_merge (icaps, alternate);
   }
 
-  icaps =
-      gst_interlace_caps_double_framerate (icaps, (pad == interlace->srcpad));
+  /* Drop framerate for sinkpad */
+  if (pad == interlace->sinkpad) {
+    for (i = 0; i < gst_caps_get_size (icaps); ++i) {
+      GstStructure *s = gst_caps_get_structure (icaps, i);
+
+      gst_structure_remove_field (s, "framerate");
+    }
+  } else {
+    if (pattern == GST_INTERLACE_PATTERN_1_1) {
+      icaps = gst_interlace_caps_double_framerate (icaps, TRUE, FALSE);
+    } else if (pattern != GST_INTERLACE_PATTERN_2_2) {
+      GST_FIXME_OBJECT (interlace,
+          "Add calculations for telecine framerate conversions");
+      for (i = 0; i < gst_caps_get_size (icaps); ++i) {
+        GstStructure *s = gst_caps_get_structure (icaps, i);
+
+        gst_structure_remove_field (s, "framerate");
+      }
+    }
+  }
 
   if (clean_filter)
     gst_caps_unref (clean_filter);
 
+  GST_DEBUG_OBJECT (pad, "caps: %" GST_PTR_FORMAT, icaps);
   return icaps;
 }
 
@@ -786,18 +1038,19 @@ gst_interlace_src_query (GstPad * pad, GstObject * parent, GstQuery * query)
 }
 
 static void
-copy_field (GstInterlace * interlace, GstBuffer * dest, GstBuffer * src,
+copy_fields (GstInterlace * interlace, GstBuffer * dest, GstBuffer * src,
     int field_index)
 {
-  GstVideoInfo *info = &interlace->info;
+  GstVideoInfo *in_info = &interlace->info;
+  GstVideoInfo *out_info = &interlace->out_info;
   gint i, j, n_planes;
   guint8 *d, *s;
   GstVideoFrame dframe, sframe;
 
-  if (!gst_video_frame_map (&dframe, info, dest, GST_MAP_WRITE))
+  if (!gst_video_frame_map (&dframe, out_info, dest, GST_MAP_WRITE))
     goto dest_map_failed;
 
-  if (!gst_video_frame_map (&sframe, info, src, GST_MAP_READ))
+  if (!gst_video_frame_map (&sframe, in_info, src, GST_MAP_READ))
     goto src_map_failed;
 
   n_planes = GST_VIDEO_FRAME_N_PLANES (&dframe);
@@ -813,7 +1066,11 @@ copy_field (GstInterlace * interlace, GstBuffer * dest, GstBuffer * src,
     ss = GST_VIDEO_FRAME_PLANE_STRIDE (&sframe, i);
 
     d += field_index * ds;
-    s += field_index * ss;
+    if (!interlace->switch_fields) {
+      s += field_index * ss;
+    } else {
+      s += (field_index ^ 1) * ss;
+    }
 
     cheight = GST_VIDEO_FRAME_COMP_HEIGHT (&dframe, i);
     cwidth = MIN (ABS (ss), ABS (ds));
@@ -842,6 +1099,83 @@ src_map_failed:
   }
 }
 
+static GstBuffer *
+copy_field (GstInterlace * interlace, GstBuffer * src, int field_index)
+{
+  gint i, j, n_planes;
+  GstVideoFrame dframe, sframe;
+  GstBuffer *dest;
+
+  dest =
+      gst_buffer_new_allocate (NULL, GST_VIDEO_INFO_SIZE (&interlace->out_info),
+      NULL);
+
+  if (!gst_video_frame_map (&dframe, &interlace->out_info, dest, GST_MAP_WRITE))
+    goto dest_map_failed;
+
+  if (!gst_video_frame_map (&sframe, &interlace->info, src, GST_MAP_READ))
+    goto src_map_failed;
+
+  n_planes = GST_VIDEO_FRAME_N_PLANES (&dframe);
+
+  for (i = 0; i < n_planes; i++) {
+    guint8 *d, *s;
+    gint cheight, cwidth;
+    gint ss, ds;
+
+    d = GST_VIDEO_FRAME_PLANE_DATA (&dframe, i);
+    s = GST_VIDEO_FRAME_PLANE_DATA (&sframe, i);
+
+    ds = GST_VIDEO_FRAME_PLANE_STRIDE (&dframe, i);
+    ss = GST_VIDEO_FRAME_PLANE_STRIDE (&sframe, i);
+
+    cheight = GST_VIDEO_FRAME_COMP_HEIGHT (&sframe, i);
+    cwidth = MIN (ABS (ss), ABS (ds));
+
+    for (j = field_index; j < cheight; j += 2) {
+      memcpy (d, s, cwidth);
+      d += ds;
+      s += ss * 2;
+    }
+  }
+
+  gst_video_frame_unmap (&dframe);
+  gst_video_frame_unmap (&sframe);
+  return dest;
+dest_map_failed:
+  {
+    GST_ELEMENT_ERROR (interlace, CORE, FAILED, ("Failed to write map buffer"),
+        ("Failed to map dest buffer for field %d", field_index));
+    gst_buffer_unref (dest);
+    return NULL;
+  }
+src_map_failed:
+  {
+    GST_ELEMENT_ERROR (interlace, CORE, FAILED, ("Failed to read map buffer"),
+        ("Failed to map source buffer for field %d", field_index));
+    gst_buffer_unref (dest);
+    gst_video_frame_unmap (&dframe);
+    return NULL;
+  }
+}
+
+static GstFlowReturn
+gst_interlace_push_buffer (GstInterlace * interlace, GstBuffer * buffer)
+{
+  GST_DEBUG_OBJECT (interlace, "output timestamp %" GST_TIME_FORMAT
+      " duration %" GST_TIME_FORMAT " flags %04x %s %s %s",
+      GST_TIME_ARGS (GST_BUFFER_TIMESTAMP (buffer)),
+      GST_TIME_ARGS (GST_BUFFER_DURATION (buffer)),
+      GST_BUFFER_FLAGS (buffer),
+      (GST_BUFFER_FLAGS (buffer) & GST_VIDEO_BUFFER_FLAG_TFF) ? "tff" :
+      "",
+      (GST_BUFFER_FLAGS (buffer) & GST_VIDEO_BUFFER_FLAG_RFF) ? "rff" :
+      "",
+      (GST_BUFFER_FLAGS (buffer) & GST_VIDEO_BUFFER_FLAG_ONEFIELD) ?
+      "onefield" : "");
+
+  return gst_pad_push (interlace->srcpad, buffer);
+}
 
 static GstFlowReturn
 gst_interlace_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
@@ -849,9 +1183,10 @@ gst_interlace_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
   GstInterlace *interlace = GST_INTERLACE (parent);
   GstFlowReturn ret = GST_FLOW_OK;
   gint num_fields = 0;
-  int current_fields;
+  guint current_fields;
   const PulldownFormat *format;
   GstClockTime timestamp;
+  gboolean alternate;
 
   timestamp = GST_BUFFER_TIMESTAMP (buffer);
 
@@ -890,7 +1225,9 @@ gst_interlace_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
     interlace->timebase = timestamp;
   }
 
+  g_mutex_lock (&interlace->lock);
   format = &formats[interlace->pattern];
+  g_mutex_unlock (&interlace->lock);
 
   if (interlace->stored_fields == 0
       && interlace->phase_index == interlace->pattern_offset
@@ -899,20 +1236,37 @@ gst_interlace_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
     interlace->fields_since_timebase = 0;
   }
 
-  if (!format->n_fields[interlace->phase_index]) {
-    interlace->phase_index = 0;
-  }
-
   current_fields = format->n_fields[interlace->phase_index];
   /* increment the phase index */
   interlace->phase_index++;
+  g_assert (interlace->phase_index < G_N_ELEMENTS (format->n_fields));
+  if (!format->n_fields[interlace->phase_index]) {
+    interlace->phase_index = 0;
+  }
+  if (interlace->switch_fields && !interlace->stored_frame) {
+    /* When switching fields, we want to skip the very first field of the very
+     * first frame, then take one field from the stored frame and one from the
+     * current one. This happens in the code when we do not have enough fields
+     * available on current_fields, so we decrement the number, which is what
+     * would happen if we had used one field. This way, the current frame
+     * will be stored and then its other field will be used the next time the
+     * chain function is called */
+    current_fields--;
+  }
+
   GST_DEBUG ("incoming buffer assigned %d fields", current_fields);
+
+  alternate =
+      GST_VIDEO_INFO_INTERLACE_MODE (&interlace->out_info) ==
+      GST_VIDEO_INTERLACE_MODE_ALTERNATE;
 
   num_fields = interlace->stored_fields + current_fields;
   while (num_fields >= 2) {
-    GstBuffer *output_buffer;
-    int n_output_fields;
+    GstBuffer *output_buffer, *output_buffer2 = NULL;
+    guint n_output_fields;
     gboolean interlaced = FALSE;
+    GstVideoInfo *in_info = &interlace->info;
+    GstVideoInfo *out_info = &interlace->out_info;
 
     GST_DEBUG ("have %d fields, %d current, %d stored",
         num_fields, current_fields, interlace->stored_fields);
@@ -920,18 +1274,70 @@ gst_interlace_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
     if (interlace->stored_fields > 0) {
       GST_DEBUG ("1 field from stored, 1 from current");
 
-      output_buffer = gst_buffer_new_and_alloc (gst_buffer_get_size (buffer));
-      /* take the first field from the stored frame */
-      copy_field (interlace, output_buffer, interlace->stored_frame,
-          interlace->field_index);
+      if (alternate) {
+        /* take the first field from the stored frame */
+        output_buffer = copy_field (interlace, interlace->stored_frame,
+            interlace->field_index);
+        if (!output_buffer)
+          return GST_FLOW_ERROR;
+        /* take the second field from the incoming buffer */
+        output_buffer2 = copy_field (interlace, buffer,
+            interlace->field_index ^ 1);
+        if (!output_buffer2)
+          return GST_FLOW_ERROR;
+      } else {
+        output_buffer =
+            gst_buffer_new_and_alloc (GST_VIDEO_INFO_SIZE (out_info));
+        /* take the first field from the stored frame */
+        copy_fields (interlace, output_buffer, interlace->stored_frame,
+            interlace->field_index);
+        /* take the second field from the incoming buffer */
+        copy_fields (interlace, output_buffer, buffer,
+            interlace->field_index ^ 1);
+      }
+
       interlace->stored_fields--;
-      /* take the second field from the incoming buffer */
-      copy_field (interlace, output_buffer, buffer, interlace->field_index ^ 1);
       current_fields--;
       n_output_fields = 2;
       interlaced = TRUE;
     } else {
-      output_buffer = gst_buffer_make_writable (gst_buffer_ref (buffer));
+      if (alternate) {
+        output_buffer = copy_field (interlace, buffer, interlace->field_index);
+        if (!output_buffer)
+          return GST_FLOW_ERROR;
+        output_buffer2 =
+            copy_field (interlace, buffer, interlace->field_index ^ 1);
+        if (!output_buffer2)
+          return GST_FLOW_ERROR;
+      } else {
+        GstVideoFrame dframe, sframe;
+
+        output_buffer =
+            gst_buffer_new_and_alloc (GST_VIDEO_INFO_SIZE (out_info));
+
+        if (!gst_video_frame_map (&dframe,
+                out_info, output_buffer, GST_MAP_WRITE)) {
+          GST_ELEMENT_ERROR (interlace, CORE, FAILED,
+              ("Failed to write map buffer"), ("Failed to map output buffer"));
+          gst_buffer_unref (output_buffer);
+          gst_buffer_unref (buffer);
+          return GST_FLOW_ERROR;
+        }
+
+        if (!gst_video_frame_map (&sframe, in_info, buffer, GST_MAP_READ)) {
+          GST_ELEMENT_ERROR (interlace, CORE, FAILED,
+              ("Failed to read map buffer"), ("Failed to map input buffer"));
+          gst_video_frame_unmap (&dframe);
+          gst_buffer_unref (output_buffer);
+          gst_buffer_unref (buffer);
+          return GST_FLOW_ERROR;
+        }
+
+        gst_video_frame_copy (&dframe, &sframe);
+        gst_video_frame_unmap (&dframe);
+        gst_video_frame_unmap (&sframe);
+      }
+
       if (num_fields >= 3 && interlace->allow_rff) {
         GST_DEBUG ("3 fields from current");
         /* take both fields from incoming buffer */
@@ -946,27 +1352,53 @@ gst_interlace_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
     }
     num_fields -= n_output_fields;
 
-    gst_interlace_decorate_buffer (interlace, output_buffer, n_output_fields,
-        interlaced);
+    if (!alternate) {
+      g_assert (!output_buffer2);
+      gst_interlace_decorate_buffer (interlace, output_buffer, n_output_fields,
+          interlaced);
+    } else {
+      g_assert (output_buffer2);
+      gst_interlace_decorate_buffer_ts (interlace, output_buffer,
+          n_output_fields);
+
+      /* Both fields share the same ts */
+      GST_BUFFER_PTS (output_buffer2) = GST_BUFFER_PTS (output_buffer);
+      GST_BUFFER_DTS (output_buffer2) = GST_BUFFER_DTS (output_buffer);
+      GST_BUFFER_DURATION (output_buffer2) =
+          GST_BUFFER_DURATION (output_buffer);
+
+      if (interlace->field_index == 0) {
+        GST_BUFFER_FLAG_SET (output_buffer, GST_VIDEO_BUFFER_FLAG_TOP_FIELD);
+        GST_BUFFER_FLAG_SET (output_buffer2,
+            GST_VIDEO_BUFFER_FLAG_BOTTOM_FIELD);
+      } else {
+        GST_BUFFER_FLAG_SET (output_buffer, GST_VIDEO_BUFFER_FLAG_BOTTOM_FIELD);
+        GST_BUFFER_FLAG_SET (output_buffer2, GST_VIDEO_BUFFER_FLAG_TOP_FIELD);
+      }
+
+      GST_BUFFER_FLAG_SET (output_buffer, GST_VIDEO_BUFFER_FLAG_INTERLACED);
+      GST_BUFFER_FLAG_SET (output_buffer2, GST_VIDEO_BUFFER_FLAG_INTERLACED);
+    }
+
+    /* Guard against overflows here. If this ever happens, resetting the phase
+     * above would never happen because of some bugs */
+    g_assert (interlace->fields_since_timebase <= G_MAXUINT - n_output_fields);
     interlace->fields_since_timebase += n_output_fields;
     interlace->field_index ^= (n_output_fields & 1);
 
-    GST_DEBUG_OBJECT (interlace, "output timestamp %" GST_TIME_FORMAT
-        " duration %" GST_TIME_FORMAT " flags %04x %s %s %s",
-        GST_TIME_ARGS (GST_BUFFER_TIMESTAMP (output_buffer)),
-        GST_TIME_ARGS (GST_BUFFER_DURATION (output_buffer)),
-        GST_BUFFER_FLAGS (output_buffer),
-        (GST_BUFFER_FLAGS (output_buffer) & GST_VIDEO_BUFFER_FLAG_TFF) ? "tff" :
-        "",
-        (GST_BUFFER_FLAGS (output_buffer) & GST_VIDEO_BUFFER_FLAG_RFF) ? "rff" :
-        "",
-        (GST_BUFFER_FLAGS (output_buffer) & GST_VIDEO_BUFFER_FLAG_ONEFIELD) ?
-        "onefield" : "");
-
-    ret = gst_pad_push (interlace->srcpad, output_buffer);
+    ret = gst_interlace_push_buffer (interlace, output_buffer);
     if (ret != GST_FLOW_OK) {
       GST_DEBUG_OBJECT (interlace, "Failed to push buffer %p", output_buffer);
       break;
+    }
+
+    if (output_buffer2) {
+      ret = gst_interlace_push_buffer (interlace, output_buffer2);
+      if (ret != GST_FLOW_OK) {
+        GST_DEBUG_OBJECT (interlace, "Failed to push buffer %p",
+            output_buffer2);
+        break;
+      }
     }
   }
 
@@ -997,9 +1429,19 @@ gst_interlace_set_property (GObject * object,
     case PROP_TOP_FIELD_FIRST:
       interlace->top_field_first = g_value_get_boolean (value);
       break;
-    case PROP_PATTERN:
-      interlace->pattern = g_value_get_enum (value);
+    case PROP_PATTERN:{
+      gint pattern = g_value_get_enum (value);
+      g_mutex_lock (&interlace->lock);
+      interlace->new_pattern = pattern;
+      if (pattern == interlace->pattern || interlace->src_fps_n == 0) {
+        interlace->pattern = pattern;
+        g_mutex_unlock (&interlace->lock);
+      } else {
+        g_mutex_unlock (&interlace->lock);
+        gst_pad_push_event (interlace->srcpad, gst_event_new_reconfigure ());
+      }
       break;
+    }
     case PROP_PATTERN_OFFSET:
       interlace->pattern_offset = g_value_get_uint (value);
       break;
@@ -1023,7 +1465,9 @@ gst_interlace_get_property (GObject * object,
       g_value_set_boolean (value, interlace->top_field_first);
       break;
     case PROP_PATTERN:
-      g_value_set_enum (value, interlace->pattern);
+      g_mutex_lock (&interlace->lock);
+      g_value_set_enum (value, interlace->new_pattern);
+      g_mutex_unlock (&interlace->lock);
       break;
     case PROP_PATTERN_OFFSET:
       g_value_set_uint (value, interlace->pattern_offset);
@@ -1040,10 +1484,17 @@ gst_interlace_get_property (GObject * object,
 static GstStateChangeReturn
 gst_interlace_change_state (GstElement * element, GstStateChange transition)
 {
-  //GstInterlace *interlace = GST_INTERLACE (element);
+  GstInterlace *interlace = GST_INTERLACE (element);
 
   switch (transition) {
     case GST_STATE_CHANGE_PAUSED_TO_READY:
+      g_mutex_lock (&interlace->lock);
+      interlace->src_fps_n = 0;
+      if (interlace->stored_frame) {
+        gst_buffer_unref (interlace->stored_frame);
+      }
+      g_mutex_unlock (&interlace->lock);
+      /* why? */
       //gst_interlace_reset (interlace);
       break;
     default:

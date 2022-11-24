@@ -48,10 +48,10 @@
 #define __GST_FACE_BLUR_H__
 
 #include <gst/gst.h>
-#include <opencv2/core/version.hpp>
-
 #include <gst/opencv/gstopencvvideofilter.h>
-#include <opencv2/objdetect/objdetect.hpp>
+
+#include <opencv2/core.hpp>
+#include <opencv2/objdetect.hpp>
 
 G_BEGIN_DECLS
 /* #defines don't like whitespacey bits */
@@ -82,7 +82,7 @@ struct _GstFaceBlur
   gint min_size_width;
   gint min_size_height;
 
-  IplImage *cvGray;
+  cv::Mat cvGray;
   cv::CascadeClassifier *cvCascade;
 };
 

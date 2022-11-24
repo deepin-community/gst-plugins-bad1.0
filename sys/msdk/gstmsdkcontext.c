@@ -41,21 +41,13 @@
 GST_DEBUG_CATEGORY_STATIC (gst_debug_msdkcontext);
 #define GST_CAT_DEFAULT gst_debug_msdkcontext
 
-#define GST_MSDK_CONTEXT_GET_PRIVATE(obj) \
-  (G_TYPE_INSTANCE_GET_PRIVATE ((obj), GST_TYPE_MSDK_CONTEXT, \
-      GstMsdkContextPrivate))
-
-#define gst_msdk_context_parent_class parent_class
-G_DEFINE_TYPE_WITH_CODE (GstMsdkContext, gst_msdk_context, GST_TYPE_OBJECT,
-    GST_DEBUG_CATEGORY_INIT (gst_debug_msdkcontext, "msdkcontext", 0,
-        "MSDK Context"));
-
 struct _GstMsdkContextPrivate
 {
   mfxSession session;
   GList *cached_alloc_responses;
   gboolean hardware;
   gboolean is_joined;
+  gboolean has_frame_allocator;
   GstMsdkContextJobType job_type;
   gint shared_async_depth;
   GMutex mutex;
@@ -65,6 +57,12 @@ struct _GstMsdkContextPrivate
   VADisplay dpy;
 #endif
 };
+
+#define gst_msdk_context_parent_class parent_class
+G_DEFINE_TYPE_WITH_CODE (GstMsdkContext, gst_msdk_context, GST_TYPE_OBJECT,
+    G_ADD_PRIVATE (GstMsdkContext)
+    GST_DEBUG_CATEGORY_INIT (gst_debug_msdkcontext, "msdkcontext", 0,
+        "MSDK Context"));
 
 #ifndef _WIN32
 
@@ -96,7 +94,8 @@ get_device_id (void)
       dev = (GUdevDevice *) l->data;
 
       parent = g_udev_device_get_parent (dev);
-      if (strcmp (g_udev_device_get_subsystem (parent), "pci") != 0) {
+      if (strcmp (g_udev_device_get_subsystem (parent), "pci") != 0 ||
+          strcmp (g_udev_device_get_driver (parent), "i915") != 0) {
         g_object_unref (parent);
         continue;
       }
@@ -179,6 +178,7 @@ static gboolean
 gst_msdk_context_open (GstMsdkContext * context, gboolean hardware,
     GstMsdkContextJobType job_type)
 {
+  mfxU16 codename;
   GstMsdkContextPrivate *priv = context->priv;
 
   priv->job_type = job_type;
@@ -197,18 +197,23 @@ gst_msdk_context_open (GstMsdkContext * context, gboolean hardware,
   }
 #endif
 
+  codename = msdk_get_platform_codename (priv->session);
+
+  if (codename != MFX_PLATFORM_UNKNOWN)
+    GST_INFO ("Detected MFX platform with device code %d", codename);
+  else
+    GST_WARNING ("Unknown MFX platform");
+
   return TRUE;
 
 failed:
-  msdk_close_session (priv->session);
-  gst_object_unref (context);
   return FALSE;
 }
 
 static void
 gst_msdk_context_init (GstMsdkContext * context)
 {
-  GstMsdkContextPrivate *priv = GST_MSDK_CONTEXT_GET_PRIVATE (context);
+  GstMsdkContextPrivate *priv = gst_msdk_context_get_instance_private (context);
 
   context->priv = priv;
 
@@ -257,7 +262,6 @@ static void
 gst_msdk_context_class_init (GstMsdkContextClass * klass)
 {
   GObjectClass *const g_object_class = G_OBJECT_CLASS (klass);
-  g_type_class_add_private (klass, sizeof (GstMsdkContextPrivate));
 
   g_object_class->finalize = gst_msdk_context_finalize;
 }
@@ -287,12 +291,7 @@ gst_msdk_context_new_with_parent (GstMsdkContext * parent)
   status = MFXCloneSession (parent_priv->session, &priv->session);
   if (status != MFX_ERR_NONE) {
     GST_ERROR ("Failed to clone mfx session");
-    return NULL;
-  }
-
-  status = MFXJoinSession (parent_priv->session, priv->session);
-  if (status != MFX_ERR_NONE) {
-    GST_ERROR ("Failed to join mfx session");
+    g_object_unref (obj);
     return NULL;
   }
 
@@ -308,6 +307,14 @@ gst_msdk_context_new_with_parent (GstMsdkContext * parent)
   if (priv->hardware) {
     status = MFXVideoCORE_SetHandle (priv->session, MFX_HANDLE_VA_DISPLAY,
         (mfxHDL) parent_priv->dpy);
+
+    if (status != MFX_ERR_NONE) {
+      GST_ERROR ("Setting VA handle failed (%s)",
+          msdk_status_to_string (status));
+      g_object_unref (obj);
+      return NULL;
+    }
+
   }
 #endif
 
@@ -346,7 +353,22 @@ _find_response (gconstpointer resp, gconstpointer comp_resp)
   GstMsdkAllocResponse *cached_resp = (GstMsdkAllocResponse *) resp;
   mfxFrameAllocResponse *_resp = (mfxFrameAllocResponse *) comp_resp;
 
-  return cached_resp ? cached_resp->mem_ids != _resp->mids : -1;
+  return cached_resp ? cached_resp->response.mids != _resp->mids : -1;
+}
+
+static inline gboolean
+_requested_frame_size_is_equal_or_lower (mfxFrameAllocRequest * _req,
+    GstMsdkAllocResponse * cached_resp)
+{
+  if (((_req->Type & MFX_MEMTYPE_EXPORT_FRAME) &&
+          _req->Info.Width == cached_resp->request.Info.Width &&
+          _req->Info.Height == cached_resp->request.Info.Height) ||
+      (!(_req->Type & MFX_MEMTYPE_EXPORT_FRAME) &&
+          _req->Info.Width <= cached_resp->request.Info.Width &&
+          _req->Info.Height <= cached_resp->request.Info.Height))
+    return TRUE;
+
+  return FALSE;
 }
 
 static gint
@@ -355,7 +377,13 @@ _find_request (gconstpointer resp, gconstpointer req)
   GstMsdkAllocResponse *cached_resp = (GstMsdkAllocResponse *) resp;
   mfxFrameAllocRequest *_req = (mfxFrameAllocRequest *) req;
 
-  return cached_resp ? cached_resp->request.Type != _req->Type : -1;
+  /* Confirm if it's under the size of the cached response */
+  if (_req->NumFrameSuggested <= cached_resp->request.NumFrameSuggested &&
+      _requested_frame_size_is_equal_or_lower (_req, cached_resp))
+    return _req->Type & cached_resp->
+        request.Type & MFX_MEMTYPE_FROM_DECODE ? 0 : -1;
+
+  return -1;
 }
 
 GstMsdkAllocResponse *
@@ -393,8 +421,8 @@ create_surfaces (GstMsdkContext * context, GstMsdkAllocResponse * resp)
   mfxMemId *mem_id;
   mfxFrameSurface1 *surface;
 
-  for (i = 0; i < resp->response->NumFrameActual; i++) {
-    mem_id = resp->mem_ids[i];
+  for (i = 0; i < resp->response.NumFrameActual; i++) {
+    mem_id = resp->response.mids[i];
     surface = (mfxFrameSurface1 *) g_slice_new0 (mfxFrameSurface1);
     if (!surface) {
       GST_ERROR ("failed to allocate surface");
@@ -461,8 +489,9 @@ check_surfaces_available (GstMsdkContext * context, GstMsdkAllocResponse * resp)
   gboolean ret = FALSE;
 
   g_mutex_lock (&priv->mutex);
-  for (l = resp->surfaces_locked; l; l = l->next) {
+  for (l = resp->surfaces_locked; l;) {
     surface = l->data;
+    l = l->next;
     if (!surface->Data.Locked) {
       resp->surfaces_locked = g_list_remove (resp->surfaces_locked, surface);
       resp->surfaces_avail = g_list_prepend (resp->surfaces_avail, surface);
@@ -496,9 +525,9 @@ gst_msdk_context_get_surface_available (GstMsdkContext * context,
 
 retry:
   g_mutex_lock (&priv->mutex);
-  for (l = msdk_resp->surfaces_avail; l; l = l->next) {
+  for (l = msdk_resp->surfaces_avail; l;) {
     surface = l->data;
-
+    l = l->next;
     if (!surface->Data.Locked) {
       msdk_resp->surfaces_avail =
           g_list_remove (msdk_resp->surfaces_avail, surface);
@@ -514,7 +543,7 @@ retry:
    * upstream msdk element sometimes needs to wait for a gst buffer
    * to be released in downstream.
    *
-   * Poll the pool for a maximum of 20 milisecnds.
+   * Poll the pool for a maximum of 20 millisecond.
    *
    * FIXME: Is there any better way to handle this case?
    */
@@ -591,4 +620,26 @@ gst_msdk_context_add_shared_async_depth (GstMsdkContext * context,
     gint async_depth)
 {
   context->priv->shared_async_depth += async_depth;
+}
+
+void
+gst_msdk_context_set_frame_allocator (GstMsdkContext * context,
+    mfxFrameAllocator * allocator)
+{
+  GstMsdkContextPrivate *priv = context->priv;
+
+  g_mutex_lock (&priv->mutex);
+
+  if (!priv->has_frame_allocator) {
+    mfxStatus status;
+
+    status = MFXVideoCORE_SetFrameAllocator (priv->session, allocator);
+
+    if (status != MFX_ERR_NONE)
+      GST_ERROR ("Failed to set frame allocator");
+    else
+      priv->has_frame_allocator = 1;
+  }
+
+  g_mutex_unlock (&priv->mutex);
 }

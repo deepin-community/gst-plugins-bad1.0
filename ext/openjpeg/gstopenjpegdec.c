@@ -32,6 +32,15 @@
 GST_DEBUG_CATEGORY_STATIC (gst_openjpeg_dec_debug);
 #define GST_CAT_DEFAULT gst_openjpeg_dec_debug
 
+enum
+{
+  PROP_0,
+  PROP_MAX_THREADS,
+  PROP_LAST
+};
+
+#define GST_OPENJPEG_DEC_DEFAULT_MAX_THREADS		0
+
 static gboolean gst_openjpeg_dec_start (GstVideoDecoder * decoder);
 static gboolean gst_openjpeg_dec_stop (GstVideoDecoder * decoder);
 static gboolean gst_openjpeg_dec_set_format (GstVideoDecoder * decoder,
@@ -40,6 +49,11 @@ static GstFlowReturn gst_openjpeg_dec_handle_frame (GstVideoDecoder * decoder,
     GstVideoCodecFrame * frame);
 static gboolean gst_openjpeg_dec_decide_allocation (GstVideoDecoder * decoder,
     GstQuery * query);
+static void gst_openjpeg_dec_set_property (GObject * object,
+    guint prop_id, const GValue * value, GParamSpec * pspec);
+static void gst_openjpeg_dec_get_property (GObject * object,
+    guint prop_id, GValue * value, GParamSpec * pspec);
+
 
 #if G_BYTE_ORDER == G_LITTLE_ENDIAN
 #define GRAY16 "GRAY16_LE"
@@ -75,6 +89,7 @@ gst_openjpeg_dec_class_init (GstOpenJPEGDecClass * klass)
 {
   GstElementClass *element_class;
   GstVideoDecoderClass *video_decoder_class;
+  GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
 
   element_class = (GstElementClass *) klass;
   video_decoder_class = (GstVideoDecoderClass *) klass;
@@ -97,6 +112,21 @@ gst_openjpeg_dec_class_init (GstOpenJPEGDecClass * klass)
   video_decoder_class->handle_frame =
       GST_DEBUG_FUNCPTR (gst_openjpeg_dec_handle_frame);
   video_decoder_class->decide_allocation = gst_openjpeg_dec_decide_allocation;
+  gobject_class->set_property = gst_openjpeg_dec_set_property;
+  gobject_class->get_property = gst_openjpeg_dec_get_property;
+
+  /**
+   * GstOpenJPEGDec:max-threads:
+   *
+   * Maximum number of worker threads to spawn. (0 = auto)
+   *
+   * Since: 1.18
+   */
+  g_object_class_install_property (G_OBJECT_CLASS (klass), PROP_MAX_THREADS,
+      g_param_spec_int ("max-threads", "Maximum decode threads",
+          "Maximum number of worker threads to spawn. (0 = auto)",
+          0, G_MAXINT, GST_OPENJPEG_DEC_DEFAULT_MAX_THREADS,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   GST_DEBUG_CATEGORY_INIT (gst_openjpeg_dec_debug, "openjpegdec", 0,
       "OpenJPEG Decoder");
@@ -113,10 +143,9 @@ gst_openjpeg_dec_init (GstOpenJPEGDec * self)
       (self), TRUE);
   GST_PAD_SET_ACCEPT_TEMPLATE (GST_VIDEO_DECODER_SINK_PAD (self));
   opj_set_default_decoder_parameters (&self->params);
-#ifdef HAVE_OPENJPEG_1
-  self->params.cp_limit_decoding = NO_LIMITATION;
-#endif
   self->sampling = GST_JPEG2000_SAMPLING_NONE;
+  self->max_threads = GST_OPENJPEG_DEC_DEFAULT_MAX_THREADS;
+  self->num_procs = g_get_num_processors ();
 }
 
 static gboolean
@@ -149,6 +178,39 @@ gst_openjpeg_dec_stop (GstVideoDecoder * video_decoder)
   GST_DEBUG_OBJECT (self, "Stopped");
 
   return TRUE;
+}
+
+
+static void
+gst_openjpeg_dec_set_property (GObject * object,
+    guint prop_id, const GValue * value, GParamSpec * pspec)
+{
+  GstOpenJPEGDec *dec = (GstOpenJPEGDec *) object;
+
+  switch (prop_id) {
+    case PROP_MAX_THREADS:
+      g_atomic_int_set (&dec->max_threads, g_value_get_int (value));
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
+gst_openjpeg_dec_get_property (GObject * object,
+    guint prop_id, GValue * value, GParamSpec * pspec)
+{
+  GstOpenJPEGDec *dec = (GstOpenJPEGDec *) object;
+
+  switch (prop_id) {
+    case PROP_MAX_THREADS:
+      g_value_set_int (value, g_atomic_int_get (&dec->max_threads));
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
 }
 
 static gboolean
@@ -983,7 +1045,6 @@ gst_openjpeg_dec_opj_info (const char *msg, void *userdata)
   g_free (trimmed);
 }
 
-#ifndef HAVE_OPENJPEG_1
 typedef struct
 {
   guint8 *data;
@@ -1044,7 +1105,6 @@ seek_fn (OPJ_OFF_T p_nb_bytes, void *p_user_data)
 
   return OPJ_TRUE;
 }
-#endif
 
 static GstFlowReturn
 gst_openjpeg_dec_handle_frame (GstVideoDecoder * decoder,
@@ -1054,17 +1114,13 @@ gst_openjpeg_dec_handle_frame (GstVideoDecoder * decoder,
   GstFlowReturn ret = GST_FLOW_OK;
   gint64 deadline;
   GstMapInfo map;
-#ifdef HAVE_OPENJPEG_1
-  opj_dinfo_t *dec;
-  opj_cio_t *io;
-#else
   opj_codec_t *dec;
   opj_stream_t *stream;
   MemStream mstream;
-#endif
   opj_image_t *image;
   GstVideoFrame vframe;
   opj_dparameters_t params;
+  gint max_threads;
 
   GST_DEBUG_OBJECT (self, "Handling frame");
 
@@ -1080,19 +1136,6 @@ gst_openjpeg_dec_handle_frame (GstVideoDecoder * decoder,
   if (!dec)
     goto initialization_error;
 
-#ifdef HAVE_OPENJPEG_1
-  if (G_UNLIKELY (gst_debug_category_get_threshold (GST_CAT_DEFAULT) >=
-          GST_LEVEL_TRACE)) {
-    opj_event_mgr_t callbacks;
-
-    callbacks.error_handler = gst_openjpeg_dec_opj_error;
-    callbacks.warning_handler = gst_openjpeg_dec_opj_warning;
-    callbacks.info_handler = gst_openjpeg_dec_opj_info;
-    opj_set_event_mgr ((opj_common_ptr) dec, &callbacks, self);
-  } else {
-    opj_set_event_mgr ((opj_common_ptr) dec, NULL, NULL);
-  }
-#else
   if (G_UNLIKELY (gst_debug_category_get_threshold (GST_CAT_DEFAULT) >=
           GST_LEVEL_TRACE)) {
     opj_set_info_handler (dec, gst_openjpeg_dec_opj_info, self);
@@ -1103,12 +1146,19 @@ gst_openjpeg_dec_handle_frame (GstVideoDecoder * decoder,
     opj_set_warning_handler (dec, NULL, NULL);
     opj_set_error_handler (dec, NULL, NULL);
   }
-#endif
 
   params = self->params;
   if (self->ncomps)
     params.jpwl_exp_comps = self->ncomps;
-  opj_setup_decoder (dec, &params);
+  if (!opj_setup_decoder (dec, &params))
+    goto open_error;
+
+  max_threads = g_atomic_int_get (&self->max_threads);
+  if (max_threads == 0)
+    max_threads = self->num_procs;
+  if (!opj_codec_set_threads (dec, max_threads))
+    GST_WARNING_OBJECT (self, "Failed to set %d number of threads",
+        max_threads);
 
   if (!gst_buffer_map (frame->input_buffer, &map, GST_MAP_READ))
     goto map_read_error;
@@ -1116,16 +1166,6 @@ gst_openjpeg_dec_handle_frame (GstVideoDecoder * decoder,
   if (self->is_jp2c && map.size < 8)
     goto open_error;
 
-#ifdef HAVE_OPENJPEG_1
-  io = opj_cio_open ((opj_common_ptr) dec, map.data + (self->is_jp2c ? 8 : 0),
-      map.size - (self->is_jp2c ? 8 : 0));
-  if (!io)
-    goto open_error;
-
-  image = opj_decode (dec, io);
-  if (!image)
-    goto decode_error;
-#else
   stream = opj_stream_create (4096, OPJ_TRUE);
   if (!stream)
     goto open_error;
@@ -1147,7 +1187,6 @@ gst_openjpeg_dec_handle_frame (GstVideoDecoder * decoder,
 
   if (!opj_decode (dec, stream, image))
     goto decode_error;
-#endif
 
   {
     gint i;
@@ -1176,16 +1215,10 @@ gst_openjpeg_dec_handle_frame (GstVideoDecoder * decoder,
 
   gst_video_frame_unmap (&vframe);
 
-#ifdef HAVE_OPENJPEG_1
-  opj_cio_close (io);
-  opj_image_destroy (image);
-  opj_destroy_decompress (dec);
-#else
   opj_end_decompress (dec, stream);
   opj_stream_destroy (stream);
   opj_image_destroy (image);
   opj_destroy_codec (dec);
-#endif
 
   ret = gst_video_decoder_finish_frame (decoder, frame);
 
@@ -1200,11 +1233,7 @@ initialization_error:
   }
 map_read_error:
   {
-#ifdef HAVE_OPENJPEG_1
-    opj_destroy_decompress (dec);
-#else
     opj_destroy_codec (dec);
-#endif
     gst_video_codec_frame_unref (frame);
 
     GST_ELEMENT_ERROR (self, CORE, FAILED,
@@ -1213,11 +1242,7 @@ map_read_error:
   }
 open_error:
   {
-#ifdef HAVE_OPENJPEG_1
-    opj_destroy_decompress (dec);
-#else
     opj_destroy_codec (dec);
-#endif
     gst_buffer_unmap (frame->input_buffer, &map);
     gst_video_codec_frame_unref (frame);
 
@@ -1229,13 +1254,8 @@ decode_error:
   {
     if (image)
       opj_image_destroy (image);
-#ifdef HAVE_OPENJPEG_1
-    opj_cio_close (io);
-    opj_destroy_decompress (dec);
-#else
     opj_stream_destroy (stream);
     opj_destroy_codec (dec);
-#endif
     gst_buffer_unmap (frame->input_buffer, &map);
     gst_video_codec_frame_unref (frame);
 
@@ -1246,13 +1266,8 @@ decode_error:
 negotiate_error:
   {
     opj_image_destroy (image);
-#ifdef HAVE_OPENJPEG_1
-    opj_cio_close (io);
-    opj_destroy_decompress (dec);
-#else
     opj_stream_destroy (stream);
     opj_destroy_codec (dec);
-#endif
     gst_video_codec_frame_unref (frame);
 
     GST_ELEMENT_ERROR (self, CORE, NEGOTIATION,
@@ -1262,13 +1277,8 @@ negotiate_error:
 allocate_error:
   {
     opj_image_destroy (image);
-#ifdef HAVE_OPENJPEG_1
-    opj_cio_close (io);
-    opj_destroy_decompress (dec);
-#else
     opj_stream_destroy (stream);
     opj_destroy_codec (dec);
-#endif
     gst_video_codec_frame_unref (frame);
 
     GST_ELEMENT_ERROR (self, CORE, FAILED,
@@ -1278,13 +1288,8 @@ allocate_error:
 map_write_error:
   {
     opj_image_destroy (image);
-#ifdef HAVE_OPENJPEG_1
-    opj_cio_close (io);
-    opj_destroy_decompress (dec);
-#else
     opj_stream_destroy (stream);
     opj_destroy_codec (dec);
-#endif
     gst_video_codec_frame_unref (frame);
 
     GST_ELEMENT_ERROR (self, CORE, FAILED,

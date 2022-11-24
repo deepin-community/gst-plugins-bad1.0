@@ -33,6 +33,7 @@
 #define __GST_MSDKH265ENC_H__
 
 #include "gstmsdkenc.h"
+#include <gst/codecparsers/gsth265parser.h>
 
 G_BEGIN_DECLS
 
@@ -53,6 +54,21 @@ typedef struct _GstMsdkH265EncClass GstMsdkH265EncClass;
 struct _GstMsdkH265Enc
 {
   GstMsdkEnc base;
+
+  gchar *profile_name;
+  gboolean lowpower;
+  gushort num_tile_rows;
+  gushort num_tile_cols;
+  guint max_slice_size;
+  gint tune_mode;
+  guint prop_flag;
+
+  mfxExtHEVCTiles ext_tiles;
+  /* roi[0] for current ROI and roi[1] for previous ROI */
+  mfxExtEncoderROI roi[2];
+
+  GstH265Parser *parser;
+  GArray *cc_sei_array;
 };
 
 struct _GstMsdkH265EncClass

@@ -2,11 +2,11 @@ faad_args = [ ]
 
 have_faad = cc.has_header_symbol('neaacdec.h', 'NeAACDecOpen')
 have_faad_2_7 = have_faad and cc.has_header_symbol('neaacdec.h', 'LATM')
-if have_faad and not have_faad_2_7
+if have_faad and not have_faad_2_7 and get_option('faad').enabled()
   message('Found faad2, but too old (< v2.7.0)')
 endif
 
-faad_dep = cc.find_library('faad', required : false)
+faad_dep = cc.find_library('faad', required : get_option('faad'))
 
 if faad_dep.found() and have_faad_2_7
   gstfaad = library('gstfaad',
@@ -18,4 +18,6 @@ if faad_dep.found() and have_faad_2_7
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstfaad, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstfaad]
 endif

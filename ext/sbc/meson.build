@@ -4,7 +4,7 @@ sbc_sources = [
   'gstsbcenc.c',
 ]
 
-sbc_dep = dependency('sbc', version : '>= 1.0', required : false)
+sbc_dep = dependency('sbc', version : '>= 1.0', required : get_option('sbc'))
 
 if sbc_dep.found()
   gstsbc = library('gstsbc',
@@ -15,4 +15,6 @@ if sbc_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstsbc, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstsbc]
 endif

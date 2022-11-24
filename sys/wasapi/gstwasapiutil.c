@@ -22,6 +22,14 @@
 #  include <config.h>
 #endif
 
+/* Note: initguid.h can not be included in gstwasapiutil.h, otherwise a
+ * symbol redefinition error will be raised.
+ * initguid.h must be included in the C file before mmdeviceapi.h
+ * which is included in gstwasapiutil.h.
+ */
+#ifdef _MSC_VER
+#include <initguid.h>
+#endif
 #include "gstwasapiutil.h"
 #include "gstwasapidevice.h"
 
@@ -136,7 +144,7 @@ gst_wasapi_device_role_get_type (void)
     {GST_WASAPI_DEVICE_ROLE_COMMS, "Voice communications", "comms"},
     {0, NULL, NULL}
   };
-  static volatile GType id = 0;
+  static GType id = 0;
 
   if (g_once_init_enter ((gsize *) & id)) {
     GType _id;
@@ -162,6 +170,8 @@ gst_wasapi_device_role_to_erole (gint role)
     default:
       g_assert_not_reached ();
   }
+
+  return -1;
 }
 
 gint
@@ -177,6 +187,8 @@ gst_wasapi_erole_to_device_role (gint erole)
     default:
       g_assert_not_reached ();
   }
+
+  return -1;
 }
 
 static const gchar *
@@ -280,32 +292,21 @@ hresult_to_string_fallback (HRESULT hr)
 gchar *
 gst_wasapi_util_hresult_to_string (HRESULT hr)
 {
-  DWORD flags;
-  gchar *ret_text;
-  LPTSTR error_text = NULL;
+  gchar *error_text = NULL;
 
-  flags = FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER
-      | FORMAT_MESSAGE_IGNORE_INSERTS;
-  FormatMessage (flags, NULL, hr, MAKELANGID (LANG_NEUTRAL, SUBLANG_DEFAULT),
-      (LPTSTR) & error_text, 0, NULL);
+  error_text = g_win32_error_message ((gint) hr);
+  /* g_win32_error_message() seems to be returning empty string for
+   * AUDCLNT_* cases */
+  if (!error_text || strlen (error_text) == 0) {
+    g_free (error_text);
+    error_text = g_strdup (hresult_to_string_fallback (hr));
+  }
 
-  /* If we couldn't get the error msg, try the fallback switch statement */
-  if (error_text == NULL)
-    return g_strdup (hresult_to_string_fallback (hr));
-
-#ifdef UNICODE
-  /* If UNICODE is defined, LPTSTR is LPWSTR which is UTF-16 */
-  ret_text = g_utf16_to_utf8 (error_text, 0, NULL, NULL, NULL);
-#else
-  ret_text = g_strdup (error_text);
-#endif
-
-  LocalFree (error_text);
-  return ret_text;
+  return error_text;
 }
 
 static IMMDeviceEnumerator *
-gst_wasapi_util_get_device_enumerator (GstElement * self)
+gst_wasapi_util_get_device_enumerator (GstObject * self)
 {
   HRESULT hr;
   IMMDeviceEnumerator *enumerator = NULL;
@@ -318,7 +319,7 @@ gst_wasapi_util_get_device_enumerator (GstElement * self)
 }
 
 gboolean
-gst_wasapi_util_get_devices (GstElement * self, gboolean active,
+gst_wasapi_util_get_devices (GstObject * self, gboolean active,
     GList ** devices)
 {
   gboolean res = FALSE;
@@ -533,7 +534,7 @@ out:
 
 gboolean
 gst_wasapi_util_get_device_client (GstElement * self,
-    gboolean capture, gint role, const wchar_t * device_strid,
+    gint data_flow, gint role, const wchar_t * device_strid,
     IMMDevice ** ret_device, IAudioClient ** ret_client)
 {
   gboolean res = FALSE;
@@ -542,12 +543,12 @@ gst_wasapi_util_get_device_client (GstElement * self,
   IMMDevice *device = NULL;
   IAudioClient *client = NULL;
 
-  if (!(enumerator = gst_wasapi_util_get_device_enumerator (self)))
+  if (!(enumerator = gst_wasapi_util_get_device_enumerator (GST_OBJECT (self))))
     goto beach;
 
   if (!device_strid) {
-    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint (enumerator,
-        capture ? eCapture : eRender, role, &device);
+    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint (enumerator, data_flow,
+        role, &device);
     HR_FAILED_GOTO (hr, IMMDeviceEnumerator::GetDefaultAudioEndpoint, beach);
   } else {
     hr = IMMDeviceEnumerator_GetDevice (enumerator, device_strid, &device);
@@ -695,7 +696,7 @@ static guint64
 gst_wasapi_util_waveformatex_to_channel_mask (WAVEFORMATEXTENSIBLE * format,
     GstAudioChannelPosition ** out_position)
 {
-  int ii;
+  int ii, ch;
   guint64 mask = 0;
   WORD nChannels = format->Format.nChannels;
   DWORD dwChannelMask = format->dwChannelMask;
@@ -719,13 +720,19 @@ gst_wasapi_util_waveformatex_to_channel_mask (WAVEFORMATEXTENSIBLE * format,
 
   /* Map WASAPI's channel mask to Gstreamer's channel mask and positions.
    * If the no. of bits in the mask > nChannels, we will ignore the extra. */
-  for (ii = 0; ii < nChannels; ii++) {
+  for (ii = 0, ch = 0; ii < G_N_ELEMENTS (wasapi_to_gst_pos) && ch < nChannels;
+      ii++) {
     if (!(dwChannelMask & wasapi_to_gst_pos[ii].wasapi_pos))
-      /* Non-positional or unknown position, warn? */
+      /* no match, try next */
       continue;
     mask |= G_GUINT64_CONSTANT (1) << wasapi_to_gst_pos[ii].gst_pos;
-    pos[ii] = wasapi_to_gst_pos[ii].gst_pos;
+    pos[ch++] = wasapi_to_gst_pos[ii].gst_pos;
   }
+
+  /* XXX: Warn if some channel masks couldn't be mapped? */
+
+  GST_DEBUG ("Converted WASAPI mask 0x%" G_GINT64_MODIFIER "x -> 0x%"
+      G_GINT64_MODIFIER "x", (guint64) dwChannelMask, (guint64) mask);
 
 out:
   if (out_position)
@@ -773,8 +780,12 @@ gst_wasapi_util_parse_waveformatex (WAVEFORMATEXTENSIBLE * format,
     gst_structure_set (s,
         "format", G_TYPE_STRING, afmt,
         "channels", G_TYPE_INT, format->Format.nChannels,
-        "rate", G_TYPE_INT, format->Format.nSamplesPerSec,
-        "channel-mask", GST_TYPE_BITMASK, channel_mask, NULL);
+        "rate", G_TYPE_INT, format->Format.nSamplesPerSec, NULL);
+
+    if (channel_mask) {
+      gst_structure_set (s,
+          "channel-mask", GST_TYPE_BITMASK, channel_mask, NULL);
+    }
   }
 
   return TRUE;
@@ -830,11 +841,11 @@ gboolean
 gst_wasapi_util_initialize_audioclient (GstElement * self,
     GstAudioRingBufferSpec * spec, IAudioClient * client,
     WAVEFORMATEX * format, guint sharemode, gboolean low_latency,
-    guint * ret_devicep_frames)
+    gboolean loopback, guint * ret_devicep_frames)
 {
   REFERENCE_TIME default_period, min_period;
   REFERENCE_TIME device_period, device_buffer_duration;
-  guint rate;
+  guint rate, stream_flags;
   guint32 n_frames;
   HRESULT hr;
 
@@ -861,8 +872,12 @@ gst_wasapi_util_initialize_audioclient (GstElement * self,
         min_period, &device_period, &device_buffer_duration);
   }
 
-  hr = IAudioClient_Initialize (client, sharemode,
-      AUDCLNT_STREAMFLAGS_EVENTCALLBACK, device_buffer_duration,
+  stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+  if (loopback)
+    stream_flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
+
+  hr = IAudioClient_Initialize (client, sharemode, stream_flags,
+      device_buffer_duration,
       /* This must always be 0 in shared mode */
       sharemode == AUDCLNT_SHAREMODE_SHARED ? 0 : device_period, format, NULL);
 
@@ -880,9 +895,8 @@ gst_wasapi_util_initialize_audioclient (GstElement * self,
     GST_WARNING_OBJECT (self, "trying to re-initialize with period %i "
         "(%i frames, %i rate)", (int) device_period, n_frames, rate);
 
-    hr = IAudioClient_Initialize (client, sharemode,
-        AUDCLNT_STREAMFLAGS_EVENTCALLBACK, device_period,
-        device_period, format, NULL);
+    hr = IAudioClient_Initialize (client, sharemode, stream_flags,
+        device_period, device_period, format, NULL);
   }
   HR_FAILED_RET (hr, IAudioClient::Initialize, FALSE);
 
@@ -894,7 +908,9 @@ gst_wasapi_util_initialize_audioclient (GstElement * self,
 
     *ret_devicep_frames = n_frames;
   } else {
-    *ret_devicep_frames = (rate * device_period * 100) / GST_SECOND;
+    /* device_period can be a non-power-of-10 value so round while converting */
+    *ret_devicep_frames =
+        gst_util_uint64_scale_round (device_period, rate * 100, GST_SECOND);
   }
 
   return TRUE;
@@ -903,9 +919,11 @@ gst_wasapi_util_initialize_audioclient (GstElement * self,
 gboolean
 gst_wasapi_util_initialize_audioclient3 (GstElement * self,
     GstAudioRingBufferSpec * spec, IAudioClient3 * client,
-    WAVEFORMATEX * format, gboolean low_latency, guint * ret_devicep_frames)
+    WAVEFORMATEX * format, gboolean low_latency, gboolean loopback,
+    guint * ret_devicep_frames)
 {
   HRESULT hr;
+  gint stream_flags;
   guint devicep_frames;
   guint defaultp_frames, fundp_frames, minp_frames, maxp_frames;
   WAVEFORMATEX *tmpf;
@@ -925,8 +943,12 @@ gst_wasapi_util_initialize_audioclient3 (GstElement * self,
      * https://bugzilla.gnome.org/show_bug.cgi?id=794497 */
     devicep_frames = maxp_frames;
 
-  hr = IAudioClient3_InitializeSharedAudioStream (client,
-      AUDCLNT_STREAMFLAGS_EVENTCALLBACK, devicep_frames, format, NULL);
+  stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+  if (loopback)
+    stream_flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
+
+  hr = IAudioClient3_InitializeSharedAudioStream (client, stream_flags,
+      devicep_frames, format, NULL);
   HR_FAILED_RET (hr, IAudioClient3::InitializeSharedAudioStream, FALSE);
 
   hr = IAudioClient3_GetCurrentSharedModeEnginePeriod (client, &tmpf,

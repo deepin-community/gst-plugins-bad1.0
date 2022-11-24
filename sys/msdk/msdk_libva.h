@@ -40,11 +40,7 @@
 #include <gst/gst.h>
 #include <va/va.h>
 
-#ifdef HAVE_LIBMFX
-#  include <mfx/mfxvideo.h>
-#else
-#  include "mfxvideo.h"
-#endif
+#include <mfxvideo.h>
 
 G_BEGIN_DECLS
 

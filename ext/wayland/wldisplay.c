@@ -53,6 +53,12 @@ gst_wl_display_init (GstWlDisplay * self)
 }
 
 static void
+gst_wl_ref_wl_buffer (gpointer key, gpointer value, gpointer user_data)
+{
+  g_object_ref (value);
+}
+
+static void
 gst_wl_display_finalize (GObject * gobject)
 {
   GstWlDisplay *self = GST_WL_DISPLAY (gobject);
@@ -65,7 +71,7 @@ gst_wl_display_finalize (GObject * gobject)
    * at the same time, take their ownership */
   g_mutex_lock (&self->buffers_mutex);
   self->shutting_down = TRUE;
-  g_hash_table_foreach (self->buffers, (GHFunc) g_object_ref, NULL);
+  g_hash_table_foreach (self->buffers, gst_wl_ref_wl_buffer, NULL);
   g_mutex_unlock (&self->buffers_mutex);
 
   g_hash_table_foreach (self->buffers,
@@ -87,8 +93,14 @@ gst_wl_display_finalize (GObject * gobject)
   if (self->dmabuf)
     zwp_linux_dmabuf_v1_destroy (self->dmabuf);
 
-  if (self->shell)
-    wl_shell_destroy (self->shell);
+  if (self->wl_shell)
+    wl_shell_destroy (self->wl_shell);
+
+  if (self->xdg_wm_base)
+    xdg_wm_base_destroy (self->xdg_wm_base);
+
+  if (self->fullscreen_shell)
+    zwp_fullscreen_shell_v1_release (self->fullscreen_shell);
 
   if (self->compositor)
     wl_compositor_destroy (self->compositor);
@@ -99,6 +111,9 @@ gst_wl_display_finalize (GObject * gobject)
   if (self->registry)
     wl_registry_destroy (self->registry);
 
+  if (self->display_wrapper)
+    wl_proxy_wrapper_destroy (self->display_wrapper);
+
   if (self->queue)
     wl_event_queue_destroy (self->queue);
 
@@ -108,37 +123,6 @@ gst_wl_display_finalize (GObject * gobject)
   }
 
   G_OBJECT_CLASS (gst_wl_display_parent_class)->finalize (gobject);
-}
-
-static void
-sync_callback (void *data, struct wl_callback *callback, uint32_t serial)
-{
-  gboolean *done = data;
-  *done = TRUE;
-}
-
-static const struct wl_callback_listener sync_listener = {
-  sync_callback
-};
-
-static gint
-gst_wl_display_roundtrip (GstWlDisplay * self)
-{
-  struct wl_callback *callback;
-  gint ret = 0;
-  gboolean done = FALSE;
-
-  g_return_val_if_fail (self != NULL, -1);
-
-  /* We don't own the display, process only our queue */
-  callback = wl_display_sync (self->display);
-  wl_callback_add_listener (callback, &sync_listener, &done);
-  wl_proxy_set_queue ((struct wl_proxy *) callback, self->queue);
-  while (ret != -1 && !done)
-    ret = wl_display_dispatch_queue (self->display, self->queue);
-  wl_callback_destroy (callback);
-
-  return ret;
 }
 
 static void
@@ -212,6 +196,17 @@ gst_wl_display_check_format_for_dmabuf (GstWlDisplay * display,
 }
 
 static void
+handle_xdg_wm_base_ping (void *user_data, struct xdg_wm_base *xdg_wm_base,
+    uint32_t serial)
+{
+  xdg_wm_base_pong (xdg_wm_base, serial);
+}
+
+static const struct xdg_wm_base_listener xdg_wm_base_listener = {
+  handle_xdg_wm_base_ping
+};
+
+static void
 registry_handle_global (void *data, struct wl_registry *registry,
     uint32_t id, const char *interface, uint32_t version)
 {
@@ -224,7 +219,14 @@ registry_handle_global (void *data, struct wl_registry *registry,
     self->subcompositor =
         wl_registry_bind (registry, id, &wl_subcompositor_interface, 1);
   } else if (g_strcmp0 (interface, "wl_shell") == 0) {
-    self->shell = wl_registry_bind (registry, id, &wl_shell_interface, 1);
+    self->wl_shell = wl_registry_bind (registry, id, &wl_shell_interface, 1);
+  } else if (g_strcmp0 (interface, "xdg_wm_base") == 0) {
+    self->xdg_wm_base =
+        wl_registry_bind (registry, id, &xdg_wm_base_interface, 1);
+    xdg_wm_base_add_listener (self->xdg_wm_base, &xdg_wm_base_listener, self);
+  } else if (g_strcmp0 (interface, "zwp_fullscreen_shell_v1") == 0) {
+    self->fullscreen_shell = wl_registry_bind (registry, id,
+        &zwp_fullscreen_shell_v1_interface, 1);
   } else if (g_strcmp0 (interface, "wl_shm") == 0) {
     self->shm = wl_registry_bind (registry, id, &wl_shm_interface, 1);
     wl_shm_add_listener (self->shm, &shm_listener, self);
@@ -238,8 +240,16 @@ registry_handle_global (void *data, struct wl_registry *registry,
   }
 }
 
+static void
+registry_handle_global_remove (void *data, struct wl_registry *registry,
+    uint32_t name)
+{
+  /* temporarily do nothing */
+}
+
 static const struct wl_registry_listener registry_listener = {
-  registry_handle_global
+  registry_handle_global,
+  registry_handle_global_remove
 };
 
 static gpointer
@@ -265,10 +275,10 @@ gst_wl_display_thread_run (gpointer data)
         break;
       else
         goto error;
-    } else {
-      wl_display_read_events (self->display);
-      wl_display_dispatch_queue_pending (self->display, self->queue);
     }
+    if (wl_display_read_events (self->display) == -1)
+      goto error;
+    wl_display_dispatch_queue_pending (self->display, self->queue);
   }
 
   return NULL;
@@ -307,16 +317,17 @@ gst_wl_display_new_existing (struct wl_display * display,
 
   self = g_object_new (GST_TYPE_WL_DISPLAY, NULL);
   self->display = display;
+  self->display_wrapper = wl_proxy_create_wrapper (display);
   self->own_display = take_ownership;
 
   self->queue = wl_display_create_queue (self->display);
-  self->registry = wl_display_get_registry (self->display);
-  wl_proxy_set_queue ((struct wl_proxy *) self->registry, self->queue);
+  wl_proxy_set_queue ((struct wl_proxy *) self->display_wrapper, self->queue);
+  self->registry = wl_display_get_registry (self->display_wrapper);
   wl_registry_add_listener (self->registry, &registry_listener, self);
 
   /* we need exactly 2 roundtrips to discover global objects and their state */
   for (i = 0; i < 2; i++) {
-    if (gst_wl_display_roundtrip (self) < 0) {
+    if (wl_display_roundtrip_queue (self->display, self->queue) < 0) {
       *error = g_error_new (g_quark_from_static_string ("GstWlDisplay"), 0,
           "Error communicating with the wayland display");
       g_object_unref (self);
@@ -336,7 +347,6 @@ gst_wl_display_new_existing (struct wl_display * display,
 
   VERIFY_INTERFACE_EXISTS (compositor, "wl_compositor");
   VERIFY_INTERFACE_EXISTS (subcompositor, "wl_subcompositor");
-  VERIFY_INTERFACE_EXISTS (shell, "wl_shell");
   VERIFY_INTERFACE_EXISTS (shm, "wl_shm");
 
 #undef VERIFY_INTERFACE_EXISTS
@@ -353,6 +363,15 @@ gst_wl_display_new_existing (struct wl_display * display,
     g_warning ("Could not bind to zwp_linux_dmabuf_v1");
   }
 
+  if (!self->wl_shell && !self->xdg_wm_base && !self->fullscreen_shell) {
+    /* If wl_surface and wl_display are passed via GstContext
+     * wl_shell, xdg_shell and zwp_fullscreen_shell are not used.
+     * In this case is correct to continue.
+     */
+    g_warning ("Could not bind to either wl_shell, xdg_wm_base or "
+        "zwp_fullscreen_shell, video display may not work properly.");
+  }
+
   self->thread = g_thread_try_new ("GstWlDisplay", gst_wl_display_thread_run,
       self, &err);
   if (err) {
@@ -366,24 +385,36 @@ gst_wl_display_new_existing (struct wl_display * display,
 }
 
 void
-gst_wl_display_register_buffer (GstWlDisplay * self, gpointer buf)
+gst_wl_display_register_buffer (GstWlDisplay * self, gpointer gstmem,
+    gpointer wlbuffer)
 {
   g_assert (!self->shutting_down);
 
-  GST_TRACE_OBJECT (self, "registering GstWlBuffer %p", buf);
+  GST_TRACE_OBJECT (self, "registering GstWlBuffer %p to GstMem %p",
+      wlbuffer, gstmem);
 
   g_mutex_lock (&self->buffers_mutex);
-  g_hash_table_add (self->buffers, buf);
+  g_hash_table_replace (self->buffers, gstmem, wlbuffer);
   g_mutex_unlock (&self->buffers_mutex);
 }
 
-void
-gst_wl_display_unregister_buffer (GstWlDisplay * self, gpointer buf)
+gpointer
+gst_wl_display_lookup_buffer (GstWlDisplay * self, gpointer gstmem)
 {
-  GST_TRACE_OBJECT (self, "unregistering GstWlBuffer %p", buf);
+  gpointer wlbuffer;
+  g_mutex_lock (&self->buffers_mutex);
+  wlbuffer = g_hash_table_lookup (self->buffers, gstmem);
+  g_mutex_unlock (&self->buffers_mutex);
+  return wlbuffer;
+}
+
+void
+gst_wl_display_unregister_buffer (GstWlDisplay * self, gpointer gstmem)
+{
+  GST_TRACE_OBJECT (self, "unregistering GstWlBuffer owned by %p", gstmem);
 
   g_mutex_lock (&self->buffers_mutex);
   if (G_LIKELY (!self->shutting_down))
-    g_hash_table_remove (self->buffers, buf);
+    g_hash_table_remove (self->buffers, gstmem);
   g_mutex_unlock (&self->buffers_mutex);
 }

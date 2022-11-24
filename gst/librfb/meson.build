@@ -14,3 +14,5 @@ gstrfbsrc = library('gstrfbsrc',
   install : true,
   install_dir : plugins_install_dir,
 )
+pkgconfig.generate(gstrfbsrc, install_dir : plugins_pkgconfig_install_dir)
+plugins += [gstrfbsrc]

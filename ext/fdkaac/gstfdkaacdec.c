@@ -32,12 +32,19 @@
  * - Error concealment
  */
 
+#ifndef HAVE_FDK_AAC_0_1_4
+#define AAC_PCM_MAX_OUTPUT_CHANNELS AAC_PCM_OUTPUT_CHANNELS
+#define CHANNELS_CAPS_STR "channels = (int) [1, 6]"
+#else
+#define CHANNELS_CAPS_STR "channels = (int) [1, 8]"
+#endif
+
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS ("audio/mpeg, "
-        "mpegversion = (int) 4, "
-        "stream-format = (string) { adts, adif, raw }")
+        "mpegversion = (int) {2, 4}, "
+        "stream-format = (string) { adts, adif, raw }, " CHANNELS_CAPS_STR)
     );
 
 static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
@@ -46,7 +53,7 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
     GST_STATIC_CAPS ("audio/x-raw, "
         "format = (string) " GST_AUDIO_NE (S16) ", "
         "layout = (string) interleaved, "
-        "rate = (int) [8000, 96000], " "channels = (int) [1, 8]")
+        "rate = (int) [8000, 96000], " CHANNELS_CAPS_STR)
     );
 
 GST_DEBUG_CATEGORY_STATIC (gst_fdkaacdec_debug);
@@ -151,17 +158,18 @@ gst_fdkaacdec_set_format (GstAudioDecoder * dec, GstCaps * caps)
     gst_buffer_unref (codec_data);
   }
 
-  if ((err =
-          aacDecoder_SetParam (self->dec, AAC_PCM_OUTPUT_CHANNEL_MAPPING,
-              0)) != AAC_DEC_OK) {
-    GST_ERROR_OBJECT (self, "Failed to set output channel mapping: %d", err);
+  err = aacDecoder_SetParam (self->dec, AAC_PCM_MAX_OUTPUT_CHANNELS, 0);
+  if (err != AAC_DEC_OK) {
+    GST_ERROR_OBJECT (self, "Failed to disable downmixing: %d", err);
     return FALSE;
   }
 
-  if ((err =
-          aacDecoder_SetParam (self->dec, AAC_PCM_OUTPUT_INTERLEAVED,
-              1)) != AAC_DEC_OK) {
-    GST_ERROR_OBJECT (self, "Failed to set interleaved output: %d", err);
+  /* Choose WAV channel mapping to get interleaving even with libfdk-aac 2.0.0
+   * The pChannelIndices retain the indices from the standard MPEG mapping so
+   * we're agnostic to the actual order. */
+  err = aacDecoder_SetParam (self->dec, AAC_PCM_OUTPUT_CHANNEL_MAPPING, 1);
+  if (err != AAC_DEC_OK) {
+    GST_ERROR_OBJECT (self, "Failed to set output channel mapping: %d", err);
     return FALSE;
   }
 
@@ -194,28 +202,27 @@ gst_fdkaacdec_handle_frame (GstAudioDecoder * dec, GstBuffer * inbuf)
     gst_buffer_map (inbuf, &imap, GST_MAP_READ);
     valid = size = imap.size;
 
-    if ((err =
-            aacDecoder_Fill (self->dec, (guint8 **) & imap.data, &size,
-                &valid)) != AAC_DEC_OK) {
+    err = aacDecoder_Fill (self->dec, (guint8 **) & imap.data, &size, &valid);
+    if (err != AAC_DEC_OK) {
       GST_AUDIO_DECODER_ERROR (self, 1, STREAM, DECODE, (NULL),
           ("filling error: %d", err), ret);
       goto out;
     }
 
-    if (GST_BUFFER_IS_DISCONT (inbuf))
+    if (GST_BUFFER_IS_DISCONT (inbuf)) {
       flags |= AACDEC_INTR;
+    }
   } else {
     flags |= AACDEC_FLUSH;
   }
 
-  if ((err =
-          aacDecoder_DecodeFrame (self->dec, self->decode_buffer,
-              self->decode_buffer_size, flags)) != AAC_DEC_OK) {
-    if (err == AAC_DEC_TRANSPORT_SYNC_ERROR) {
-      ret = GST_FLOW_OK;
-      outbuf = NULL;
-      goto finish;
-    }
+  err = aacDecoder_DecodeFrame (self->dec, self->decode_buffer,
+      self->decode_buffer_size, flags);
+  if (err == AAC_DEC_TRANSPORT_SYNC_ERROR) {
+    ret = GST_FLOW_OK;
+    outbuf = NULL;
+    goto finish;
+  } else if (err != AAC_DEC_OK) {
     GST_AUDIO_DECODER_ERROR (self, 1, STREAM, DECODE, (NULL),
         ("decoding error: %d", err), ret);
     goto out;
@@ -232,14 +239,12 @@ gst_fdkaacdec_handle_frame (GstAudioDecoder * dec, GstBuffer * inbuf)
   if (stream_info->numChannels == 1) {
     pos[0] = GST_AUDIO_CHANNEL_POSITION_MONO;
   } else {
-    gint n_front = 0, n_side = 0, n_back = 0, n_lfe = 0;
+    gint n_front = 0, n_back = 0, n_lfe = 0;
 
     /* FIXME: Can this be simplified somehow? */
     for (i = 0; i < stream_info->numChannels; i++) {
       if (stream_info->pChannelType[i] == ACT_FRONT) {
         n_front++;
-      } else if (stream_info->pChannelType[i] == ACT_SIDE) {
-        n_side++;
       } else if (stream_info->pChannelType[i] == ACT_BACK) {
         n_back++;
       } else if (stream_info->pChannelType[i] == ACT_LFE) {
@@ -303,35 +308,48 @@ gst_fdkaacdec_handle_frame (GstAudioDecoder * dec, GstBuffer * inbuf)
           ret = GST_FLOW_NOT_NEGOTIATED;
           goto out;
         }
-      } else if (stream_info->pChannelType[i] == ACT_SIDE) {
-        if (n_side & 1) {
-          GST_ERROR_OBJECT (self, "Odd number of side channels not supported");
-          ret = GST_FLOW_NOT_NEGOTIATED;
-          goto out;
-        } else if (stream_info->pChannelIndices[i] == 0) {
-          pos[i] = GST_AUDIO_CHANNEL_POSITION_SIDE_LEFT;
-        } else if (stream_info->pChannelIndices[i] == 1) {
-          pos[i] = GST_AUDIO_CHANNEL_POSITION_SIDE_RIGHT;
-        } else {
-          GST_ERROR_OBJECT (self, "Side channel index %d not supported",
-              stream_info->pChannelIndices[i]);
-          ret = GST_FLOW_NOT_NEGOTIATED;
-          goto out;
-        }
       } else if (stream_info->pChannelType[i] == ACT_BACK) {
         if (stream_info->pChannelIndices[i] == 0) {
           if (n_back & 1)
             pos[i] = GST_AUDIO_CHANNEL_POSITION_REAR_CENTER;
+          else if (n_back > 2)
+            pos[i] = GST_AUDIO_CHANNEL_POSITION_SIDE_LEFT;
           else
             pos[i] = GST_AUDIO_CHANNEL_POSITION_REAR_LEFT;
         } else if (stream_info->pChannelIndices[i] == 1) {
-          if (n_back & 1)
+          if ((n_back & 1) && n_back > 3)
+            pos[i] = GST_AUDIO_CHANNEL_POSITION_SIDE_LEFT;
+          else if (n_back & 1)
             pos[i] = GST_AUDIO_CHANNEL_POSITION_REAR_LEFT;
+          else if (n_back > 2)
+            pos[i] = GST_AUDIO_CHANNEL_POSITION_SIDE_RIGHT;
           else
             pos[i] = GST_AUDIO_CHANNEL_POSITION_REAR_RIGHT;
         } else if (stream_info->pChannelIndices[i] == 2) {
-          if (n_back & 1)
+          if ((n_back & 1) && n_back > 3)
+            pos[i] = GST_AUDIO_CHANNEL_POSITION_SIDE_RIGHT;
+          else if (n_back & 1)
             pos[i] = GST_AUDIO_CHANNEL_POSITION_REAR_RIGHT;
+          else if (n_back > 2)
+            pos[i] = GST_AUDIO_CHANNEL_POSITION_REAR_LEFT;
+          else
+            g_assert_not_reached ();
+        } else if (stream_info->pChannelIndices[i] == 3) {
+          if ((n_back & 1) && n_back > 3)
+            pos[i] = GST_AUDIO_CHANNEL_POSITION_REAR_LEFT;
+          else if (n_back & 1)
+            g_assert_not_reached ();
+          else if (n_back > 2)
+            pos[i] = GST_AUDIO_CHANNEL_POSITION_REAR_RIGHT;
+          else
+            g_assert_not_reached ();
+        } else if (stream_info->pChannelIndices[i] == 4) {
+          if ((n_back & 1) && n_back > 3)
+            pos[i] = GST_AUDIO_CHANNEL_POSITION_REAR_RIGHT;
+          else if (n_back & 1)
+            g_assert_not_reached ();
+          else if (n_back > 2)
+            g_assert_not_reached ();
           else
             g_assert_not_reached ();
         } else {
@@ -409,9 +427,9 @@ gst_fdkaacdec_flush (GstAudioDecoder * dec, gboolean hard)
 
   if (self->dec) {
     AAC_DECODER_ERROR err;
-    if ((err =
-            aacDecoder_DecodeFrame (self->dec, self->decode_buffer,
-                self->decode_buffer_size, AACDEC_FLUSH)) != AAC_DEC_OK) {
+    err = aacDecoder_DecodeFrame (self->dec, self->decode_buffer,
+        self->decode_buffer_size, AACDEC_FLUSH);
+    if (err != AAC_DEC_OK) {
       GST_ERROR_OBJECT (self, "flushing error: %d", err);
     }
   }

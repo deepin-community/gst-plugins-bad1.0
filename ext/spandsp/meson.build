@@ -8,7 +8,7 @@ spandsp_sources = [
   'gsttonegeneratesrc.h',
 ]
 
-spandsp_dep = dependency('spandsp', version : '>= 0.0.6', required : false)
+spandsp_dep = dependency('spandsp', version : '>= 0.0.6', required : get_option('spandsp'))
 
 if spandsp_dep.found()
   gstspandsp = library('gstspandsp',
@@ -19,4 +19,6 @@ if spandsp_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstspandsp, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstspandsp]
 endif

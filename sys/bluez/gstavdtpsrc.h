@@ -59,9 +59,11 @@ struct _GstAvdtpSrc
 
   GstPoll *poll;
   GstPollFD pfd;
-  volatile gint unlocked;
+  gint unlocked;
 
   GstClockTime duration;
+
+  guint transport_volume;
 };
 
 GType gst_avdtp_src_get_type (void);

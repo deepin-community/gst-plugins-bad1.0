@@ -17,6 +17,23 @@
  * Free Software Foundation, Inc., 51 Franklin Street, Suite 500,
  * Boston, MA 02110-1335, USA.
  */
+/**
+ * SECTION:element-decklinkaudiosrc
+ * @short_description: Inputs Audio from a BlackMagic DeckLink Device
+ * @see_also: decklinkvideosrc
+ *
+ * Capture Video and Audio from a BlackMagic DeckLink Device. Can only be used
+ * in conjunction with decklinkvideosink.
+ *
+ * ## Sample pipeline
+ * |[
+ * gst-launch-1.0 \
+ *   decklinkvideosrc device-number=0 mode=1080p25 ! autovideosink \
+ *   decklinkaudiosrc device-number=0 ! autoaudiosink
+ * ]|
+ * Capturing 1080p25 video and audio from the SDI-In of Card 0. Devices are numbered
+ * starting with 0.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -106,10 +123,6 @@ static GstStateChangeReturn
 gst_decklink_audio_src_change_state (GstElement * element,
     GstStateChange transition);
 
-static gboolean gst_decklink_audio_src_set_caps (GstBaseSrc * bsrc,
-    GstCaps * caps);
-static GstCaps *gst_decklink_audio_src_get_caps (GstBaseSrc * bsrc,
-    GstCaps * filter);
 static gboolean gst_decklink_audio_src_unlock (GstBaseSrc * bsrc);
 static gboolean gst_decklink_audio_src_unlock_stop (GstBaseSrc * bsrc);
 static gboolean gst_decklink_audio_src_query (GstBaseSrc * bsrc,
@@ -141,9 +154,8 @@ gst_decklink_audio_src_class_init (GstDecklinkAudioSrcClass * klass)
   element_class->change_state =
       GST_DEBUG_FUNCPTR (gst_decklink_audio_src_change_state);
 
-  basesrc_class->get_caps = GST_DEBUG_FUNCPTR (gst_decklink_audio_src_get_caps);
-  basesrc_class->set_caps = GST_DEBUG_FUNCPTR (gst_decklink_audio_src_set_caps);
   basesrc_class->query = GST_DEBUG_FUNCPTR (gst_decklink_audio_src_query);
+  basesrc_class->negotiate = NULL;
   basesrc_class->unlock = GST_DEBUG_FUNCPTR (gst_decklink_audio_src_unlock);
   basesrc_class->unlock_stop =
       GST_DEBUG_FUNCPTR (gst_decklink_audio_src_unlock_stop);
@@ -197,7 +209,8 @@ gst_decklink_audio_src_class_init (GstDecklinkAudioSrcClass * klass)
   gst_element_class_add_static_pad_template (element_class, &sink_template);
 
   gst_element_class_set_static_metadata (element_class, "Decklink Audio Source",
-      "Audio/Src", "Decklink Source", "David Schleef <ds@entropywave.com>, "
+      "Audio/Source/Hardware", "Decklink Source",
+      "David Schleef <ds@entropywave.com>, "
       "Sebastian Dröge <sebastian@centricular.com>");
 
   GST_DEBUG_CATEGORY_INIT (gst_decklink_audio_src_debug, "decklinkaudiosrc",
@@ -215,6 +228,8 @@ gst_decklink_audio_src_init (GstDecklinkAudioSrc * self)
 
   gst_base_src_set_live (GST_BASE_SRC (self), TRUE);
   gst_base_src_set_format (GST_BASE_SRC (self), GST_FORMAT_TIME);
+
+  gst_pad_use_fixed_caps (GST_BASE_SRC_PAD (self));
 
   g_mutex_init (&self->lock);
   g_cond_init (&self->cond);
@@ -314,47 +329,42 @@ gst_decklink_audio_src_finalize (GObject * object)
 }
 
 static gboolean
-gst_decklink_audio_src_set_caps (GstBaseSrc * bsrc, GstCaps * caps)
+gst_decklink_audio_src_start (GstDecklinkAudioSrc * self)
 {
-  GstDecklinkAudioSrc *self = GST_DECKLINK_AUDIO_SRC_CAST (bsrc);
   BMDAudioSampleType sample_depth;
-  GstCaps *current_caps;
   HRESULT ret;
   BMDAudioConnection conn = (BMDAudioConnection) - 1;
+  GstCaps *allowed_caps, *caps;
 
-  GST_DEBUG_OBJECT (self, "Setting caps %" GST_PTR_FORMAT, caps);
+  g_mutex_lock (&self->input->lock);
+  if (self->input->audio_enabled) {
+    g_mutex_unlock (&self->input->lock);
+    return TRUE;
+  }
+  g_mutex_unlock (&self->input->lock);
 
-  if ((current_caps = gst_pad_get_current_caps (GST_BASE_SRC_PAD (bsrc)))) {
-    GstCaps *curcaps_cp;
-    GstStructure *cur_st, *caps_st;
+  /* Negotiate the format / sample depth with downstream */
+  allowed_caps = gst_pad_get_allowed_caps (GST_BASE_SRC_PAD (self));
+  if (!allowed_caps)
+    allowed_caps = gst_pad_get_pad_template_caps (GST_BASE_SRC_PAD (self));
 
-    GST_DEBUG_OBJECT (self, "Pad already has caps %" GST_PTR_FORMAT, caps);
+  sample_depth = bmdAudioSampleType32bitInteger;
+  if (!gst_caps_is_empty (allowed_caps)) {
+    GstStructure *s;
 
-    curcaps_cp = gst_caps_make_writable (current_caps);
-    cur_st = gst_caps_get_structure (curcaps_cp, 0);
-    caps_st = gst_caps_get_structure (caps, 0);
-    gst_structure_remove_field (cur_st, "channel-mask");
+    allowed_caps = gst_caps_simplify (allowed_caps);
 
-    if (!gst_structure_can_intersect (caps_st, cur_st)) {
-      GST_ERROR_OBJECT (self, "New caps are not compatible with old caps");
-      gst_caps_unref (current_caps);
-      gst_caps_unref (curcaps_cp);
-      return FALSE;
-    } else {
-      gst_caps_unref (current_caps);
-      gst_caps_unref (curcaps_cp);
-      return TRUE;
+    s = gst_caps_get_structure (allowed_caps, 0);
+
+    /* If it's not a string then both formats are supported */
+    if (gst_structure_has_field_typed (s, "format", G_TYPE_STRING)) {
+      const gchar *format = gst_structure_get_string (s, "format");
+      if (g_str_equal (format, "S16LE")) {
+        sample_depth = bmdAudioSampleType16bitInteger;
+      }
     }
   }
-
-  if (!gst_audio_info_from_caps (&self->info, caps))
-    return FALSE;
-
-  if (self->info.finfo->format == GST_AUDIO_FORMAT_S16LE) {
-    sample_depth = bmdAudioSampleType16bitInteger;
-  } else {
-    sample_depth = bmdAudioSampleType32bitInteger;
-  }
+  gst_caps_unref (allowed_caps);
 
   switch (self->connection) {
     case GST_DECKLINK_AUDIO_CONNECTION_AUTO:{
@@ -431,12 +441,16 @@ gst_decklink_audio_src_set_caps (GstBaseSrc * bsrc, GstCaps * caps)
   }
 
   ret = self->input->input->EnableAudioInput (bmdAudioSampleRate48kHz,
-      sample_depth, self->info.channels);
+      sample_depth, self->channels_found);
   if (ret != S_OK) {
     GST_WARNING_OBJECT (self, "Failed to enable audio input: 0x%08lx",
         (unsigned long) ret);
     return FALSE;
   }
+  gst_audio_info_set_format (&self->info,
+      sample_depth ==
+      bmdAudioSampleType16bitInteger ? GST_AUDIO_FORMAT_S16LE :
+      GST_AUDIO_FORMAT_S32LE, 48000, self->channels_found, NULL);
 
   g_mutex_lock (&self->input->lock);
   self->input->audio_enabled = TRUE;
@@ -444,46 +458,15 @@ gst_decklink_audio_src_set_caps (GstBaseSrc * bsrc, GstCaps * caps)
     self->input->start_streams (self->input->videosrc);
   g_mutex_unlock (&self->input->lock);
 
-  return TRUE;
-}
-
-static GstCaps *
-gst_decklink_audio_src_get_caps (GstBaseSrc * bsrc, GstCaps * filter)
-{
-  GstDecklinkAudioSrc *self = GST_DECKLINK_AUDIO_SRC_CAST (bsrc);
-  GstCaps *caps;
-
-  // We don't support renegotiation
-  caps = gst_pad_get_current_caps (GST_BASE_SRC_PAD (bsrc));
-
-  if (!caps) {
-    GstCaps *channel_filter, *templ;
-
-    templ = gst_pad_get_pad_template_caps (GST_BASE_SRC_PAD (bsrc));
-    if (self->channels_found > 0) {
-      channel_filter =
-          gst_caps_new_simple ("audio/x-raw", "channels", G_TYPE_INT,
-          self->channels_found, NULL);
-    } else if (self->channels > 0) {
-      channel_filter =
-          gst_caps_new_simple ("audio/x-raw", "channels", G_TYPE_INT,
-          self->channels, NULL);
-    } else {
-      channel_filter = gst_caps_new_empty_simple ("audio/x-raw");
-    }
-    caps = gst_caps_intersect (channel_filter, templ);
-    gst_caps_unref (channel_filter);
-    gst_caps_unref (templ);
-  }
-
-  if (filter) {
-    GstCaps *tmp =
-        gst_caps_intersect_full (filter, caps, GST_CAPS_INTERSECT_FIRST);
+  caps = gst_audio_info_to_caps (&self->info);
+  if (!gst_base_src_set_caps (GST_BASE_SRC (self), caps)) {
     gst_caps_unref (caps);
-    caps = tmp;
+    GST_WARNING_OBJECT (self, "Failed to set caps");
+    return FALSE;
   }
+  gst_caps_unref (caps);
 
-  return caps;
+  return TRUE;
 }
 
 static void
@@ -597,6 +580,10 @@ gst_decklink_audio_src_create (GstPushSrc * bsrc, GstBuffer ** buffer)
   static GstStaticCaps hardware_reference =
       GST_STATIC_CAPS ("timestamp/x-decklink-hardware");
 
+  if (!gst_decklink_audio_src_start (self)) {
+    return GST_FLOW_NOT_NEGOTIATED;
+  }
+
 retry:
   g_mutex_lock (&self->lock);
   while (gst_queue_array_is_empty (self->current_packets) && !self->flushing) {
@@ -645,6 +632,8 @@ retry:
   // Convert to the sample numbers
   start_offset =
       gst_util_uint64_scale (start_time, self->info.rate, GST_SECOND);
+  // Convert back to round down to a sample multiple and get rid of rounding errors
+  start_time = gst_util_uint64_scale (start_offset, GST_SECOND, self->info.rate);
 
   end_offset = start_offset + sample_count;
   end_time = gst_util_uint64_scale_int (end_offset, GST_SECOND,

@@ -147,7 +147,7 @@ gst_wasapi_sink_class_init (GstWasapiSinkClass * klass)
 
   gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
   gst_element_class_set_static_metadata (gstelement_class, "WasapiSrc",
-      "Sink/Audio",
+      "Sink/Audio/Hardware",
       "Stream audio to an audio capture device through WASAPI",
       "Nirbheek Chauhan <nirbheek@centricular.com>, "
       "Ole André Vadla Ravnås <ole.andre.ravnas@tandberg.com>");
@@ -164,6 +164,8 @@ gst_wasapi_sink_class_init (GstWasapiSinkClass * klass)
 
   GST_DEBUG_CATEGORY_INIT (gst_wasapi_sink_debug, "wasapisink",
       0, "Windows audio session API sink");
+
+  gst_type_mark_as_plugin_api (GST_WASAPI_DEVICE_TYPE_ROLE, 0);
 }
 
 static void
@@ -175,9 +177,10 @@ gst_wasapi_sink_init (GstWasapiSink * self)
   self->low_latency = DEFAULT_LOW_LATENCY;
   self->try_audioclient3 = DEFAULT_AUDIOCLIENT3;
   self->event_handle = CreateEvent (NULL, FALSE, FALSE, NULL);
+  self->cancellable = CreateEvent (NULL, TRUE, FALSE, NULL);
   self->client_needs_restart = FALSE;
 
-  CoInitialize (NULL);
+  CoInitializeEx (NULL, COINIT_MULTITHREADED);
 }
 
 static void
@@ -188,6 +191,11 @@ gst_wasapi_sink_dispose (GObject * object)
   if (self->event_handle != NULL) {
     CloseHandle (self->event_handle);
     self->event_handle = NULL;
+  }
+
+  if (self->cancellable != NULL) {
+    CloseHandle (self->cancellable);
+    self->cancellable = NULL;
   }
 
   if (self->client != NULL) {
@@ -211,6 +219,8 @@ gst_wasapi_sink_finalize (GObject * object)
   CoTaskMemFree (self->mix_format);
   self->mix_format = NULL;
 
+  CoUninitialize ();
+
   if (self->cached_caps != NULL) {
     gst_caps_unref (self->cached_caps);
     self->cached_caps = NULL;
@@ -219,8 +229,6 @@ gst_wasapi_sink_finalize (GObject * object)
   g_clear_pointer (&self->positions, g_free);
   g_clear_pointer (&self->device_strid, g_free);
   self->mute = FALSE;
-
-  CoUninitialize ();
 
   G_OBJECT_CLASS (gst_wasapi_sink_parent_class)->finalize (object);
 }
@@ -404,7 +412,7 @@ gst_wasapi_sink_open (GstAudioSink * asink)
    * even if the old device was unplugged. We need to handle this somehow.
    * For example, perhaps we should automatically switch to the new device if
    * the default device is changed and a device isn't explicitly selected. */
-  if (!gst_wasapi_util_get_device_client (GST_ELEMENT (self), FALSE,
+  if (!gst_wasapi_util_get_device_client (GST_ELEMENT (self), eRender,
           self->role, self->device_strid, &device, &client)) {
     if (!self->device_strid)
       GST_ELEMENT_ERROR (self, RESOURCE, OPEN_WRITE, (NULL),
@@ -458,7 +466,7 @@ gst_wasapi_sink_get_can_frames (GstWasapiSink * self)
 
   /* Frames the card hasn't rendered yet */
   hr = IAudioClient_GetCurrentPadding (self->client, &n_frames_padding);
-  HR_FAILED_RET (hr, IAudioClient::GetCurrentPadding, -1);
+  HR_FAILED_ELEMENT_ERROR_RET (hr, IAudioClient::GetCurrentPadding, self, -1);
 
   GST_DEBUG_OBJECT (self, "%i unread frames (padding)", n_frames_padding);
 
@@ -475,17 +483,17 @@ gst_wasapi_sink_prepare (GstAudioSink * asink, GstAudioRingBufferSpec * spec)
   guint bpf, rate, devicep_frames;
   HRESULT hr;
 
-  CoInitialize (NULL);
+  CoInitializeEx (NULL, COINIT_MULTITHREADED);
 
   if (gst_wasapi_sink_can_audioclient3 (self)) {
     if (!gst_wasapi_util_initialize_audioclient3 (GST_ELEMENT (self), spec,
             (IAudioClient3 *) self->client, self->mix_format, self->low_latency,
-            &devicep_frames))
+            FALSE, &devicep_frames))
       goto beach;
   } else {
     if (!gst_wasapi_util_initialize_audioclient (GST_ELEMENT (self), spec,
             self->client, self->mix_format, self->sharemode, self->low_latency,
-            &devicep_frames))
+            FALSE, &devicep_frames))
       goto beach;
   }
 
@@ -557,11 +565,15 @@ gst_wasapi_sink_prepare (GstAudioSink * asink, GstAudioRingBufferSpec * spec)
 
   hr = IAudioClient_Start (self->client);
   HR_FAILED_GOTO (hr, IAudioClient::Start, beach);
+  self->client_needs_restart = FALSE;
 
   gst_audio_ring_buffer_set_channel_positions (GST_AUDIO_BASE_SINK
       (self)->ringbuffer, self->positions);
 
   res = TRUE;
+
+  /* reset cancellable event handle */
+  ResetEvent (self->cancellable);
 
 beach:
   /* unprepare() is not called if prepare() fails, but we want it to be, so call
@@ -577,8 +589,6 @@ gst_wasapi_sink_unprepare (GstAudioSink * asink)
 {
   GstWasapiSink *self = GST_WASAPI_SINK (asink);
 
-  CoUninitialize ();
-
   if (self->client != NULL) {
     IAudioClient_Stop (self->client);
   }
@@ -587,6 +597,8 @@ gst_wasapi_sink_unprepare (GstAudioSink * asink)
     IUnknown_Release (self->render_client);
     self->render_client = NULL;
   }
+
+  CoUninitialize ();
 
   return TRUE;
 }
@@ -599,13 +611,18 @@ gst_wasapi_sink_write (GstAudioSink * asink, gpointer data, guint length)
   gint16 *dst = NULL;
   DWORD dwWaitResult;
   guint can_frames, have_frames, n_frames, write_len, written_len = 0;
+  HANDLE event_handle[2];
+
+  event_handle[0] = self->event_handle;
+  event_handle[1] = self->cancellable;
 
   GST_OBJECT_LOCK (self);
   if (self->client_needs_restart) {
     hr = IAudioClient_Start (self->client);
-    HR_FAILED_AND (hr, IAudioClient::Start, GST_OBJECT_UNLOCK (self);
-        goto beach);
+    HR_FAILED_ELEMENT_ERROR_AND (hr, IAudioClient::Start, self,
+        GST_OBJECT_UNLOCK (self); goto err);
     self->client_needs_restart = FALSE;
+    ResetEvent (self->cancellable);
   }
   GST_OBJECT_UNLOCK (self);
 
@@ -613,37 +630,61 @@ gst_wasapi_sink_write (GstAudioSink * asink, gpointer data, guint length)
   have_frames = length / (self->mix_format->nBlockAlign);
 
   if (self->sharemode == AUDCLNT_SHAREMODE_EXCLUSIVE) {
-    /* In exlusive mode we have to wait always */
-    dwWaitResult = WaitForSingleObject (self->event_handle, INFINITE);
-    if (dwWaitResult != WAIT_OBJECT_0) {
+    /* In exclusive mode we have to wait always */
+    dwWaitResult = WaitForMultipleObjects (2, event_handle, FALSE, INFINITE);
+    if (dwWaitResult != WAIT_OBJECT_0 && dwWaitResult != WAIT_OBJECT_0 + 1) {
       GST_ERROR_OBJECT (self, "Error waiting for event handle: %x",
           (guint) dwWaitResult);
-      goto beach;
+      goto err;
+    }
+
+    /* ::reset was requested */
+    if (dwWaitResult == WAIT_OBJECT_0 + 1) {
+      GST_DEBUG_OBJECT (self, "operation was cancelled");
+      return -1;
     }
 
     can_frames = gst_wasapi_sink_get_can_frames (self);
+    if (can_frames < 0) {
+      GST_ERROR_OBJECT (self, "Error getting frames to write to");
+      goto err;
+    }
     /* In exclusive mode we need to fill the whole buffer in one go or
      * GetBuffer will error out */
     if (can_frames != have_frames) {
       GST_ERROR_OBJECT (self,
           "Need at %i frames to write for exclusive mode, but got %i",
           can_frames, have_frames);
-      written_len = -1;
-      goto beach;
+      goto err;
     }
   } else {
     /* In shared mode we can write parts of the buffer, so only wait
      * in case we can't write anything */
     can_frames = gst_wasapi_sink_get_can_frames (self);
+    if (can_frames < 0) {
+      GST_ERROR_OBJECT (self, "Error getting frames to write to");
+      goto err;
+    }
 
     if (can_frames == 0) {
-      dwWaitResult = WaitForSingleObject (self->event_handle, INFINITE);
-      if (dwWaitResult != WAIT_OBJECT_0) {
+      dwWaitResult = WaitForMultipleObjects (2, event_handle, FALSE, INFINITE);
+      if (dwWaitResult != WAIT_OBJECT_0 && dwWaitResult != WAIT_OBJECT_0 + 1) {
         GST_ERROR_OBJECT (self, "Error waiting for event handle: %x",
             (guint) dwWaitResult);
-        goto beach;
+        goto err;
       }
+
+      /* ::reset was requested */
+      if (dwWaitResult == WAIT_OBJECT_0 + 1) {
+        GST_DEBUG_OBJECT (self, "operation was cancelled");
+        return -1;
+      }
+
       can_frames = gst_wasapi_sink_get_can_frames (self);
+      if (can_frames < 0) {
+        GST_ERROR_OBJECT (self, "Error getting frames to write to");
+        goto err;
+      }
     }
   }
 
@@ -657,19 +698,24 @@ gst_wasapi_sink_write (GstAudioSink * asink, gpointer data, guint length)
 
   hr = IAudioRenderClient_GetBuffer (self->render_client, n_frames,
       (BYTE **) & dst);
-  HR_FAILED_AND (hr, IAudioRenderClient::GetBuffer, goto beach);
+  HR_FAILED_ELEMENT_ERROR_AND (hr, IAudioRenderClient::GetBuffer, self,
+      goto err);
 
   memcpy (dst, data, write_len);
 
   hr = IAudioRenderClient_ReleaseBuffer (self->render_client, n_frames,
       self->mute ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
-  HR_FAILED_AND (hr, IAudioRenderClient::ReleaseBuffer, goto beach);
+  HR_FAILED_ELEMENT_ERROR_AND (hr, IAudioRenderClient::ReleaseBuffer, self,
+      goto err);
 
   written_len = write_len;
 
-beach:
-
+out:
   return written_len;
+
+err:
+  written_len = -1;
+  goto out;
 }
 
 static guint
@@ -696,13 +742,16 @@ gst_wasapi_sink_reset (GstAudioSink * asink)
   if (!self->client)
     return;
 
+  SetEvent (self->cancellable);
+
   GST_OBJECT_LOCK (self);
   hr = IAudioClient_Stop (self->client);
-  HR_FAILED_AND (hr, IAudioClient::Stop,);
+  HR_FAILED_AND (hr, IAudioClient::Stop, goto err);
 
   hr = IAudioClient_Reset (self->client);
-  HR_FAILED_AND (hr, IAudioClient::Reset,);
+  HR_FAILED_AND (hr, IAudioClient::Reset, goto err);
 
+err:
   self->client_needs_restart = TRUE;
   GST_OBJECT_UNLOCK (self);
 }

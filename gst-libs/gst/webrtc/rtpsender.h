@@ -35,6 +35,9 @@ GType gst_webrtc_rtp_sender_get_type(void);
 #define GST_IS_WEBRTC_RTP_SENDER_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass) ,GST_TYPE_WEBRTC_RTP_SENDER))
 #define GST_WEBRTC_RTP_SENDER_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS((obj) ,GST_TYPE_WEBRTC_RTP_SENDER,GstWebRTCRTPSenderClass))
 
+/**
+ * GstWebRTCRTPSender:
+ */
 struct _GstWebRTCRTPSender
 {
   GstObject                          parent;
@@ -65,6 +68,8 @@ GST_WEBRTC_API
 void                        gst_webrtc_rtp_sender_set_rtcp_transport    (GstWebRTCRTPSender * sender,
                                                                          GstWebRTCDTLSTransport * transport);
 
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(GstWebRTCRTPSender, gst_object_unref)
 
 G_END_DECLS
 

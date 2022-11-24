@@ -1,7 +1,7 @@
 /*
- * gstmpegtsdescriptor.c - 
+ * gstmpegtsdescriptor.c -
  * Copyright (C) 2013 Edward Hervey
- * 
+ *
  * Authors:
  *   Edward Hervey <edward@collabora.com>
  *
@@ -20,22 +20,78 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include <stdlib.h>
 #include <string.h>
 
 #include "mpegts.h"
 #include "gstmpegts-private.h"
 
+#define DEFINE_STATIC_COPY_FUNCTION(type, name) \
+static type * _##name##_copy (type * source) \
+{ \
+  return g_slice_dup (type, source); \
+}
+
+#define DEFINE_STATIC_FREE_FUNCTION(type, name) \
+static void _##name##_free (type * source) \
+{ \
+  g_slice_free (type, source); \
+}
+
 /**
  * SECTION:gstmpegtsdescriptor
  * @title: Base MPEG-TS descriptors
- * @short_description: Descriptors for ITU H.222.0 | ISO/IEC 13818-1 
+ * @short_description: Descriptors for ITU H.222.0 | ISO/IEC 13818-1
  * @include: gst/mpegts/mpegts.h
+ * @symbols:
+ * - GstMpegtsDescriptor
+ * - GstMpegtsDescriptorType
+ * - GstMpegtsMiscDescriptorType
+ * - gst_mpegts_find_descriptor
+ * - gst_mpegts_parse_descriptors
+ * - gst_mpegts_descriptor_from_custom
+ * - gst_mpegts_descriptor_from_registration
+ * - GstMpegtsISO639LanguageDescriptor
+ * - GstMpegtsIso639AudioType
+ * - gst_mpegts_descriptor_parse_iso_639_language
+ * - gst_mpegts_descriptor_parse_iso_639_language_idx
+ * - gst_mpegts_descriptor_parse_iso_639_language_nb
+ * - gst_mpegts_iso_639_language_descriptor_free
+ * - GstMpegtsLogicalChannel
+ * - GstMpegtsLogicalChannelDescriptor
+ * - gst_mpegts_descriptor_parse_logical_channel
+ * - GST_TYPE_MPEGTS_DVB_CODE_RATE
+ * - GST_TYPE_MPEGTS_CABLE_OUTER_FEC_SCHEME
+ * - GST_TYPE_MPEGTS_MODULATION_TYPE
+ * - GST_TYPE_MPEGTS_SATELLITE_POLARIZATION_TYPE
+ * - GST_TYPE_MPEGTS_SATELLITE_ROLLOFF
+ * - GST_TYPE_MPEGTS_ISO_639_LANGUAGE
+ * - GST_TYPE_MPEGTS_DESCRIPTOR
+ * - GST_TYPE_MPEGTS_DVB_SERVICE_TYPE
+ * - GST_TYPE_MPEGTS_DESCRIPTOR_TYPE
+ * - GST_TYPE_MPEGTS_ISO639_AUDIO_TYPE
+ * - GST_TYPE_MPEGTS_DVB_DESCRIPTOR_TYPE
+ * - GST_TYPE_MPEGTS_MISC_DESCRIPTOR_TYPE
+ * - gst_mpegts_descriptor_get_type
+ * - gst_mpegts_iso_639_language_get_type
+ * - gst_mpegts_cable_outer_fec_scheme_get_type
+ * - gst_mpegts_modulation_type_get_type
+ * - gst_mpegts_satellite_polarization_type_get_type
+ * - gst_mpegts_satellite_rolloff_get_type
+ * - gst_mpegts_descriptor_type_get_type
+ * - gst_mpegts_dvb_descriptor_type_get_type
+ * - gst_mpegts_misc_descriptor_type_get_type
+ * - gst_mpegts_iso639_audio_type_get_type
+ * - gst_mpegts_dvb_service_type_get_type
  *
  * These are the base descriptor types and methods.
  *
  * For more details, refer to the ITU H.222.0 or ISO/IEC 13818-1 specifications
- * and other specifications mentionned in the documentation.
+ * and other specifications mentioned in the documentation.
  */
 
 /* FIXME : Move this to proper file once we have a C file for ATSC/ISDB descriptors */
@@ -44,6 +100,98 @@
  * @title: ATSC variants of MPEG-TS descriptors
  * @short_description: Descriptors for the various ATSC specifications
  * @include: gst/mpegts/mpegts.h
+ * @symbols:
+ * - GstMpegtsATSCDescriptorType
+ * - GST_TYPE_MPEGTS_ATSC_DESCRIPTOR_TYPE
+ * - gst_mpegts_atsc_descriptor_type_get_type
+ * - GstMpegtsDVBDescriptorType
+ * - GstMpegtsDVBExtendedDescriptorType
+ * - GstMpegtsContent
+ * - gst_mpegts_descriptor_parse_dvb_content
+ * - GstMpegtsComponentDescriptor
+ * - gst_mpegts_dvb_component_descriptor_free
+ * - gst_mpegts_descriptor_parse_dvb_component
+ * - GstMpegtsExtendedEventItem
+ * - GstMpegtsExtendedEventDescriptor
+ * - gst_mpegts_extended_event_descriptor_free
+ * - gst_mpegts_descriptor_parse_dvb_extended_event
+ * - GstMpegtsSatelliteDeliverySystemDescriptor
+ * - GstMpegtsDVBCodeRate
+ * - GstMpegtsModulationType
+ * - GstMpegtsSatellitePolarizationType
+ * - GstMpegtsSatelliteRolloff
+ * - gst_mpegts_descriptor_parse_satellite_delivery_system
+ * - GstMpegtsCableDeliverySystemDescriptor
+ * - GstMpegtsCableOuterFECScheme
+ * - gst_mpegts_descriptor_parse_cable_delivery_system
+ * - GstMpegtsTerrestrialDeliverySystemDescriptor
+ * - GstMpegtsTerrestrialTransmissionMode
+ * - GstMpegtsTerrestrialGuardInterval
+ * - GstMpegtsTerrestrialHierarchy
+ * - gst_mpegts_descriptor_parse_terrestrial_delivery_system
+ * - GstMpegtsT2DeliverySystemCellExtension
+ * - GstMpegtsT2DeliverySystemCell
+ * - GstMpegtsT2DeliverySystemDescriptor
+ * - gst_mpegts_t2_delivery_system_descriptor_free
+ * - gst_mpegts_descriptor_parse_dvb_t2_delivery_system
+ * - gst_mpegts_descriptor_parse_dvb_short_event
+ * - gst_mpegts_descriptor_parse_dvb_network_name
+ * - gst_mpegts_descriptor_from_dvb_network_name
+ * - GstMpegtsDVBServiceType
+ * - gst_mpegts_descriptor_parse_dvb_service
+ * - gst_mpegts_descriptor_from_dvb_service
+ * - GstMpegtsDVBTeletextType
+ * - gst_mpegts_descriptor_parse_dvb_teletext_idx
+ * - gst_mpegts_descriptor_parse_dvb_teletext_nb
+ * - gst_mpegts_descriptor_parse_dvb_subtitling_idx
+ * - gst_mpegts_descriptor_parse_dvb_subtitling_nb
+ * - gst_mpegts_descriptor_from_dvb_subtitling
+ * - GstMpegtsDVBLinkageType
+ * - GstMpegtsDVBLinkageHandOverType
+ * - GstMpegtsDVBLinkageMobileHandOver
+ * - GstMpegtsDVBLinkageEvent
+ * - GstMpegtsDVBLinkageExtendedEvent
+ * - GstMpegtsDVBLinkageDescriptor
+ * - gst_mpegts_dvb_linkage_descriptor_free
+ * - gst_mpegts_dvb_linkage_descriptor_get_mobile_hand_over
+ * - gst_mpegts_dvb_linkage_descriptor_get_event
+ * - gst_mpegts_dvb_linkage_descriptor_get_extended_event
+ * - gst_mpegts_descriptor_parse_dvb_linkage
+ * - gst_mpegts_descriptor_parse_dvb_private_data_specifier
+ * - gst_mpegts_descriptor_parse_dvb_frequency_list
+ * - GstMpegtsDataBroadcastDescriptor
+ * - gst_mpegts_dvb_data_broadcast_descriptor_free
+ * - gst_mpegts_descriptor_parse_dvb_data_broadcast
+ * - GstMpegtsDVBScramblingModeType
+ * - gst_mpegts_descriptor_parse_dvb_scrambling
+ * - gst_mpegts_descriptor_parse_dvb_data_broadcast_id
+ * - GstMpegtsDVBParentalRatingItem
+ * - gst_mpegts_descriptor_parse_dvb_parental_rating
+ * - gst_mpegts_descriptor_parse_dvb_stream_identifier
+ * - gst_mpegts_descriptor_parse_dvb_ca_identifier
+ * - GstMpegtsDVBServiceListItem
+ * - gst_mpegts_descriptor_parse_dvb_service_list
+ * - gst_mpegts_descriptor_parse_dvb_stuffing
+ * - gst_mpegts_descriptor_parse_dvb_bouquet_name
+ * - GstMpegtsDvbMultilingualNetworkNameItem
+ * - gst_mpegts_descriptor_parse_dvb_multilingual_network_name
+ * - GstMpegtsDvbMultilingualBouquetNameItem
+ * - gst_mpegts_descriptor_parse_dvb_multilingual_bouquet_name
+ * - GstMpegtsDvbMultilingualServiceNameItem
+ * - gst_mpegts_descriptor_parse_dvb_multilingual_service_name
+ * - GstMpegtsDvbMultilingualComponentItem
+ * - gst_mpegts_descriptor_parse_dvb_multilingual_component
+ * - GST_TYPE_MPEGTS_COMPONENT_DESCRIPTOR
+ * - GST_TYPE_MPEGTS_DVB_DATA_BROADCAST_DESCRIPTOR
+ * - GST_TYPE_MPEGTS_DVB_LINKAGE_DESCRIPTOR
+ * - GST_TYPE_MPEGTS_EXTENDED_EVENT_DESCRIPTOR
+ * - GST_TYPE_MPEGTS_T2_DELIVERY_SYSTEM_DESCRIPTOR
+ * - gst_mpegts_dvb_code_rate_get_type
+ * - gst_mpegts_component_descriptor_get_type
+ * - gst_mpegts_dvb_data_broadcast_descriptor_get_type
+ * - gst_mpegts_dvb_linkage_descriptor_get_type
+ * - gst_mpegts_extended_event_descriptor_get_type
+ * - gst_mpegts_t2_delivery_system_descriptor_get_type
  *
  */
 
@@ -52,7 +200,10 @@
  * @title: ISDB variants of MPEG-TS descriptors
  * @short_description: Descriptors for the various ISDB specifications
  * @include: gst/mpegts/mpegts.h
- *
+ * @symbols:
+ * - GstMpegtsISDBDescriptorType
+ * - GST_TYPE_MPEGTS_ISDB_DESCRIPTOR_TYPE
+ * -  gst_mpegts_isdb_descriptor_type_get_type
  */
 
 
@@ -61,7 +212,7 @@
  *
  * * Add common validation code for data presence and minimum/maximum expected
  *   size.
- * * Add parsing methods for the following descriptors that were previously 
+ * * Add parsing methods for the following descriptors that were previously
  *   handled in mpegtsbase:
  *   * GST_MTS_DESC_DVB_DATA_BROADCAST_ID
  *   * GST_MTS_DESC_DVB_CAROUSEL_IDENTIFIER
@@ -819,7 +970,7 @@ gst_mpegts_parse_descriptors (guint8 * buffer, gsize buf_len)
  * Note: To look for descriptors that can be present more than once in an
  * array of descriptors, iterate the #GArray manually.
  *
- * Returns: (transfer none): the first descriptor matchin @tag, else %NULL.
+ * Returns: (transfer none): the first descriptor matching @tag, else %NULL.
  */
 const GstMpegtsDescriptor *
 gst_mpegts_find_descriptor (GPtrArray * descriptors, guint8 tag)
@@ -841,7 +992,7 @@ gst_mpegts_find_descriptor (GPtrArray * descriptors, guint8 tag)
 /**
  * gst_mpegts_descriptor_from_registration:
  * @format_identifier: (transfer none): a 4 character format identifier string
- * @additional_info: (transfer none) (allow-none): pointer to optional additional info
+ * @additional_info: (transfer none) (allow-none) (array length=additional_info_length): pointer to optional additional info
  * @additional_info_length: length of the optional @additional_info
  *
  * Creates a %GST_MTS_DESC_REGISTRATION #GstMpegtsDescriptor
@@ -874,7 +1025,7 @@ gst_mpegts_descriptor_from_registration (const gchar * format_identifier,
  * @descriptor: a %GST_MTS_DESC_CA #GstMpegtsDescriptor
  * @ca_system_id: (out): the type of CA system used
  * @ca_pid: (out): The PID containing ECM or EMM data
- * @private_data: (out) (allow-none): The private data
+ * @private_data: (out) (allow-none) (array length=private_data_size): The private data
  * @private_data_size: (out) (allow-none): The size of @private_data in bytes
  *
  * Extracts the Conditional Access information from @descriptor.
@@ -1064,6 +1215,28 @@ gst_mpegts_descriptor_from_iso_639_language (const gchar * language)
   return descriptor;
 }
 
+DEFINE_STATIC_COPY_FUNCTION (GstMpegtsLogicalChannelDescriptor,
+    gst_mpegts_logical_channel_descriptor);
+
+DEFINE_STATIC_FREE_FUNCTION (GstMpegtsLogicalChannelDescriptor,
+    gst_mpegts_logical_channel_descriptor);
+
+G_DEFINE_BOXED_TYPE (GstMpegtsLogicalChannelDescriptor,
+    gst_mpegts_logical_channel_descriptor,
+    (GBoxedCopyFunc) _gst_mpegts_logical_channel_descriptor_copy,
+    (GFreeFunc) _gst_mpegts_logical_channel_descriptor_free);
+
+DEFINE_STATIC_COPY_FUNCTION (GstMpegtsLogicalChannel,
+    gst_mpegts_logical_channel);
+
+DEFINE_STATIC_FREE_FUNCTION (GstMpegtsLogicalChannel,
+    gst_mpegts_logical_channel);
+
+G_DEFINE_BOXED_TYPE (GstMpegtsLogicalChannel,
+    gst_mpegts_logical_channel,
+    (GBoxedCopyFunc) _gst_mpegts_logical_channel_copy,
+    (GFreeFunc) _gst_mpegts_logical_channel_free);
+
 /**
  * gst_mpegts_descriptor_parse_logical_channel:
  * @descriptor: a %GST_MTS_DESC_DTG_LOGICAL_CHANNEL #GstMpegtsDescriptor
@@ -1104,7 +1277,7 @@ gst_mpegts_descriptor_parse_logical_channel (const GstMpegtsDescriptor *
 /**
  * gst_mpegts_descriptor_from_custom:
  * @tag: descriptor tag
- * @data: (transfer none): descriptor data (after tag and length field)
+ * @data: (transfer none) (array length=length): descriptor data (after tag and length field)
  * @length: length of @data
  *
  * Creates a #GstMpegtsDescriptor with custom @tag and @data
@@ -1131,7 +1304,7 @@ gst_mpegts_descriptor_from_custom (guint8 tag, const guint8 * data,
  * gst_mpegts_descriptor_from_custom_with_extension:
  * @tag: descriptor tag
  * @tag_extension: descriptor tag extension
- * @data: (transfer none): descriptor data (after tag and length field)
+ * @data: (transfer none) (array length=length): descriptor data (after tag and length field)
  * @length: length of @data
  *
  * Creates a #GstMpegtsDescriptor with custom @tag, @tag_extension and @data

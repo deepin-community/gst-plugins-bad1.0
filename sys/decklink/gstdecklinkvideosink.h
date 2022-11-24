@@ -52,6 +52,7 @@ struct _GstDecklinkVideoSink
   GstDecklinkModeEnum mode;
   gint device_number;
   GstDecklinkVideoFormat video_format;
+  BMDDuplexMode duplex_mode;
   BMDTimecodeFormat timecode_format;
   BMDKeyerMode keyer_mode;
   gint keyer_level;
@@ -61,7 +62,19 @@ struct _GstDecklinkVideoSink
   GstClockTime internal_base_time;
   GstClockTime external_base_time;
 
+  /* really an internal start time */
+  GstClockTime internal_time_offset;
+  GstClockTime internal_pause_time;
+
   GstDecklinkOutput *output;
+
+  GstVideoVBIEncoder *vbiencoder;
+  GstVideoFormat anc_vformat;
+
+  gint caption_line;
+  guint16 cdp_hdr_sequence_cntr;
+
+  gint afd_bar_line;
 };
 
 struct _GstDecklinkVideoSinkClass

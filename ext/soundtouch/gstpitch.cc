@@ -73,13 +73,13 @@ enum
     "audio/x-raw, " \
       "format = (string) " GST_AUDIO_NE (F32) ", " \
       "rate = (int) [ 8000, MAX ], " \
-      "channels = (int) [ 1, 2 ]"
+      "channels = (int) [ 1, MAX ]"
 #elif defined(SOUNDTOUCH_INTEGER_SAMPLES)
   #define SUPPORTED_CAPS \
     "audio/x-raw, " \
       "format = (string) " GST_AUDIO_NE (S16) ", " \
       "rate = (int) [ 8000, MAX ], " \
-      "channels = (int) [ 1, 2 ]"
+      "channels = (int) [ 1, MAX ]"
 #else
 #error "Only integer or float samples are supported"
 #endif
@@ -117,7 +117,7 @@ static gboolean gst_pitch_src_query (GstPad * pad, GstObject * parent,
     GstQuery * query);
 
 #define gst_pitch_parent_class parent_class
-G_DEFINE_TYPE (GstPitch, gst_pitch, GST_TYPE_ELEMENT);
+G_DEFINE_TYPE_WITH_PRIVATE (GstPitch, gst_pitch, GST_TYPE_ELEMENT);
 
 static void
 gst_pitch_class_init (GstPitchClass * klass)
@@ -130,8 +130,6 @@ gst_pitch_class_init (GstPitchClass * klass)
 
   GST_DEBUG_CATEGORY_INIT (pitch_debug, "pitch", 0,
       "audio pitch control element");
-
-  g_type_class_add_private (gobject_class, sizeof (GstPitchPrivate));
 
   gobject_class->set_property = gst_pitch_set_property;
   gobject_class->get_property = gst_pitch_get_property;
@@ -174,8 +172,7 @@ gst_pitch_class_init (GstPitchClass * klass)
 static void
 gst_pitch_init (GstPitch * pitch)
 {
-  pitch->priv =
-      G_TYPE_INSTANCE_GET_PRIVATE ((pitch), GST_TYPE_PITCH, GstPitchPrivate);
+  pitch->priv = (GstPitchPrivate *) gst_pitch_get_instance_private (pitch);
 
   pitch->sinkpad =
       gst_pad_new_from_static_template (&gst_pitch_sink_template, "sink");
@@ -390,10 +387,10 @@ static GstFlowReturn
 gst_pitch_flush_buffer (GstPitch * pitch, gboolean send)
 {
   GstBuffer *buffer;
-  
+
   if (pitch->priv->st->numUnprocessedSamples() != 0) {
     GST_DEBUG_OBJECT (pitch, "flushing buffer");
-    pitch->priv->st->flush ();   
+    pitch->priv->st->flush ();
   }
 
   if (!send)
@@ -672,7 +669,7 @@ gst_pitch_src_query (GstPad * pad, GstObject * parent, GstQuery * query)
 /* this function returns FALSE if not enough data is known to transform the
  * segment into proper downstream values.  If the function does return false
  * the segment should be stalled until enough information is available.
- * If the funtion returns TRUE, event will be replaced by the new downstream
+ * If the function returns TRUE, event will be replaced by the new downstream
  * compatible event.
  */
 static gboolean
@@ -879,7 +876,9 @@ gst_pitch_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
   }
 
   gst_buffer_map (buffer, &info, GST_MAP_READ);
+  GST_OBJECT_LOCK (pitch);
   priv->st->putSamples ((soundtouch::SAMPLETYPE *) info.data, info.size / pitch->info.bpf);
+  GST_OBJECT_UNLOCK (pitch);
   gst_buffer_unmap (buffer, &info);
   gst_buffer_unref (buffer);
 

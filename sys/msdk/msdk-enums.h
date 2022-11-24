@@ -40,6 +40,17 @@ G_BEGIN_DECLS
 
 #define _MFX_TRELLIS_NONE    0
 
+/*========= MSDK Decoder Enums =========================*/
+typedef enum
+{
+  GST_MSDKDEC_OUTPUT_ORDER_DISPLAY = 0,
+  GST_MSDKDEC_OUTPUT_ORDER_DECODE,
+} GstMskdDecOutputOrder;
+
+GType
+gst_msdkdec_output_order_get_type (void);
+
+/*========= MSDK Encoder Enums =========================*/
 GType
 gst_msdkenc_rate_control_get_type (void);
 
@@ -57,6 +68,38 @@ gst_msdkenc_adaptive_i_get_type (void);
 
 GType
 gst_msdkenc_adaptive_b_get_type (void);
+
+GType
+gst_msdkenc_tune_mode_get_type (void);
+
+/*========= MSDK VPP Enums =========================*/
+
+GType
+gst_msdkvpp_rotation_get_type (void);
+
+typedef enum
+{
+  GST_MSDKVPP_DEINTERLACE_MODE_AUTO = 0,
+  GST_MSDKVPP_DEINTERLACE_MODE_INTERLACED,
+  GST_MSDKVPP_DEINTERLACE_MODE_DISABLED,
+} GstMskdVPPDeinterlaceMode;
+
+GType
+gst_msdkvpp_deinterlace_mode_get_type (void);
+
+#define _MFX_DEINTERLACE_METHOD_NONE 0
+GType
+gst_msdkvpp_deinterlace_method_get_type (void);
+
+GType
+gst_msdkvpp_mirroring_get_type (void);
+
+GType
+gst_msdkvpp_scaling_mode_get_type (void);
+
+#define _MFX_FRC_ALGORITHM_NONE 0
+GType
+gst_msdkvpp_frc_algorithm_get_type (void);
 
 G_END_DECLS
 #endif

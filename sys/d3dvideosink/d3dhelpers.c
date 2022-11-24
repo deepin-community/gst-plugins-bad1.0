@@ -25,6 +25,7 @@
 
 #include "d3dvideosink.h"
 #include "d3dhelpers.h"
+#include "gstd3d9overlay.h"
 
 #include <stdio.h>
 
@@ -53,6 +54,11 @@ static HWND d3d_create_internal_window (GstD3DVideoSink * sink);
 
 static void d3d_class_notify_device_lost (GstD3DVideoSink * sink);
 
+static void d3d_class_display_device_destroy (GstD3DVideoSinkClass * klass);
+static gboolean d3d_class_display_device_create (GstD3DVideoSinkClass * klass,
+    UINT adapter);
+static void d3d_class_hidden_window_message_queue (gpointer data,
+    gpointer user_data);
 
 static LRESULT APIENTRY d3d_wnd_proc_internal (HWND hWnd, UINT message,
     WPARAM wParam, LPARAM lParam);
@@ -67,6 +73,12 @@ static gint WM_D3DVIDEO_NOTIFY_DEVICE_LOST = 0;
 #define IDT_DEVICE_RESET_TIMER 0
 
 #define WM_QUIT_THREAD  WM_USER+0
+
+typedef struct
+{
+  gint window_message_id;
+  guint create_count;
+} GstD3DVideoSinkEvent;
 
 /* Helpers */
 
@@ -89,6 +101,11 @@ static gint WM_D3DVIDEO_NOTIFY_DEVICE_LOST = 0;
 #define CASE_HR_DBG_END(sink, gst_err_msg)          \
   CASE_HR_DBG_ERR_END(sink, gst_err_msg, GST_LEVEL_DEBUG)
 
+#define CHECK_REF_COUNT(klass, sink, goto_label)                        \
+  if(!klass->d3d.refs) {                                                \
+    GST_ERROR_OBJECT(sink, "Direct3D object ref count = 0");            \
+    goto goto_label;                                                    \
+  }
 #define CHECK_D3D_DEVICE(klass, sink, goto_label)                       \
   if(!klass->d3d.d3d || !klass->d3d.device.d3d_device) {                \
     GST_ERROR_OBJECT(sink, "Direct3D device or object does not exist"); \
@@ -194,6 +211,8 @@ d3d_format_to_string (D3DFORMAT format)
       CASE (D3DFMT_A32B32G32R32F);
       CASE (D3DFMT_CxV8U8);
       CASE (D3DFMT_FORCE_DWORD);
+    default:
+      break;
   }
 
   return "UNKNOWN";
@@ -233,12 +252,13 @@ gst_video_format_to_d3d_format (GstVideoFormat format)
 }
 
 static gboolean
-gst_video_d3d_format_check (GstD3DVideoSink * sink, D3DFORMAT fmt)
+gst_video_d3d_format_check (GstD3DVideoSinkClass * klass, D3DFORMAT fmt)
 {
-  GstD3DVideoSinkClass *klass = GST_D3DVIDEOSINK_GET_CLASS (sink);
   HRESULT hr;
   gboolean ret = FALSE;
 
+  LOCK_CLASS (NULL, klass);
+  CHECK_REF_COUNT (klass, NULL, end);
   hr = IDirect3D9_CheckDeviceFormat (klass->d3d.d3d,
       klass->d3d.device.adapter,
       D3DDEVTYPE_HAL, klass->d3d.device.format, 0, D3DRTYPE_SURFACE, fmt);
@@ -252,25 +272,30 @@ gst_video_d3d_format_check (GstD3DVideoSink * sink, D3DFORMAT fmt)
     if (hr == D3D_OK)
       ret = TRUE;
   }
-  GST_DEBUG_OBJECT (sink, "Checking: %s - %s", d3d_format_to_string (fmt),
+  GST_DEBUG ("Checking: %s - %s", d3d_format_to_string (fmt),
       ret ? "TRUE" : "FALSE");
-
+end:
+  UNLOCK_CLASS (NULL, klass);
   return ret;
 }
 
 static gboolean
-gst_video_query_d3d_format (GstD3DVideoSink * sink, D3DFORMAT d3dformat)
+gst_video_query_d3d_format (GstD3DVideoSinkClass * klass, D3DFORMAT d3dformat)
 {
-  GstD3DVideoSinkClass *klass = GST_D3DVIDEOSINK_GET_CLASS (sink);
+  gboolean ret = FALSE;
 
+  LOCK_CLASS (NULL, klass);
+  CHECK_REF_COUNT (klass, NULL, end);
   /* If it's the display adapter format we don't need to probe */
-  if (d3dformat == klass->d3d.device.format)
-    return TRUE;
+  if (d3dformat == klass->d3d.device.format) {
+    ret = TRUE;
+    goto end;
+  }
+  ret = gst_video_d3d_format_check (klass, d3dformat);
+end:
+  UNLOCK_CLASS (NULL, klass);
 
-  if (gst_video_d3d_format_check (sink, d3dformat))
-    return TRUE;
-
-  return FALSE;
+  return ret;
 }
 
 typedef struct
@@ -519,18 +544,85 @@ gst_d3dsurface_buffer_pool_get_options (GstBufferPool * pool)
   return options;
 }
 
+/* Calculate actual required buffer size from D3DLOCKED_RECT structure.
+ * Note that D3D could require larger Pitch value than minimum required one in theory.
+ * See also
+ * https://docs.microsoft.com/en-us/windows/desktop/direct3d9/width-vs--pitch */
+static gboolean
+d3d_calculate_buffer_size (GstVideoInfo * info, D3DLOCKED_RECT * lr,
+    gsize * offset, gint * stride, gsize * size)
+{
+  switch (GST_VIDEO_INFO_FORMAT (info)) {
+    case GST_VIDEO_FORMAT_BGR:
+    case GST_VIDEO_FORMAT_BGRx:
+    case GST_VIDEO_FORMAT_RGBx:
+    case GST_VIDEO_FORMAT_BGRA:
+    case GST_VIDEO_FORMAT_RGBA:
+    case GST_VIDEO_FORMAT_RGB16:
+    case GST_VIDEO_FORMAT_RGB15:
+    case GST_VIDEO_FORMAT_YUY2:
+    case GST_VIDEO_FORMAT_UYVY:
+      offset[0] = 0;
+      stride[0] = lr->Pitch;
+      *size = lr->Pitch * GST_VIDEO_INFO_HEIGHT (info);
+      break;
+    case GST_VIDEO_FORMAT_I420:
+    case GST_VIDEO_FORMAT_YV12:
+      offset[0] = 0;
+      stride[0] = lr->Pitch;
+      if (GST_VIDEO_INFO_FORMAT (info) == GST_VIDEO_FORMAT_YV12) {
+        offset[1] =
+            offset[0] + stride[0] * GST_VIDEO_INFO_COMP_HEIGHT (info, 0);
+        stride[1] = lr->Pitch / 2;
+        offset[2] =
+            offset[1] + stride[1] * GST_VIDEO_INFO_COMP_HEIGHT (info, 1);
+        stride[2] = lr->Pitch / 2;
+        *size = offset[2] + stride[2] * GST_VIDEO_INFO_COMP_HEIGHT (info, 2);
+      } else {
+        offset[2] =
+            offset[0] + stride[0] * GST_VIDEO_INFO_COMP_HEIGHT (info, 0);
+        stride[2] = lr->Pitch / 2;
+        offset[1] =
+            offset[2] + stride[2] * GST_VIDEO_INFO_COMP_HEIGHT (info, 2);
+        stride[1] = lr->Pitch / 2;
+        *size = offset[1] + stride[1] * GST_VIDEO_INFO_COMP_HEIGHT (info, 1);
+      }
+      break;
+    case GST_VIDEO_FORMAT_NV12:
+      offset[0] = 0;
+      stride[0] = lr->Pitch;
+      offset[1] = offset[0] + stride[0] * GST_VIDEO_INFO_COMP_HEIGHT (info, 0);
+      stride[1] = lr->Pitch;
+      *size = offset[1] + stride[1] * GST_VIDEO_INFO_COMP_HEIGHT (info, 1);
+      break;
+    default:
+      return FALSE;
+  }
+
+  GST_LOG ("Calculated buffer size: %" G_GSIZE_FORMAT
+      " (%s %dx%d, Pitch %d)", *size,
+      gst_video_format_to_string (GST_VIDEO_INFO_FORMAT (info)),
+      GST_VIDEO_INFO_WIDTH (info), GST_VIDEO_INFO_HEIGHT (info), lr->Pitch);
+
+  return TRUE;
+}
+
 static gboolean
 gst_d3dsurface_buffer_pool_set_config (GstBufferPool * bpool,
     GstStructure * config)
 {
   GstD3DSurfaceBufferPool *pool = GST_D3DSURFACE_BUFFER_POOL_CAST (bpool);
+  GstD3DVideoSink *sink = pool->sink;
+  GstD3DVideoSinkClass *klass = GST_D3DVIDEOSINK_GET_CLASS (sink);
   GstCaps *caps;
   GstVideoInfo info;
-
-  if (!GST_BUFFER_POOL_CLASS
-      (gst_d3dsurface_buffer_pool_parent_class)->set_config (bpool, config)) {
-    return FALSE;
-  }
+  LPDIRECT3DSURFACE9 surface;
+  D3DFORMAT d3dformat;
+  gint stride[GST_VIDEO_MAX_PLANES] = { 0, };
+  gsize offset[GST_VIDEO_MAX_PLANES] = { 0, };
+  D3DLOCKED_RECT lr;
+  HRESULT hr;
+  gsize size;
 
   if (!gst_buffer_pool_config_get_params (config, &caps, NULL, NULL, NULL)
       || !caps) {
@@ -544,8 +636,8 @@ gst_d3dsurface_buffer_pool_set_config (GstBufferPool * bpool,
     return FALSE;
   }
 
-  if (gst_video_format_to_d3d_format (GST_VIDEO_INFO_FORMAT (&info)) ==
-      D3DFMT_UNKNOWN) {
+  d3dformat = gst_video_format_to_d3d_format (GST_VIDEO_INFO_FORMAT (&info));
+  if (d3dformat == D3DFMT_UNKNOWN) {
     GST_ERROR_OBJECT (pool, "Unsupported video format in caps %" GST_PTR_FORMAT,
         caps);
     return FALSE;
@@ -553,6 +645,37 @@ gst_d3dsurface_buffer_pool_set_config (GstBufferPool * bpool,
 
   GST_LOG_OBJECT (pool, "%dx%d, caps %" GST_PTR_FORMAT, info.width, info.height,
       caps);
+
+  /* Create a surface to get exact buffer size */
+  LOCK_CLASS (sink, klass);
+  CHECK_REF_COUNT (klass, sink, error);
+  CHECK_D3D_DEVICE (klass, sink, error);
+  hr = IDirect3DDevice9_CreateOffscreenPlainSurface (klass->d3d.
+      device.d3d_device, GST_VIDEO_INFO_WIDTH (&info),
+      GST_VIDEO_INFO_HEIGHT (&info), d3dformat, D3DPOOL_DEFAULT, &surface,
+      NULL);
+  UNLOCK_CLASS (sink, klass);
+  if (hr != D3D_OK) {
+    GST_ERROR_OBJECT (sink, "Failed to create D3D surface");
+    return FALSE;
+  }
+
+  IDirect3DSurface9_LockRect (surface, &lr, NULL, 0);
+  if (!lr.pBits) {
+    GST_ERROR_OBJECT (sink, "Failed to lock D3D surface");
+    IDirect3DSurface9_Release (surface);
+    return FALSE;
+  }
+
+  if (!d3d_calculate_buffer_size (&info, &lr, offset, stride, &size)) {
+    GST_ERROR_OBJECT (sink, "Failed to get buffer size");
+    IDirect3DSurface9_UnlockRect (surface);
+    IDirect3DSurface9_Release (surface);
+    return FALSE;
+  }
+
+  IDirect3DSurface9_UnlockRect (surface);
+  IDirect3DSurface9_Release (surface);
 
   pool->info = info;
 
@@ -566,7 +689,14 @@ gst_d3dsurface_buffer_pool_set_config (GstBufferPool * bpool,
     gst_object_ref_sink (pool->allocator);
   }
 
-  return TRUE;
+  gst_buffer_pool_config_set_params (config, caps, size, 2, 0);
+
+  return GST_BUFFER_POOL_CLASS
+      (gst_d3dsurface_buffer_pool_parent_class)->set_config (bpool, config);
+
+error:
+  UNLOCK_CLASS (sink, klass);
+  return FALSE;
 }
 
 static GstFlowReturn
@@ -593,10 +723,14 @@ gst_d3dsurface_buffer_pool_alloc_buffer (GstBufferPool * bpool,
 
   d3dformat =
       gst_video_format_to_d3d_format (GST_VIDEO_INFO_FORMAT (&pool->info));
+  LOCK_CLASS (sink, klass);
+  CHECK_REF_COUNT (klass, sink, error);
+  CHECK_D3D_DEVICE (klass, sink, error);
   hr = IDirect3DDevice9_CreateOffscreenPlainSurface (klass->d3d.
       device.d3d_device, GST_VIDEO_INFO_WIDTH (&pool->info),
       GST_VIDEO_INFO_HEIGHT (&pool->info), d3dformat, D3DPOOL_DEFAULT, &surface,
       NULL);
+  UNLOCK_CLASS (sink, klass);
   if (hr != D3D_OK) {
     GST_ERROR_OBJECT (sink, "Failed to create D3D surface");
     goto fallback;
@@ -609,68 +743,11 @@ gst_d3dsurface_buffer_pool_alloc_buffer (GstBufferPool * bpool,
     goto fallback;
   }
 
-  switch (GST_VIDEO_INFO_FORMAT (&pool->info)) {
-    case GST_VIDEO_FORMAT_BGR:
-      offset[0] = 0;
-      stride[0] = lr.Pitch;
-      size = lr.Pitch * GST_VIDEO_INFO_HEIGHT (&pool->info) * 3;
-      break;
-    case GST_VIDEO_FORMAT_BGRx:
-    case GST_VIDEO_FORMAT_RGBx:
-    case GST_VIDEO_FORMAT_BGRA:
-    case GST_VIDEO_FORMAT_RGBA:
-      offset[0] = 0;
-      stride[0] = lr.Pitch;
-      size = lr.Pitch * GST_VIDEO_INFO_HEIGHT (&pool->info) * 4;
-      break;
-    case GST_VIDEO_FORMAT_RGB16:
-    case GST_VIDEO_FORMAT_RGB15:
-      offset[0] = 0;
-      stride[0] = lr.Pitch;
-      size = lr.Pitch * GST_VIDEO_INFO_HEIGHT (&pool->info) * 2;
-      break;
-    case GST_VIDEO_FORMAT_YUY2:
-    case GST_VIDEO_FORMAT_UYVY:
-      offset[0] = 0;
-      stride[0] = lr.Pitch;
-      size = lr.Pitch * GST_VIDEO_INFO_HEIGHT (&pool->info) * 2;
-      break;
-    case GST_VIDEO_FORMAT_I420:
-    case GST_VIDEO_FORMAT_YV12:
-      offset[0] = 0;
-      stride[0] = lr.Pitch;
-      if (GST_VIDEO_INFO_FORMAT (&pool->info) == GST_VIDEO_FORMAT_YV12) {
-        offset[1] =
-            offset[0] + stride[0] * GST_VIDEO_INFO_COMP_HEIGHT (&pool->info, 0);
-        stride[1] = lr.Pitch / 2;
-        offset[2] =
-            offset[1] + stride[1] * GST_VIDEO_INFO_COMP_HEIGHT (&pool->info, 1);
-        stride[2] = lr.Pitch / 2;
-        size =
-            offset[2] + stride[2] * GST_VIDEO_INFO_COMP_HEIGHT (&pool->info, 2);
-      } else {
-        offset[2] =
-            offset[0] + stride[0] * GST_VIDEO_INFO_COMP_HEIGHT (&pool->info, 0);
-        stride[2] = lr.Pitch / 2;
-        offset[1] =
-            offset[2] + stride[2] * GST_VIDEO_INFO_COMP_HEIGHT (&pool->info, 2);
-        stride[1] = lr.Pitch / 2;
-        size =
-            offset[1] + stride[1] * GST_VIDEO_INFO_COMP_HEIGHT (&pool->info, 1);
-      }
-      break;
-    case GST_VIDEO_FORMAT_NV12:
-      offset[0] = 0;
-      stride[0] = lr.Pitch;
-      offset[1] =
-          offset[0] + stride[0] * GST_VIDEO_INFO_COMP_HEIGHT (&pool->info, 0);
-      stride[1] = lr.Pitch;
-      size =
-          offset[1] + stride[1] * GST_VIDEO_INFO_COMP_HEIGHT (&pool->info, 1);
-      break;
-    default:
-      g_assert_not_reached ();
-      break;
+  if (!d3d_calculate_buffer_size (&pool->info, &lr, offset, stride, &size)) {
+    GST_ERROR_OBJECT (sink, "Failed to get buffer size");
+    IDirect3DSurface9_UnlockRect (surface);
+    IDirect3DSurface9_Release (surface);
+    return GST_FLOW_ERROR;
   }
 
   IDirect3DSurface9_UnlockRect (surface);
@@ -704,24 +781,9 @@ fallback:
         (gst_d3dsurface_buffer_pool_parent_class)->alloc_buffer (bpool, buffer,
         params);
   }
-}
-
-static void
-gst_d3dsurface_buffer_pool_release_buffer (GstBufferPool * bpool,
-    GstBuffer * buffer)
-{
-  GstMemory *mem = NULL;
-
-  /* Check if something replaced our memory */
-  if (gst_buffer_n_memory (buffer) != 1 ||
-      (mem = gst_buffer_peek_memory (buffer, 0)) == 0 ||
-      !gst_memory_is_type (mem, GST_D3D_SURFACE_MEMORY_NAME)) {
-    gst_buffer_unref (buffer);
-    return;
-  }
-
-  GST_BUFFER_POOL_CLASS
-      (gst_d3dsurface_buffer_pool_parent_class)->release_buffer (bpool, buffer);
+error:
+  UNLOCK_CLASS (sink, klass);
+  return GST_FLOW_ERROR;
 }
 
 static void
@@ -735,8 +797,6 @@ gst_d3dsurface_buffer_pool_class_init (GstD3DSurfaceBufferPoolClass * klass)
   gstbufferpool_class->get_options = gst_d3dsurface_buffer_pool_get_options;
   gstbufferpool_class->set_config = gst_d3dsurface_buffer_pool_set_config;
   gstbufferpool_class->alloc_buffer = gst_d3dsurface_buffer_pool_alloc_buffer;
-  gstbufferpool_class->release_buffer =
-      gst_d3dsurface_buffer_pool_release_buffer;
 }
 
 static void
@@ -748,14 +808,12 @@ GstCaps *
 d3d_supported_caps (GstD3DVideoSink * sink)
 {
   GstD3DVideoSinkClass *klass = GST_D3DVIDEOSINK_GET_CLASS (sink);
-  int i;
-  GList *fmts = NULL, *l;
+  GList *l;
   GstCaps *caps = NULL;
-  GstVideoFormat gst_format;
-  D3DFORMAT d3d_format;
   GValue va = { 0, };
   GValue v = { 0, };
 
+  g_return_val_if_fail (GST_IS_D3DVIDEOSINK (sink), NULL);
   LOCK_SINK (sink);
 
   if (sink->supported_caps) {
@@ -768,29 +826,13 @@ d3d_supported_caps (GstD3DVideoSink * sink)
     UNLOCK_CLASS (sink, klass);
     goto unlock;
   }
-  UNLOCK_CLASS (sink, klass);
-
-  for (i = 0; i < G_N_ELEMENTS (gst_d3d_format_map); i++) {
-    D3DFormatComp *comp;
-
-    gst_format = gst_d3d_format_map[i].gst_format;
-    d3d_format = gst_d3d_format_map[i].d3d_format;
-    if (!gst_video_query_d3d_format (sink, d3d_format))
-      continue;
-
-    comp = g_slice_new0 (D3DFormatComp);
-    comp->fmt = (GstVideoFormat) gst_format;
-    comp->d3d_fmt = d3d_format;
-    comp->display = (d3d_format == klass->d3d.device.format);
-    fmts = g_list_insert_sorted (fmts, comp, d3d_format_comp_compare);
-  }
 
   GST_DEBUG_OBJECT (sink, "Supported Caps:");
 
   g_value_init (&va, GST_TYPE_LIST);
   g_value_init (&v, G_TYPE_STRING);
 
-  for (l = fmts; l; l = g_list_next (l)) {
+  for (l = klass->d3d.supported_formats; l; l = g_list_next (l)) {
     D3DFormatComp *comp = (D3DFormatComp *) l->data;
 
     GST_DEBUG_OBJECT (sink, "%s -> %s %s",
@@ -799,15 +841,15 @@ d3d_supported_caps (GstD3DVideoSink * sink)
     g_value_set_string (&v, gst_video_format_to_string (comp->fmt));
     gst_value_list_append_value (&va, &v);
   }
+  UNLOCK_CLASS (sink, klass);
 
-  caps = gst_caps_new_simple ("video/x-raw",
-      "width", GST_TYPE_INT_RANGE, 1, G_MAXINT,
-      "height", GST_TYPE_INT_RANGE, 1, G_MAXINT,
-      "framerate", GST_TYPE_FRACTION_RANGE, 0, 1, G_MAXINT, 1, NULL);
+  caps =
+      gst_caps_make_writable (gst_pad_get_pad_template_caps (GST_VIDEO_SINK_PAD
+          (sink)));
+
   gst_caps_set_value (caps, "format", &va);
   g_value_unset (&v);
   g_value_unset (&va);
-  g_list_free_full (fmts, (GDestroyNotify) d3d_format_comp_free);
 
   sink->supported_caps = gst_caps_ref (caps);
 
@@ -826,9 +868,11 @@ unlock:
 gboolean
 d3d_set_render_format (GstD3DVideoSink * sink)
 {
+  GstD3DVideoSinkClass *klass = GST_D3DVIDEOSINK_GET_CLASS (sink);
   D3DFORMAT fmt;
   gboolean ret = FALSE;
 
+  g_return_val_if_fail (GST_IS_D3DVIDEOSINK (sink), FALSE);
   LOCK_SINK (sink);
 
   fmt = gst_video_format_to_d3d_format (sink->format);
@@ -838,7 +882,7 @@ d3d_set_render_format (GstD3DVideoSink * sink)
     goto end;
   }
 
-  if (!gst_video_query_d3d_format (sink, fmt)) {
+  if (!gst_video_query_d3d_format (klass, fmt)) {
     GST_ERROR_OBJECT (sink, "Failed to query a D3D render format for %s",
         gst_video_format_to_string (sink->format));
     goto end;
@@ -857,7 +901,7 @@ end:
   return ret;
 }
 
-static gboolean
+gboolean
 d3d_get_hwnd_window_size (HWND hwnd, gint * width, gint * height)
 {
   RECT sz;
@@ -914,6 +958,7 @@ d3d_get_render_coordinates (GstD3DVideoSink * sink, gint in_x, gint in_y,
 
   g_return_val_if_fail (out_x != NULL, FALSE);
   g_return_val_if_fail (out_y != NULL, FALSE);
+  g_return_val_if_fail (GST_IS_D3DVIDEOSINK (sink), FALSE);
 
   LOCK_SINK (sink);
   CHECK_WINDOW_HANDLE (sink, end, FALSE);
@@ -988,6 +1033,7 @@ d3d_window_wndproc_unset (GstD3DVideoSink * sink)
 {
   WNDPROC cur_wnd_proc = NULL;
 
+  g_return_if_fail (GST_IS_D3DVIDEOSINK (sink));
   LOCK_SINK (sink);
 
   GST_DEBUG_OBJECT (sink, " ");
@@ -1010,7 +1056,7 @@ d3d_window_wndproc_unset (GstD3DVideoSink * sink)
     goto end;
   }
 
-  /* Restore orignal WndProc for window_handle */
+  /* Restore original WndProc for window_handle */
   if (!SetWindowLongPtr (sink->d3d.window_handle, GWLP_WNDPROC,
           (LONG_PTR) sink->d3d.orig_wnd_proc)) {
     GST_WARNING_OBJECT (sink, "D3D failed to set original WndProc");
@@ -1030,6 +1076,7 @@ d3d_window_wndproc_set (GstD3DVideoSink * sink)
   WNDPROC cur_wnd_proc;
   gboolean ret = FALSE;
 
+  g_return_val_if_fail (GST_IS_D3DVIDEOSINK (sink), FALSE);
   LOCK_SINK (sink);
 
   cur_wnd_proc =
@@ -1068,6 +1115,7 @@ end:
 static void
 d3d_prepare_render_window (GstD3DVideoSink * sink)
 {
+  g_return_if_fail (GST_IS_D3DVIDEOSINK (sink));
   LOCK_SINK (sink);
 
   if (sink->d3d.window_handle == NULL) {
@@ -1099,11 +1147,13 @@ void
 d3d_set_window_handle (GstD3DVideoSink * sink, guintptr window_id,
     gboolean is_internal)
 {
+  g_return_if_fail (sink != NULL);
   LOCK_SINK (sink);
 
   if (sink->d3d.window_handle == (HWND) window_id) {
-    GST_WARNING_OBJECT (sink, "Window HWND already set to: %" G_GUINTPTR_FORMAT,
-        window_id);
+    if (window_id)
+      GST_WARNING_OBJECT (sink,
+          "Window HWND already set to: %" G_GUINTPTR_FORMAT, window_id);
     goto end;
   }
 
@@ -1137,6 +1187,7 @@ end:
 void
 d3d_set_render_rectangle (GstD3DVideoSink * sink)
 {
+  g_return_if_fail (sink != NULL);
   LOCK_SINK (sink);
   /* Setting the pointer lets us know render rect is set */
   sink->d3d.render_rect = &sink->render_rect;
@@ -1158,6 +1209,7 @@ d3d_prepare_window (GstD3DVideoSink * sink)
   HWND hWnd;
   gboolean ret = FALSE;
 
+  g_return_val_if_fail (GST_IS_D3DVIDEOSINK (sink), FALSE);
   LOCK_SINK (sink);
 
   /* if we already had an external window, then use it again */
@@ -1208,6 +1260,12 @@ d3d_stop (GstD3DVideoSink * sink)
 
   /* Release D3D resources */
   d3d_set_window_handle (sink, 0, FALSE);
+
+  if (sink->internal_window_thread) {
+    g_thread_join (sink->internal_window_thread);
+    sink->internal_window_thread = NULL;
+  }
+
   return TRUE;
 }
 
@@ -1223,8 +1281,7 @@ d3d_notify_device_lost (GstD3DVideoSink * sink)
   LOCK_SINK (sink);
 
   if (!sink->d3d.device_lost) {
-    GST_WARNING_OBJECT (sink,
-        "D3D Device has been lost. Cleanup up resources..");
+    GST_WARNING_OBJECT (sink, "D3D Device has been lost. Clean up resources.");
 
     /* Stream will continue with GST_FLOW_OK, until device has been reset */
     sink->d3d.device_lost = TRUE;
@@ -1245,6 +1302,7 @@ d3d_notify_device_lost (GstD3DVideoSink * sink)
 static void
 d3d_notify_device_reset (GstD3DVideoSink * sink)
 {
+  g_return_if_fail (GST_IS_D3DVIDEOSINK (sink));
   LOCK_SINK (sink);
 
   if (sink->d3d.device_lost) {
@@ -1277,6 +1335,7 @@ d3d_init_swap_chain (GstD3DVideoSink * sink, HWND hWnd)
 
   LOCK_SINK (sink);
   LOCK_CLASS (sink, klass);
+  CHECK_REF_COUNT (klass, sink, error);
 
   /* We need a display device */
   CHECK_D3D_DEVICE (klass, sink, error);
@@ -1306,7 +1365,7 @@ d3d_init_swap_chain (GstD3DVideoSink * sink, HWND hWnd)
   }
 
   /* Determine texture filtering support. If it's supported for this format,
-   * use the filter type determined when we created the dev and checked the 
+   * use the filter type determined when we created the dev and checked the
    * dev caps.
    */
   hr = IDirect3D9_CheckDeviceFormat (klass->d3d.d3d,
@@ -1345,15 +1404,14 @@ error:
 static gboolean
 d3d_release_swap_chain (GstD3DVideoSink * sink)
 {
-  GstD3DVideoSinkClass *klass = GST_D3DVIDEOSINK_GET_CLASS (sink);
   int ref_count;
   gboolean ret = FALSE;
 
+  g_return_val_if_fail (GST_IS_D3DVIDEOSINK (sink), FALSE);
   LOCK_SINK (sink);
 
   GST_DEBUG_OBJECT (sink, "Releasing Direct3D swap chain");
 
-  CHECK_D3D_DEVICE (klass, sink, end);
 
   if (!sink->d3d.swapchain) {
     ret = TRUE;
@@ -1376,6 +1434,7 @@ d3d_release_swap_chain (GstD3DVideoSink * sink)
     GST_DEBUG_OBJECT (sink, "D3D surface released. Ref count: %d", ref_count);
   }
 
+  gst_d3d9_overlay_free (sink);
   ret = TRUE;
 
 end:
@@ -1411,6 +1470,7 @@ d3d_resize_swap_chain (GstD3DVideoSink * sink)
 
   LOCK_CLASS (sink, klass);
 
+  CHECK_REF_COUNT (klass, sink, end);
   CHECK_WINDOW_HANDLE (sink, end, FALSE);
   CHECK_D3D_DEVICE (klass, sink, end);
   CHECK_D3D_SWAPCHAIN (sink, end);
@@ -1489,6 +1549,7 @@ d3d_resize_swap_chain (GstD3DVideoSink * sink)
   }
 
   sink->d3d.swapchain = swapchain;
+  sink->d3d.overlay_needs_resize = TRUE;
   ret = TRUE;
 
 end:
@@ -1507,6 +1568,7 @@ d3d_copy_buffer (GstD3DVideoSink * sink, GstBuffer * from, GstBuffer * to)
   memset (&from_frame, 0, sizeof (from_frame));
   memset (&to_frame, 0, sizeof (to_frame));
 
+  g_return_val_if_fail (GST_IS_D3DVIDEOSINK (sink), FALSE);
   LOCK_SINK (sink);
 
   if (!sink->d3d.renderable || sink->d3d.device_lost)
@@ -1688,6 +1750,7 @@ d3d_present_swap_chain (GstD3DVideoSink * sink)
   HRESULT hr;
   RECT dstr, srcr, *pDestRect = NULL, *pSrcRect = NULL;
 
+  g_return_val_if_fail (GST_IS_D3DVIDEOSINK (sink), FALSE);
   LOCK_SINK (sink);
 
   if (!sink->d3d.renderable || sink->d3d.device_lost) {
@@ -1697,20 +1760,41 @@ d3d_present_swap_chain (GstD3DVideoSink * sink)
 
   LOCK_CLASS (sink, klass);
 
+  CHECK_REF_COUNT (klass, sink, end);
   CHECK_WINDOW_HANDLE (sink, end, FALSE);
   CHECK_D3D_DEVICE (klass, sink, end);
   CHECK_D3D_SWAPCHAIN (sink, end);
 
   /* Set the render target to our swap chain */
-  IDirect3DSwapChain9_GetBackBuffer (sink->d3d.swapchain, 0,
+  hr = IDirect3DSwapChain9_GetBackBuffer (sink->d3d.swapchain, 0,
       D3DBACKBUFFER_TYPE_MONO, &back_buffer);
-  IDirect3DDevice9_SetRenderTarget (klass->d3d.device.d3d_device, 0,
+  ERROR_CHECK_HR (hr) {
+    CASE_HR_ERR (D3DERR_INVALIDCALL);
+    CASE_HR_ERR_END (sink, "IDirect3DSwapChain9_GetBackBuffer");
+    goto end;
+  }
+  hr = IDirect3DDevice9_SetRenderTarget (klass->d3d.device.d3d_device, 0,
       back_buffer);
-  IDirect3DSurface9_Release (back_buffer);
+  ERROR_CHECK_HR (hr) {
+    CASE_HR_ERR (D3DERR_INVALIDCALL);
+    CASE_HR_ERR_END (sink, "IDirect3DDevice9_SetRenderTarget");
+    goto end;
+  }
+  hr = IDirect3DSurface9_Release (back_buffer);
+  ERROR_CHECK_HR (hr) {
+    CASE_HR_ERR (D3DERR_INVALIDCALL);
+    CASE_HR_ERR_END (sink, "IDirect3DSurface9_Release");
+    goto end;
+  }
 
   /* Clear the target */
-  IDirect3DDevice9_Clear (klass->d3d.device.d3d_device, 0, NULL,
+  hr = IDirect3DDevice9_Clear (klass->d3d.device.d3d_device, 0, NULL,
       D3DCLEAR_TARGET, D3DCOLOR_XRGB (0, 0, 0), 1.0f, 0);
+  ERROR_CHECK_HR (hr) {
+    CASE_HR_ERR (D3DERR_INVALIDCALL);
+    CASE_HR_ERR_END (sink, "IDirect3DDevice9_Clear");
+    goto end;
+  }
 
   hr = IDirect3DDevice9_BeginScene (klass->d3d.device.d3d_device);
   ERROR_CHECK_HR (hr) {
@@ -1719,11 +1803,26 @@ d3d_present_swap_chain (GstD3DVideoSink * sink)
     goto end;
   }
 
+  if (!gst_d3d9_overlay_set_render_state (sink)) {
+    IDirect3DDevice9_EndScene (klass->d3d.device.d3d_device);
+    goto end;
+  }
+
   /* Stretch and blit ops, to copy offscreen surface buffer
    * to Display back buffer.
    */
-  d3d_stretch_and_copy (sink, back_buffer);
-  IDirect3DDevice9_EndScene (klass->d3d.device.d3d_device);
+  if (!d3d_stretch_and_copy (sink, back_buffer) ||
+      !gst_d3d9_overlay_render (sink)) {
+    IDirect3DDevice9_EndScene (klass->d3d.device.d3d_device);
+    goto end;
+  }
+
+  hr = IDirect3DDevice9_EndScene (klass->d3d.device.d3d_device);
+  ERROR_CHECK_HR (hr) {
+    CASE_HR_ERR (D3DERR_INVALIDCALL);
+    CASE_HR_ERR_END (sink, "IDirect3DDevice9_EndScene");
+    goto end;
+  }
 
   if (d3d_get_render_rects (sink->d3d.render_rect, &dstr, &srcr)) {
     pDestRect = &dstr;
@@ -1768,6 +1867,7 @@ d3d_stretch_and_copy (GstD3DVideoSink * sink, LPDIRECT3DSURFACE9 back_buffer)
   HRESULT hr;
   gboolean ret = FALSE;
 
+  g_return_val_if_fail (GST_IS_D3DVIDEOSINK (sink), FALSE);
   LOCK_SINK (sink);
 
   CHECK_WINDOW_HANDLE (sink, end, FALSE);
@@ -1856,6 +1956,7 @@ d3d_render_buffer (GstD3DVideoSink * sink, GstBuffer * buf)
   LPDIRECT3DSURFACE9 surface = NULL;
   GstVideoCropMeta *crop = NULL;
 
+  g_return_val_if_fail (GST_IS_D3DVIDEOSINK (sink), GST_FLOW_ERROR);
   LOCK_SINK (sink);
 
   if (!sink->d3d.window_handle) {
@@ -2000,6 +2101,11 @@ d3d_wnd_proc (HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
       (GstD3DVideoSink *) GetProp (hWnd, TEXT ("GstD3DVideoSink"));
   WNDPROC proc;
   LRESULT ret = 0;
+
+  /* d3dvideosink object might not available yet.
+   * The thread for message queue starts earlier than SetProp... */
+  if (!sink)
+    return DefWindowProc (hWnd, message, wParam, lParam);
 
   LOCK_SINK (sink);
   proc = sink->d3d.orig_wnd_proc;
@@ -2197,8 +2303,10 @@ _d3d_create_internal_window (GstD3DVideoSink * sink)
 typedef struct
 {
   GstD3DVideoSink *sink;
-  gboolean running;
+  gboolean error;
   HWND hWnd;
+  GMutex lock;
+  GCond cond;
 } D3DInternalWindowDat;
 
 static gpointer
@@ -2216,13 +2324,19 @@ d3d_internal_window_thread (D3DInternalWindowDat * dat)
 
   /* Create internal window */
   hWnd = _d3d_create_internal_window (sink);
+
+  g_mutex_lock (&dat->lock);
   if (!hWnd) {
     GST_ERROR_OBJECT (sink, "Failed to create internal window");
-    goto end;
+    dat->error = TRUE;
+  } else {
+    dat->hWnd = hWnd;
   }
+  g_cond_signal (&dat->cond);
+  g_mutex_unlock (&dat->lock);
 
-  dat->hWnd = hWnd;
-  dat->running = TRUE;
+  if (dat->error)
+    goto end;
 
   /*
    * Internal window message loop
@@ -2246,42 +2360,50 @@ d3d_create_internal_window (GstD3DVideoSink * sink)
 {
   GThread *thread;
   D3DInternalWindowDat dat;
-  gulong timeout_interval = 10000;      /* 10 ms interval */
-  gulong intervals = (10000000 / timeout_interval);     /* 10 secs */
-  gulong i;
 
   dat.sink = sink;
-  dat.running = FALSE;
+  dat.error = FALSE;
   dat.hWnd = 0;
+  g_mutex_init (&dat.lock);
+  g_cond_init (&dat.cond);
 
   thread =
       g_thread_new ("d3dvideosink-window-thread",
       (GThreadFunc) d3d_internal_window_thread, &dat);
   if (!thread) {
     GST_ERROR ("Failed to created internal window thread");
-    return 0;
+    goto clear;
   }
 
-  /* Wait 10 seconds for window proc loop to start up */
-  for (i = 0; dat.running == FALSE && i < intervals; i++) {
-    g_usleep (timeout_interval);
-  }
+  sink->internal_window_thread = thread;
 
-  GST_DEBUG_OBJECT (sink, "Created window: %p (intervals: %lu)", dat.hWnd, i);
+  /* Wait for window proc loop to start up */
+  g_mutex_lock (&dat.lock);
+  while (!dat.error && !dat.hWnd) {
+    g_cond_wait (&dat.cond, &dat.lock);
+  }
+  g_mutex_unlock (&dat.lock);
+
+  GST_DEBUG_OBJECT (sink, "Created window: %p (error: %d)",
+      dat.hWnd, dat.error);
+
+clear:
+  {
+    g_mutex_clear (&dat.lock);
+    g_cond_clear (&dat.cond);
+  }
 
   return dat.hWnd;
 }
 
-/* D3D Video Class Methdos */
+/* D3D Video Class Methods */
 
 gboolean
 d3d_class_init (GstD3DVideoSink * sink)
 {
   GstD3DVideoSinkClass *klass = GST_D3DVIDEOSINK_GET_CLASS (sink);
-  gulong timeout_interval = 10000;      /* 10 ms interval */
-  gulong intervals = (10000000 / timeout_interval);     /* 10 secs */
   gboolean ret = FALSE;
-  gulong i;
+  gboolean initialized_mutex = FALSE;
 
   g_return_val_if_fail (klass != NULL, FALSE);
 
@@ -2320,44 +2442,48 @@ d3d_class_init (GstD3DVideoSink * sink)
     goto error;
   }
 
-  klass->d3d.running = FALSE;
-  klass->d3d.error_exit = FALSE;
-  UNLOCK_CLASS (sink, klass);
+  klass->d3d.thread_started = FALSE;
+  klass->d3d.thread_error_exit = FALSE;
+  /* TODO: Multi-monitor setup? */
+  if (!d3d_class_display_device_create (klass, D3DADAPTER_DEFAULT)) {
+    GST_ERROR ("Failed to initialize adapter: %u", D3DADAPTER_DEFAULT);
+    goto error;
+  }
+
+  g_mutex_init (&klass->d3d.thread_start_mutex);
+  g_cond_init (&klass->d3d.thread_start_cond);
+  initialized_mutex = TRUE;
+
   klass->d3d.thread =
       g_thread_new ("d3dvideosink-window-thread",
       (GThreadFunc) d3d_hidden_window_thread, klass);
-  LOCK_CLASS (sink, klass);
 
   if (!klass->d3d.thread) {
     GST_ERROR ("Failed to created hidden window thread");
     goto error;
   }
 
-  UNLOCK_CLASS (sink, klass);
-  /* Wait 10 seconds for window proc loop to start up */
-  for (i = 0; klass->d3d.running == FALSE && i < intervals; i++) {
-    g_usleep (timeout_interval);
-  }
-  LOCK_CLASS (sink, klass);
+  g_mutex_lock (&klass->d3d.thread_start_mutex);
+  while (!klass->d3d.thread_started && !klass->d3d.thread_error_exit)
+    g_cond_wait (&klass->d3d.thread_start_cond, &klass->d3d.thread_start_mutex);
+  g_mutex_unlock (&klass->d3d.thread_start_mutex);
 
-  if (klass->d3d.error_exit)
+  if (klass->d3d.thread_error_exit)
     goto error;
-
-  if (!klass->d3d.running) {
-    GST_ERROR ("Waited %lu ms, window proc loop has not started",
-        (timeout_interval * intervals) / 1000);
-    goto error;
-  }
 
   GST_DEBUG ("Hidden window message loop is running..");
 
 end:
   ret = TRUE;
 error:
-  UNLOCK_CLASS (sink, klass);
 
   if (!ret)
     d3d_class_destroy (sink);
+  if (initialized_mutex) {
+    g_mutex_clear (&klass->d3d.thread_start_mutex);
+    g_cond_clear (&klass->d3d.thread_start_cond);
+  }
+  UNLOCK_CLASS (sink, klass);
 
   return ret;
 }
@@ -2380,20 +2506,16 @@ d3d_class_destroy (GstD3DVideoSink * sink)
   if (klass->d3d.refs >= 1)
     goto end;
 
-  UNLOCK_CLASS (sink, klass);
-
-  if (klass->d3d.running) {
+  if (klass->d3d.thread) {
     GST_DEBUG ("Shutting down window proc thread, waiting to join..");
     PostMessage (klass->d3d.hidden_window, WM_QUIT, 0, 0);
     g_thread_join (klass->d3d.thread);
     GST_DEBUG ("Joined..");
   }
 
-  LOCK_CLASS (sink, klass);
-
+  d3d_class_display_device_destroy (klass);
   if (klass->d3d.d3d) {
-    int ref_count;
-    ref_count = IDirect3D9_Release (klass->d3d.d3d);
+    int ref_count = IDirect3D9_Release (klass->d3d.d3d);
     GST_DEBUG ("Direct3D object released. Reference count: %d", ref_count);
   }
 
@@ -2416,6 +2538,7 @@ d3d_class_display_device_create (GstD3DVideoSinkClass * klass, UINT adapter)
   D3DDISPLAYMODE disp_mode;
   DWORD create_mask = 0;
   HRESULT hr;
+  guint i;
   gboolean ret = FALSE;
 
   g_return_val_if_fail (klass != NULL, FALSE);
@@ -2427,6 +2550,7 @@ d3d_class_display_device_create (GstD3DVideoSinkClass * klass, UINT adapter)
   d3d = klass->d3d.d3d;
   device = &klass->d3d.device;
   hwnd = klass->d3d.hidden_window;
+  CHECK_REF_COUNT (klass, NULL, error);
 
   memset (&caps, 0, sizeof (caps));
   memset (&disp_mode, 0, sizeof (disp_mode));
@@ -2489,7 +2613,7 @@ d3d_class_display_device_create (GstD3DVideoSinkClass * klass, UINT adapter)
   device->present_params.MultiSampleType = D3DMULTISAMPLE_NONE;
   device->present_params.PresentationInterval = D3DPRESENT_INTERVAL_DEFAULT;    /* D3DPRESENT_INTERVAL_IMMEDIATE; */
 
-  GST_DEBUG ("Creating Direct3D device for hidden window %p", NULL);
+  GST_DEBUG ("Creating Direct3D device for hidden window %p", hwnd);
 
   if ((hr = IDirect3D9_CreateDevice (d3d, adapter, D3DDEVTYPE_HAL, hwnd,
               create_mask, &device->present_params,
@@ -2497,6 +2621,20 @@ d3d_class_display_device_create (GstD3DVideoSinkClass * klass, UINT adapter)
     GST_ERROR ("Unable to create Direct3D device. Result: %ld (0x%lx)", hr, hr);
     goto error;
   }
+  /* cache d3d formats */
+  for (i = 0; i < G_N_ELEMENTS (gst_d3d_format_map); i++) {
+    D3DFormatComp *fmt;
+    if (!gst_video_query_d3d_format (klass, gst_d3d_format_map[i].d3d_format))
+      continue;
+    fmt = g_slice_new0 (D3DFormatComp);
+    fmt->fmt = gst_d3d_format_map[i].gst_format;
+    fmt->d3d_fmt = gst_d3d_format_map[i].d3d_format;
+    fmt->display = (fmt->d3d_fmt == klass->d3d.device.format);
+    klass->d3d.supported_formats =
+        g_list_insert_sorted (klass->d3d.supported_formats, fmt,
+        d3d_format_comp_compare);
+  }
+
 
   GST_DEBUG ("Display Device format: %s",
       d3d_format_to_string (disp_mode.Format));
@@ -2523,6 +2661,8 @@ d3d_class_display_device_destroy (GstD3DVideoSinkClass * klass)
     GST_DEBUG ("Direct3D device [adapter:%u] released. Reference count: %d",
         klass->d3d.device.adapter, ref_count);
   }
+  g_list_free_full (klass->d3d.supported_formats,
+      (GDestroyNotify) d3d_format_comp_free);
   memset (&klass->d3d.device, 0, sizeof (GstD3DDisplayDevice));
   UNLOCK_CLASS (NULL, klass);
 }
@@ -2531,7 +2671,13 @@ static void
 d3d_class_notify_device_lost (GstD3DVideoSink * sink)
 {
   GstD3DVideoSinkClass *klass = GST_D3DVIDEOSINK_GET_CLASS (sink);
-  PostMessage (klass->d3d.hidden_window, WM_D3DVIDEO_NOTIFY_DEVICE_LOST, 0, 0);
+  GstD3DVideoSinkEvent *evt = g_new0 (GstD3DVideoSinkEvent, 1);
+
+  evt->window_message_id = IDT_DEVICE_RESET_TIMER;
+  evt->create_count = klass->create_count;
+  gst_element_call_async (GST_ELEMENT (klass),
+      (GstElementCallAsyncFunc) d3d_class_hidden_window_message_queue, evt,
+      g_free);
 }
 
 static void
@@ -2540,6 +2686,7 @@ d3d_class_notify_device_lost_all (GstD3DVideoSinkClass * klass)
   g_return_if_fail (klass != NULL);
 
   LOCK_CLASS (NULL, klass);
+  CHECK_REF_COUNT (klass, NULL, end);
   if (!klass->d3d.device_lost) {
     GList *lst, *clst;
     klass->d3d.device_lost = TRUE;
@@ -2547,7 +2694,6 @@ d3d_class_notify_device_lost_all (GstD3DVideoSinkClass * klass)
     GST_DEBUG ("Notifying all instances of device loss");
 
     clst = g_list_copy (klass->d3d.sink_list);
-    UNLOCK_CLASS (NULL, klass);
 
     for (lst = clst; lst != NULL; lst = lst->next) {
       GstD3DVideoSink *sink = (GstD3DVideoSink *) lst->data;
@@ -2556,11 +2702,11 @@ d3d_class_notify_device_lost_all (GstD3DVideoSinkClass * klass)
       d3d_notify_device_lost (sink);
     }
     g_list_free (clst);
-    LOCK_CLASS (NULL, klass);
 
     /* Set timer to try reset at given interval */
     SetTimer (klass->d3d.hidden_window, IDT_DEVICE_RESET_TIMER, 500, NULL);
   }
+end:
   UNLOCK_CLASS (NULL, klass);
 }
 
@@ -2572,7 +2718,9 @@ d3d_class_reset_display_device (GstD3DVideoSinkClass * klass)
   g_return_if_fail (klass != NULL);
 
   LOCK_CLASS (NULL, klass);
-  hr = IDirect3DDevice9_Reset (klass->d3d.device.d3d_device,
+  CHECK_REF_COUNT (klass, NULL, end);
+  CHECK_D3D_DEVICE (klass, NULL, end)
+      hr = IDirect3DDevice9_Reset (klass->d3d.device.d3d_device,
       &klass->d3d.device.present_params);
   ERROR_CHECK_HR (hr) {
     CASE_HR_ERR (D3DERR_DEVICELOST);
@@ -2589,35 +2737,67 @@ d3d_class_reset_display_device (GstD3DVideoSinkClass * klass)
   KillTimer (klass->d3d.hidden_window, IDT_DEVICE_RESET_TIMER);
 
   g_list_foreach (klass->d3d.sink_list, (GFunc) d3d_notify_device_reset, NULL);
-end:;
+end:
   UNLOCK_CLASS (NULL, klass);
 }
 
 /* Hidden Window Loop Thread */
 
+static void
+d3d_class_hidden_window_message_queue (gpointer data, gpointer user_data)
+{
+  guint id = 0;
+  GstD3DVideoSinkClass *klass = (GstD3DVideoSinkClass *) data;
+  GstD3DVideoSinkEvent *evt = (GstD3DVideoSinkEvent *) user_data;
+
+  if (!klass || !evt)
+    return;
+
+  switch (evt->window_message_id) {
+    case IDT_DEVICE_RESET_TIMER:
+      LOCK_CLASS (NULL, klass);
+      /* make sure this event does not originate from old class */
+      if (evt->create_count == klass->create_count)
+        d3d_class_reset_display_device (klass);
+      UNLOCK_CLASS (NULL, klass);
+      break;
+    default:
+      if (id == WM_D3DVIDEO_NOTIFY_DEVICE_LOST) {
+        LOCK_CLASS (NULL, klass);
+        /* make sure this event does not originate from old class */
+        if (evt->create_count == klass->create_count)
+          d3d_class_notify_device_lost_all (klass);
+        UNLOCK_CLASS (NULL, klass);
+      }
+      break;
+  }
+}
+
 static LRESULT APIENTRY
 D3DHiddenWndProc (HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+  GstD3DVideoSinkClass *klass =
+      (GstD3DVideoSinkClass *) GetWindowLongPtr (hWnd, GWLP_USERDATA);
+  GstD3DVideoSinkEvent *evt;
+
   switch (message) {
     case WM_TIMER:
       switch (wParam) {
         case IDT_DEVICE_RESET_TIMER:
-          d3d_class_reset_display_device ((GstD3DVideoSinkClass *)
-              GetWindowLongPtr (hWnd, GWLP_USERDATA));
+          evt = g_new0 (GstD3DVideoSinkEvent, 1);
+          evt->window_message_id = IDT_DEVICE_RESET_TIMER;
+          evt->create_count = klass->create_count;
+          gst_element_call_async (GST_ELEMENT (klass),
+              (GstElementCallAsyncFunc) d3d_class_hidden_window_message_queue,
+              evt, g_free);
           break;
-        default:;
       }
       return 0;
     case WM_DESTROY:
       PostQuitMessage (0);
       return 0;
     default:
-      /* non constants */
-      if (message == WM_D3DVIDEO_NOTIFY_DEVICE_LOST) {
-        d3d_class_notify_device_lost_all ((GstD3DVideoSinkClass *)
-            GetWindowLongPtr (hWnd, GWLP_USERDATA));
-        return 0;
-      }
+      break;
   }
 
   return DefWindowProc (hWnd, message, wParam, lParam);
@@ -2658,18 +2838,16 @@ d3d_hidden_window_thread (GstD3DVideoSinkClass * klass)
 
   klass->d3d.hidden_window = hWnd;
 
-  /* TODO: Multi-monitor setup? */
-  if (!d3d_class_display_device_create (klass, D3DADAPTER_DEFAULT)) {
-    GST_ERROR ("Failed to initiazlize adapter: %u", D3DADAPTER_DEFAULT);
-    goto error;
-  }
-
   /* Attach data to window */
   SetWindowLongPtr (hWnd, GWLP_USERDATA, (LONG_PTR) klass);
 
   GST_DEBUG ("Entering Direct3D hidden window message loop");
 
-  klass->d3d.running = TRUE;
+  /* set running flag and signal calling thread */
+  g_mutex_lock (&klass->d3d.thread_start_mutex);
+  klass->d3d.thread_started = TRUE;
+  g_cond_signal (&klass->d3d.thread_start_cond);
+  g_mutex_unlock (&klass->d3d.thread_start_mutex);
 
   /* Hidden Window Message Loop */
   while (1) {
@@ -2682,15 +2860,12 @@ d3d_hidden_window_thread (GstD3DVideoSinkClass * klass)
       break;
   }
 
-  klass->d3d.running = FALSE;
 
   GST_DEBUG ("Leaving Direct3D hidden window message loop");
 
   ret = TRUE;
 
 error:
-  if (!ret)
-    klass->d3d.error_exit = TRUE;
   if (hWnd) {
     PostMessage (hWnd, WM_DESTROY, 0, 0);
     DestroyWindow (hWnd);
@@ -2698,7 +2873,14 @@ error:
   }
   if (reged)
     UnregisterClass (WndClass.lpszClassName, WndClass.hInstance);
-  d3d_class_display_device_destroy (klass);
+
+  /* if failed, set error flag and signal calling thread */
+  if (!ret) {
+    g_mutex_lock (&klass->d3d.thread_start_mutex);
+    klass->d3d.thread_error_exit = TRUE;
+    g_cond_signal (&klass->d3d.thread_start_cond);
+    g_mutex_unlock (&klass->d3d.thread_start_mutex);
+  }
 
   return ret;
 }

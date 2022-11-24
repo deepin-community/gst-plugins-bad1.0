@@ -8,13 +8,17 @@ debugutilsbad_sources = [
   'gstcompare.c',
   'gstfakevideosink.c',
   'gstwatchdog.c',
+  'gsttestsrcbin.c',
+  'gstclockselect.c',
 ]
 
 gstdebugutilsbad = library('gstdebugutilsbad',
   debugutilsbad_sources,
   c_args : gst_plugins_bad_args,
   include_directories : [configinc],
-  dependencies : [gstbase_dep, gstvideo_dep],
+  dependencies : [gstbase_dep, gstvideo_dep, gstnet_dep],
   install : true,
   install_dir : plugins_install_dir,
 )
+pkgconfig.generate(gstdebugutilsbad, install_dir : plugins_pkgconfig_install_dir)
+plugins += [gstdebugutilsbad]

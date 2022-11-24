@@ -1,11 +1,14 @@
 tsmux_sources = [
-  'mpegtsmux.c',
-  'mpegtsmux_aac.c',
-  'mpegtsmux_opus.c',
-  'mpegtsmux_ttxt.c',
-  'mpegtsmux_jpeg2000.c',
+  'gstmpegtsmuxplugin.c',
+  'gstbasetsmux.c',
+  'gstbasetsmuxaac.c',
+  'gstbasetsmuxopus.c',
+  'gstbasetsmuxttxt.c',
+  'gstbasetsmuxjpeg2000.c',
+  'gstmpegtsmux.c',
+  'gstatscmux.c',
   'tsmux/tsmux.c',
-  'tsmux/tsmuxstream.c',
+  'tsmux/tsmuxstream.c'
 ]
 
 gstmpegtsmux = library('gstmpegtsmux',
@@ -17,3 +20,5 @@ gstmpegtsmux = library('gstmpegtsmux',
   install : true,
   install_dir : plugins_install_dir,
 )
+pkgconfig.generate(gstmpegtsmux, install_dir : plugins_pkgconfig_install_dir)
+plugins += [gstmpegtsmux]

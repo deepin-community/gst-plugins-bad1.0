@@ -12,3 +12,5 @@ gstproxy = library('gstproxy',
   install : true,
   install_dir : plugins_install_dir,
 )
+pkgconfig.generate(gstproxy, install_dir : plugins_pkgconfig_install_dir)
+plugins += [gstproxy]

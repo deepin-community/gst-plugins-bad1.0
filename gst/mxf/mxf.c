@@ -34,6 +34,8 @@
 #include "mxfmpeg.h"
 #include "mxfup.h"
 #include "mxfvc3.h"
+#include "mxfprores.h"
+#include "mxfvanc.h"
 
 GST_DEBUG_CATEGORY (mxf_debug);
 #define GST_CAT_DEFAULT mxf_debug
@@ -68,6 +70,8 @@ plugin_init (GstPlugin * plugin)
   mxf_mpeg_init ();
   mxf_up_init ();
   mxf_vc3_init ();
+  mxf_prores_init ();
+  mxf_vanc_init ();
 
   /* mxfmux is disabled for now - it compiles but is completely untested */
   if (!gst_element_register (plugin, "mxfdemux", GST_RANK_PRIMARY,

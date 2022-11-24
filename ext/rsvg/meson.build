@@ -4,7 +4,7 @@ rsvg_sources = [
   'gstrsvgoverlay.c',
 ]
 
-rsvg_dep = dependency('librsvg-2.0', version : '>= 2.36.2', required : false)
+rsvg_dep = dependency('librsvg-2.0', version : '>= 2.36.2', required : get_option('rsvg'))
 if rsvg_dep.found()
   gstrsvg = library('gstrsvg',
     rsvg_sources,
@@ -15,4 +15,6 @@ if rsvg_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstrsvg, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstrsvg]
 endif

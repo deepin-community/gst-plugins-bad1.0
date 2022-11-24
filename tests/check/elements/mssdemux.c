@@ -313,7 +313,8 @@ GST_START_TEST (testSeekSnapBeforePosition)
 {
   /* Seek to 1.5s, snap before, it go to 1s */
   run_seek_position_test (1.0, GST_SEEK_TYPE_SET, 1500 * GST_MSECOND,
-      GST_SEEK_TYPE_NONE, 0, GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_SNAP_BEFORE,
+      GST_SEEK_TYPE_NONE, 0,
+      GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT | GST_SEEK_FLAG_SNAP_BEFORE,
       1000 * GST_MSECOND, -1, 3);
 }
 
@@ -324,7 +325,8 @@ GST_START_TEST (testSeekSnapAfterPosition)
 {
   /* Seek to 1.5s with snap after, it should move to 2s */
   run_seek_position_test (1.0, GST_SEEK_TYPE_SET, 1500 * GST_MSECOND,
-      GST_SEEK_TYPE_NONE, 0, GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_SNAP_AFTER,
+      GST_SEEK_TYPE_NONE, 0,
+      GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT | GST_SEEK_FLAG_SNAP_AFTER,
       2000 * GST_MSECOND, -1, 2);
 }
 
@@ -335,8 +337,8 @@ GST_START_TEST (testReverseSeekSnapBeforePosition)
 {
   run_seek_position_test (-1.0, GST_SEEK_TYPE_SET, 1000 * GST_MSECOND,
       GST_SEEK_TYPE_SET, 2500 * GST_MSECOND,
-      GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_SNAP_BEFORE, 1000 * GST_MSECOND,
-      3000 * GST_MSECOND, 2);
+      GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT | GST_SEEK_FLAG_SNAP_BEFORE,
+      1000 * GST_MSECOND, 3000 * GST_MSECOND, 2);
 }
 
 GST_END_TEST;
@@ -346,8 +348,8 @@ GST_START_TEST (testReverseSeekSnapAfterPosition)
 {
   run_seek_position_test (-1.0, GST_SEEK_TYPE_SET, 1000 * GST_MSECOND,
       GST_SEEK_TYPE_SET, 2500 * GST_MSECOND,
-      GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_SNAP_AFTER, 1000 * GST_MSECOND,
-      2000 * GST_MSECOND, 1);
+      GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT | GST_SEEK_FLAG_SNAP_AFTER,
+      1000 * GST_MSECOND, 2000 * GST_MSECOND, 1);
 }
 
 GST_END_TEST;
@@ -361,10 +363,10 @@ testDownloadErrorMessageCallback (GstAdaptiveDemuxTestEngine * engine,
 
   fail_unless (GST_MESSAGE_TYPE (msg) == GST_MESSAGE_ERROR);
   gst_message_parse_error (msg, &err, &dbg_info);
-  GST_DEBUG ("Error from element %s : %s\n",
+  GST_DEBUG ("Error from element %s : %s",
       GST_OBJECT_NAME (msg->src), err->message);
   fail_unless_equals_string (GST_OBJECT_NAME (msg->src), DEMUX_ELEMENT_NAME);
-  /*GST_DEBUG ("dbg_info=%s\n", dbg_info); */
+  /*GST_DEBUG ("dbg_info=%s", dbg_info); */
   g_error_free (err);
   g_free (dbg_info);
   g_main_loop_quit (engine->loop);

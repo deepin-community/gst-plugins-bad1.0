@@ -49,7 +49,9 @@ struct _GstIqa
   GstVideoAggregator videoaggregator;
 
   gboolean do_dssim;
-  double max_dssim;
+  gdouble ssim_threshold;
+  gdouble max_dssim;
+  gint mode;
 };
 
 struct _GstIqaClass

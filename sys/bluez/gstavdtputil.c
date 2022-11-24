@@ -722,6 +722,14 @@ gst_avdtp_connection_get_caps (GstAvdtpConnection * conn)
   return caps;
 }
 
+void
+gst_avdtp_connection_notify_volume (GstAvdtpConnection * conn,
+    GObject * source, const gchar * property)
+{
+  g_object_bind_property (source, property, conn->data.conn, "volume",
+      G_BINDING_BIDIRECTIONAL | G_BINDING_SYNC_CREATE);
+}
+
 gboolean
 gst_avdtp_connection_conf_recv_stream_fd (GstAvdtpConnection * conn)
 {

@@ -50,6 +50,7 @@ struct _GstX265Enc
   x265_param x265param;
   GstClockTime dts_offset;
   gboolean push_header;
+  const x265_api *api;
 
   /* List of frame/buffer mapping structs for
    * pending frames */
@@ -61,6 +62,7 @@ struct _GstX265Enc
   gint log_level;
   gint tune;
   gint speed_preset;
+  gint keyintmax;
   GString *option_string_prop;  /* option-string property */
   /*GString *option_string; *//* used by set prop */
 
@@ -71,8 +73,7 @@ struct _GstX265Enc
   gboolean reconfig;
 
   /* from the downstream caps */
-  const gchar *peer_profile;
-  gboolean peer_intra_profile;
+  GPtrArray *peer_profiles;
   /*const x265_level_t *peer_level; */
 };
 

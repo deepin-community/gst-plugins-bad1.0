@@ -36,6 +36,8 @@
 #include <gst/video/video.h>
 #include "msdk.h"
 #include "gstmsdkcontext.h"
+#include "msdk-enums.h"
+#include "gstmsdkdecproputil.h"
 
 G_BEGIN_DECLS
 
@@ -62,25 +64,36 @@ struct _GstMsdkDec
 
   /* input description */
   GstVideoCodecState *input_state;
-  GstVideoInfo output_info;
+  /* aligned msdk pool info */
   GstBufferPool *pool;
-  GstVideoInfo pool_info;
+  /* downstream pool info based on allocation query */
+  GstVideoInfo non_msdk_pool_info;
   mfxFrameAllocResponse alloc_resp;
   gboolean use_video_memory;
+  gboolean use_dmabuf;
   gboolean initialized;
 
   /* for packetization */
   GstAdapter *adapter;
-  gboolean is_packetized;
+  /* cap negotiation needed, allocation may or may not be required*/
+  gboolean do_renego;
+  /* re-allocation is mandatory if enabled */
+  gboolean do_realloc;
+  /* force reset on resolution change */
+  gboolean force_reset_on_res_change;
+  /* minimum number of buffers to be allocated, this should
+   * include downstream requirement, msdk suggestion and extra
+   * surface allocation for smooth display in render pipeline */
+  guint min_prealloc_buffers;
 
   /* MFX context */
   GstMsdkContext *context;
+  GstMsdkContext *old_context;
   mfxVideoParam param;
-  GPtrArray *extra_params;
   GArray *tasks;
   guint next_task;
 
-  GList *decoded_msdk_surfaces;
+  GList *locked_msdk_surfaces;
 
   /* element properties */
   gboolean hardware;
@@ -92,12 +105,14 @@ struct _GstMsdkDecClass
   GstVideoDecoderClass parent_class;
 
   gboolean (*configure) (GstMsdkDec * decoder);
-};
 
-struct _MsdkDecTask
-{
-  mfxFrameSurface1 *surface;
-  mfxSyncPoint sync_point;
+  /* adjust mfx parameters per codec after decode header */
+  gboolean (*post_configure) (GstMsdkDec * decoder);
+
+  /* reset mfx parameters per codec */
+  gboolean (*preinit_decoder) (GstMsdkDec * decoder);
+  /* adjust mfx parameters per codec */
+  gboolean (*postinit_decoder) (GstMsdkDec * decoder);
 };
 
 GType gst_msdkdec_get_type (void);

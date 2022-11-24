@@ -21,6 +21,7 @@
 #include "config.h"
 #endif
 
+#include "gstfdkaac.h"
 #include "gstfdkaacenc.h"
 
 #include <gst/pbutils/pbutils.h>
@@ -54,67 +55,6 @@ enum
                     "64000, " \
                     "88200, " \
                     "96000"
-
-static const struct
-{
-  gint channels;
-  CHANNEL_MODE mode;
-  GstAudioChannelPosition positions[8];
-} channel_layouts[] = {
-  {
-    1, MODE_1, {
-  GST_AUDIO_CHANNEL_POSITION_MONO}}, {
-    2, MODE_2, {
-  GST_AUDIO_CHANNEL_POSITION_FRONT_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_RIGHT}}, {
-    3, MODE_1_2, {
-  GST_AUDIO_CHANNEL_POSITION_FRONT_CENTER,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_RIGHT}}, {
-    3, MODE_2_1, {
-  GST_AUDIO_CHANNEL_POSITION_FRONT_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_RIGHT,
-          GST_AUDIO_CHANNEL_POSITION_LFE1}}, {
-    4, MODE_1_2_1, {
-  GST_AUDIO_CHANNEL_POSITION_FRONT_CENTER,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_RIGHT,
-          GST_AUDIO_CHANNEL_POSITION_REAR_CENTER}}, {
-    5, MODE_1_2_2, {
-  GST_AUDIO_CHANNEL_POSITION_FRONT_CENTER,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_RIGHT,
-          GST_AUDIO_CHANNEL_POSITION_SIDE_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_SIDE_RIGHT}}, {
-    6, MODE_1_2_2_1, {
-  GST_AUDIO_CHANNEL_POSITION_FRONT_CENTER,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_RIGHT,
-          GST_AUDIO_CHANNEL_POSITION_SIDE_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_SIDE_RIGHT,
-          GST_AUDIO_CHANNEL_POSITION_LFE1}}
-#ifdef HAVE_FDK_AAC_0_1_4
-  , {
-    8, MODE_7_1_REAR_SURROUND, {
-  GST_AUDIO_CHANNEL_POSITION_FRONT_CENTER,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_RIGHT,
-          GST_AUDIO_CHANNEL_POSITION_SIDE_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_SIDE_RIGHT,
-          GST_AUDIO_CHANNEL_POSITION_REAR_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_REAR_RIGHT,
-          GST_AUDIO_CHANNEL_POSITION_LFE1}}, {
-    8, MODE_7_1_FRONT_CENTER, {
-  GST_AUDIO_CHANNEL_POSITION_FRONT_CENTER,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_LEFT_OF_CENTER,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_FRONT_RIGHT,
-          GST_AUDIO_CHANNEL_POSITION_SIDE_LEFT,
-          GST_AUDIO_CHANNEL_POSITION_SIDE_RIGHT,
-          GST_AUDIO_CHANNEL_POSITION_LFE1}}
-#endif
-};
 
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
@@ -152,6 +92,7 @@ static GstFlowReturn gst_fdkaacenc_handle_frame (GstAudioEncoder * enc,
     GstBuffer * in_buf);
 static GstCaps *gst_fdkaacenc_get_caps (GstAudioEncoder * enc,
     GstCaps * filter);
+static void gst_fdkaacenc_flush (GstAudioEncoder * enc);
 
 G_DEFINE_TYPE (GstFdkAacEnc, gst_fdkaacenc, GST_TYPE_AUDIO_ENCODER);
 
@@ -206,35 +147,37 @@ gst_fdkaacenc_stop (GstAudioEncoder * enc)
 
   GST_DEBUG_OBJECT (self, "stop");
 
-  if (self->enc)
+  if (self->enc) {
     aacEncClose (&self->enc);
+    self->enc = NULL;
+  }
 
+  self->is_drained = TRUE;
   return TRUE;
 }
 
 static GstCaps *
 gst_fdkaacenc_get_caps (GstAudioEncoder * enc, GstCaps * filter)
 {
+  const GstFdkAacChannelLayout *layout;
   GstCaps *res, *caps;
-  gint i;
 
   caps = gst_caps_new_empty ();
 
-  for (i = 0; i < G_N_ELEMENTS (channel_layouts); i++) {
-    guint64 channel_mask;
+  for (layout = channel_layouts; layout->channels; layout++) {
+    gint channels = layout->channels;
     GstCaps *tmp =
         gst_caps_make_writable (gst_pad_get_pad_template_caps
         (GST_AUDIO_ENCODER_SINK_PAD (enc)));
 
-    if (channel_layouts[i].channels == 1) {
-      gst_caps_set_simple (tmp, "channels", G_TYPE_INT,
-          channel_layouts[i].channels, NULL);
+    if (channels == 1) {
+      gst_caps_set_simple (tmp, "channels", G_TYPE_INT, channels, NULL);
     } else {
-      gst_audio_channel_positions_to_mask (channel_layouts[i].positions,
-          channel_layouts[i].channels, FALSE, &channel_mask);
-      gst_caps_set_simple (tmp, "channels", G_TYPE_INT,
-          channel_layouts[i].channels, "channel-mask", GST_TYPE_BITMASK,
-          channel_mask, NULL);
+      guint64 channel_mask;
+      gst_audio_channel_positions_to_mask (layout->positions, channels, FALSE,
+          &channel_mask);
+      gst_caps_set_simple (tmp, "channels", G_TYPE_INT, channels,
+          "channel-mask", GST_TYPE_BITMASK, channel_mask, NULL);
     }
 
     gst_caps_append (caps, tmp);
@@ -260,10 +203,11 @@ gst_fdkaacenc_set_format (GstAudioEncoder * enc, GstAudioInfo * info)
   AACENC_InfoStruct enc_info = { 0 };
   gint bitrate;
 
-  if (self->enc) {
+  if (self->enc && !self->is_drained) {
     /* drain */
     gst_fdkaacenc_handle_frame (enc, NULL);
     aacEncClose (&self->enc);
+    self->is_drained = TRUE;
   }
 
   allowed_caps = gst_pad_get_allowed_caps (GST_AUDIO_ENCODER_SRC_PAD (self));
@@ -292,23 +236,22 @@ gst_fdkaacenc_set_format (GstAudioEncoder * enc, GstAudioInfo * info)
   if (allowed_caps)
     gst_caps_unref (allowed_caps);
 
-  if ((err =
-          aacEncOpen (&self->enc, 0,
-              GST_AUDIO_INFO_CHANNELS (info))) != AACENC_OK) {
-    GST_ERROR_OBJECT (self, "Unable to open encoder: %d\n", err);
+  err = aacEncOpen (&self->enc, 0, GST_AUDIO_INFO_CHANNELS (info));
+  if (err != AACENC_OK) {
+    GST_ERROR_OBJECT (self, "Unable to open encoder: %d", err);
     return FALSE;
   }
 
   aot = AOT_AAC_LC;
 
   if ((err = aacEncoder_SetParam (self->enc, AACENC_AOT, aot)) != AACENC_OK) {
-    GST_ERROR_OBJECT (self, "Unable to set AOT %d: %d\n", aot, err);
+    GST_ERROR_OBJECT (self, "Unable to set AOT %d: %d", aot, err);
     return FALSE;
   }
 
   if ((err = aacEncoder_SetParam (self->enc, AACENC_SAMPLERATE,
               GST_AUDIO_INFO_RATE (info))) != AACENC_OK) {
-    GST_ERROR_OBJECT (self, "Unable to set sample rate %d: %d\n",
+    GST_ERROR_OBJECT (self, "Unable to set sample rate %d: %d",
         GST_AUDIO_INFO_RATE (info), err);
     return FALSE;
   }
@@ -318,30 +261,36 @@ gst_fdkaacenc_set_format (GstAudioEncoder * enc, GstAudioInfo * info)
     self->need_reorder = FALSE;
     self->aac_positions = NULL;
   } else {
-    guint64 in_channel_mask, out_channel_mask;
-    gint i;
+    gint in_channels = GST_AUDIO_INFO_CHANNELS (info);
+    const GstAudioChannelPosition *in_positions =
+        &GST_AUDIO_INFO_POSITION (info, 0);
+    guint64 in_channel_mask;
+    const GstFdkAacChannelLayout *layout;
 
-    for (i = 0; i < G_N_ELEMENTS (channel_layouts); i++) {
-      if (channel_layouts[i].channels != GST_AUDIO_INFO_CHANNELS (info))
+    gst_audio_channel_positions_to_mask (in_positions, in_channels, FALSE,
+        &in_channel_mask);
+
+    for (layout = channel_layouts; layout->channels; layout++) {
+      gint channels = layout->channels;
+      const GstAudioChannelPosition *positions = layout->positions;
+      guint64 channel_mask;
+
+      if (channels != in_channels)
         continue;
 
-      gst_audio_channel_positions_to_mask (&GST_AUDIO_INFO_POSITION (info, 0),
-          GST_AUDIO_INFO_CHANNELS (info), FALSE, &in_channel_mask);
-      gst_audio_channel_positions_to_mask (channel_layouts[i].positions,
-          channel_layouts[i].channels, FALSE, &out_channel_mask);
-      if (in_channel_mask == out_channel_mask) {
-        channel_mode = channel_layouts[i].mode;
-        self->need_reorder =
-            memcmp (channel_layouts[i].positions,
-            &GST_AUDIO_INFO_POSITION (info, 0),
-            GST_AUDIO_INFO_CHANNELS (info) *
-            sizeof (GstAudioChannelPosition)) != 0;
-        self->aac_positions = channel_layouts[i].positions;
-        break;
-      }
+      gst_audio_channel_positions_to_mask (positions, channels, FALSE,
+          &channel_mask);
+      if (channel_mask != in_channel_mask)
+        continue;
+
+      channel_mode = layout->mode;
+      self->need_reorder = memcmp (positions, in_positions,
+          channels * sizeof *positions) != 0;
+      self->aac_positions = positions;
+      break;
     }
 
-    if (i == G_N_ELEMENTS (channel_layouts)) {
+    if (!layout->channels) {
       GST_ERROR_OBJECT (self, "Couldn't find a valid channel layout");
       return FALSE;
     }
@@ -490,9 +439,7 @@ gst_fdkaacenc_handle_frame (GstAudioEncoder * enc, GstBuffer * inbuf)
 
   info = gst_audio_encoder_get_audio_info (enc);
 
-  if (!inbuf) {
-    in_args.numInSamples = -1;
-  } else {
+  if (inbuf) {
     if (self->need_reorder) {
       inbuf = gst_buffer_copy (inbuf);
       gst_buffer_map (inbuf, &imap, GST_MAP_READWRITE);
@@ -506,13 +453,24 @@ gst_fdkaacenc_handle_frame (GstAudioEncoder * enc, GstBuffer * inbuf)
     in_args.numInSamples = imap.size / GST_AUDIO_INFO_BPS (info);
 
     in_sizes = imap.size;
-    in_el_sizes = 2;
-    in_desc.bufferIdentifiers = &in_id;
+    in_el_sizes = GST_AUDIO_INFO_BPS (info);
     in_desc.numBufs = 1;
-    in_desc.bufs = (void *) &imap.data;
-    in_desc.bufSizes = &in_sizes;
-    in_desc.bufElSizes = &in_el_sizes;
+  } else {
+    in_args.numInSamples = -1;
+
+    in_sizes = 0;
+    in_el_sizes = 0;
+    in_desc.numBufs = 0;
   }
+  /* We unset is_drained even if there's no inbuf. Basically this is a
+   * workaround for aacEncEncode always producing 1024 bytes even without any
+   * input, thus messing up with the base class counting */
+  self->is_drained = FALSE;
+
+  in_desc.bufferIdentifiers = &in_id;
+  in_desc.bufs = (void *) &imap.data;
+  in_desc.bufSizes = &in_sizes;
+  in_desc.bufElSizes = &in_el_sizes;
 
   outbuf = gst_audio_encoder_allocate_output_buffer (enc, self->outbuf_size);
   if (!outbuf) {
@@ -529,11 +487,10 @@ gst_fdkaacenc_handle_frame (GstAudioEncoder * enc, GstBuffer * inbuf)
   out_desc.bufSizes = &out_sizes;
   out_desc.bufElSizes = &out_el_sizes;
 
-  if ((err = aacEncEncode (self->enc, &in_desc, &out_desc, &in_args,
-              &out_args)) != AACENC_OK) {
-    if (!inbuf && err == AACENC_ENCODE_EOF)
-      goto out;
-
+  err = aacEncEncode (self->enc, &in_desc, &out_desc, &in_args, &out_args);
+  if (err == AACENC_ENCODE_EOF && !inbuf)
+    goto out;
+  else if (err != AACENC_OK) {
     GST_ERROR_OBJECT (self, "Failed to encode data: %d", err);
     ret = GST_FLOW_ERROR;
     goto out;
@@ -570,10 +527,25 @@ out:
 }
 
 static void
+gst_fdkaacenc_flush (GstAudioEncoder * enc)
+{
+  GstFdkAacEnc *self = GST_FDKAACENC (enc);
+  GstAudioInfo *info = gst_audio_encoder_get_audio_info (enc);
+
+  aacEncClose (&self->enc);
+  self->enc = NULL;
+  self->is_drained = TRUE;
+
+  if (GST_AUDIO_INFO_IS_VALID (info))
+    gst_fdkaacenc_set_format (enc, info);
+}
+
+static void
 gst_fdkaacenc_init (GstFdkAacEnc * self)
 {
   self->bitrate = DEFAULT_BITRATE;
   self->enc = NULL;
+  self->is_drained = TRUE;
 
   gst_audio_encoder_set_drainable (GST_AUDIO_ENCODER (self), TRUE);
 }
@@ -593,6 +565,7 @@ gst_fdkaacenc_class_init (GstFdkAacEncClass * klass)
   base_class->set_format = GST_DEBUG_FUNCPTR (gst_fdkaacenc_set_format);
   base_class->getcaps = GST_DEBUG_FUNCPTR (gst_fdkaacenc_get_caps);
   base_class->handle_frame = GST_DEBUG_FUNCPTR (gst_fdkaacenc_handle_frame);
+  base_class->flush = GST_DEBUG_FUNCPTR (gst_fdkaacenc_flush);
 
   g_object_class_install_property (object_class, PROP_BITRATE,
       g_param_spec_int ("bitrate",
