@@ -4,7 +4,7 @@
  * Copyright (C) 2014 Samsung Electronics. All rights reserved.
  * 
  * Authors:
- *   Alessandro Decina <alessandro@nnva.org>
+ *   Alessandro Decina <alessandro.d@gmail.com>
  *   Reynaldo H. Verdejo Pinochet <reynaldo@osg.samsung.com>
  *
  * This library is free software; you can redistribute it and/or
@@ -341,7 +341,7 @@ dvb_base_bin_class_init (DvbBaseBinClass * klass)
   gst_element_class_set_static_metadata (element_class, "DVB bin",
       "Source/Bin/Video",
       "Access descramble and split DVB streams",
-      "Alessandro Decina <alessandro@nnva.org>\n"
+      "Alessandro Decina <alessandro.d@gmail.com>\n"
       "Reynaldo H. Verdejo Pinochet <reynaldo@osg.samsung.com>");
 
   gobject_class = G_OBJECT_CLASS (klass);
@@ -422,7 +422,7 @@ dvb_base_bin_class_init (DvbBaseBinClass * klass)
    * DvbBaseBin::tuning-start:
    * @dvbbasebin: the element on which the signal is emitted
    *
-   * Signal emited when the element first attempts to tune the
+   * Signal emitted when the element first attempts to tune the
    * frontend tunner to a given frequency.
    */
   dvb_base_bin_signals[SIGNAL_TUNING_START] =
@@ -432,7 +432,7 @@ dvb_base_bin_class_init (DvbBaseBinClass * klass)
    * DvbBaseBin::tuning-done:
    * @dvbbasebin: the element on which the signal is emitted
    *
-   * Signal emited when the tunner has successfully got a lock on a signal.
+   * Signal emitted when the tunner has successfully got a lock on a signal.
    */
   dvb_base_bin_signals[SIGNAL_TUNING_DONE] =
       g_signal_new ("tuning-done", G_TYPE_FROM_CLASS (klass),
@@ -441,7 +441,7 @@ dvb_base_bin_class_init (DvbBaseBinClass * klass)
    * DvbBaseBin::tuning-fail:
    * @dvbbasebin: the element on which the signal is emitted
    *
-   * Signal emited when the tunner failed to get a lock on the
+   * Signal emitted when the tunner failed to get a lock on the
    * signal.
    */
   dvb_base_bin_signals[SIGNAL_TUNING_FAIL] =
@@ -452,14 +452,14 @@ dvb_base_bin_class_init (DvbBaseBinClass * klass)
    * DvbBaseBin::tune:
    * @dvbbasesink: the element on which the signal is emitted
    *
-   * Signal emited from the application to the element, instructing it
+   * Signal emitted from the application to the element, instructing it
    * to tune.
    */
   dvb_base_bin_signals[SIGNAL_TUNE] =
       g_signal_new ("tune", G_TYPE_FROM_CLASS (klass),
       G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
-      G_STRUCT_OFFSET (DvbBaseBinClass, do_tune),
-      NULL, NULL, g_cclosure_marshal_VOID__VOID, G_TYPE_NONE, 0);
+      G_STRUCT_OFFSET (DvbBaseBinClass, do_tune), NULL, NULL, NULL,
+      G_TYPE_NONE, 0);
 }
 
 static void

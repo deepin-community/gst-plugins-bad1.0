@@ -47,13 +47,12 @@
  * FIXME:operates hand gesture detection in video streams and images,
  * and enable media operation e.g. play/stop/fast forward/back rewind.
  *
- * <refsect2>
- * <title>Example launch line</title>
+ * ## Example launch line
+ *
  * |[
  * gst-launch-1.0 autovideosrc ! videoconvert ! "video/x-raw, format=RGB, width=320, height=240" ! \
  * videoscale ! handdetect ! videoconvert ! xvimagesink
  * ]|
- * </refsect2>
  */
 
 #ifdef HAVE_CONFIG_H
@@ -62,13 +61,13 @@
 
 /* element header */
 #include "gsthanddetect.h"
-#if (CV_MAJOR_VERSION >= 3)
 #include <opencv2/imgproc.hpp>
-#endif
-#include <opencv2/imgproc/imgproc_c.h>
 
 GST_DEBUG_CATEGORY_STATIC (gst_handdetect_debug);
 #define GST_CAT_DEFAULT gst_handdetect_debug
+#if (CV_MAJOR_VERSION < 4)
+#define CASCADE_DO_CANNY_PRUNING CV_HAAR_DO_CANNY_PRUNING
+#endif
 
 /* define HAAR files */
 #define HAAR_FILE_FIST GST_HAAR_CASCADES_DIR G_DIR_SEPARATOR_S "fist.xml"
@@ -112,10 +111,10 @@ static void gst_handdetect_set_property (GObject * object, guint prop_id,
 static void gst_handdetect_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec);
 static gboolean gst_handdetect_set_caps (GstOpencvVideoFilter * transform,
-    gint in_width, gint in_height, gint in_depth, gint in_channels,
-    gint out_width, gint out_height, gint out_depth, gint out_channels);
+    gint in_width, gint in_height, int in_cv_type,
+    gint out_width, gint out_height, int out_cv_type);
 static GstFlowReturn gst_handdetect_transform_ip (GstOpencvVideoFilter *
-    transform, GstBuffer * buffer, IplImage * img);
+    transform, GstBuffer * buffer, Mat img);
 
 static CascadeClassifier *gst_handdetect_load_profile (GstHanddetect * filter,
     gchar * profile);
@@ -162,11 +161,14 @@ gst_handdetect_finalize (GObject * obj)
 {
   GstHanddetect *filter = GST_HANDDETECT (obj);
 
-  if (filter->cvGray)
-    cvReleaseImage (&filter->cvGray);
+  filter->cvGray.release ();
   g_free (filter->profile_fist);
   g_free (filter->profile_palm);
   delete (filter->best_r);
+  if (filter->cvCascade_fist)
+    delete filter->cvCascade_fist;
+  if (filter->cvCascade_palm)
+    delete filter->cvCascade_palm;
 
   G_OBJECT_CLASS (gst_handdetect_parent_class)->finalize (obj);
 }
@@ -194,21 +196,21 @@ gst_handdetect_class_init (GstHanddetectClass * klass)
       g_param_spec_boolean ("display",
           "Display",
           "Whether the detected hands are highlighted in output frame",
-          TRUE, (GParamFlags)G_PARAM_READWRITE)
+          TRUE, (GParamFlags) G_PARAM_READWRITE)
       );
   g_object_class_install_property (gobject_class,
       PROP_PROFILE_FIST,
       g_param_spec_string ("profile_fist",
           "Profile_fist",
           "Location of HAAR cascade file (fist gesture)",
-          HAAR_FILE_FIST, (GParamFlags)G_PARAM_READWRITE)
+          HAAR_FILE_FIST, (GParamFlags) G_PARAM_READWRITE)
       );
   g_object_class_install_property (gobject_class,
       PROP_PROFILE_PALM,
       g_param_spec_string ("profile_palm",
           "Profile_palm",
           "Location of HAAR cascade file (palm gesture)",
-          HAAR_FILE_PALM, (GParamFlags)G_PARAM_READWRITE)
+          HAAR_FILE_PALM, (GParamFlags) G_PARAM_READWRITE)
       );
   /* FIXME: property name needs fixing */
   g_object_class_install_property (gobject_class,
@@ -216,7 +218,7 @@ gst_handdetect_class_init (GstHanddetectClass * klass)
       g_param_spec_int ("ROI_X",
           "ROI_X",
           "X of left-top pointer in region of interest \nGestures in the defined region of interest will emit messages",
-          0, INT_MAX, 0, (GParamFlags)G_PARAM_READWRITE)
+          0, INT_MAX, 0, (GParamFlags) G_PARAM_READWRITE)
       );
   /* FIXME: property name needs fixing */
   g_object_class_install_property (gobject_class,
@@ -224,7 +226,7 @@ gst_handdetect_class_init (GstHanddetectClass * klass)
       g_param_spec_int ("ROI_Y",
           "ROI_Y",
           "Y of left-top pointer in region of interest \nGestures in the defined region of interest will emit messages",
-          0, INT_MAX, 0, (GParamFlags)G_PARAM_READWRITE)
+          0, INT_MAX, 0, (GParamFlags) G_PARAM_READWRITE)
       );
   /* FIXME: property name needs fixing */
   g_object_class_install_property (gobject_class,
@@ -232,7 +234,7 @@ gst_handdetect_class_init (GstHanddetectClass * klass)
       g_param_spec_int ("ROI_WIDTH",
           "ROI_WIDTH",
           "WIDTH of left-top pointer in region of interest \nGestures in the defined region of interest will emit messages",
-          0, INT_MAX, 0, (GParamFlags)G_PARAM_READWRITE)
+          0, INT_MAX, 0, (GParamFlags) G_PARAM_READWRITE)
       );
   /* FIXME: property name needs fixing */
   g_object_class_install_property (gobject_class,
@@ -240,7 +242,7 @@ gst_handdetect_class_init (GstHanddetectClass * klass)
       g_param_spec_int ("ROI_HEIGHT",
           "ROI_HEIGHT",
           "HEIGHT of left-top pointer in region of interest \nGestures in the defined region of interest will emit messages",
-          0, INT_MAX, 0, (GParamFlags)G_PARAM_READWRITE)
+          0, INT_MAX, 0, (GParamFlags) G_PARAM_READWRITE)
       );
 
   gst_element_class_set_static_metadata (element_class,
@@ -370,8 +372,8 @@ gst_handdetect_get_property (GObject * object, guint prop_id, GValue * value,
 /* this function handles the link with other elements */
 static gboolean
 gst_handdetect_set_caps (GstOpencvVideoFilter * transform,
-    gint in_width, gint in_height, gint in_depth, gint in_channels,
-    gint out_width, gint out_height, gint out_depth, gint out_channels)
+    gint in_width, gint in_height, int in_cv_type,
+    gint out_width, gint out_height, int out_cv_type)
 {
   GstHanddetect *filter;
   filter = GST_HANDDETECT (transform);
@@ -381,10 +383,7 @@ gst_handdetect_set_caps (GstOpencvVideoFilter * transform,
     GST_WARNING_OBJECT (filter,
         "resize to 320 x 240 to have best detect accuracy.\n");
 
-  if (filter->cvGray)
-    cvReleaseImage (&filter->cvGray);
-  filter->cvGray =
-      cvCreateImage (cvSize (in_width, in_height), IPL_DEPTH_8U, 1);
+  filter->cvGray.create (Size (in_width, in_height), CV_8UC1);
 
   return TRUE;
 }
@@ -394,7 +393,7 @@ gst_handdetect_set_caps (GstOpencvVideoFilter * transform,
  */
 static GstFlowReturn
 gst_handdetect_transform_ip (GstOpencvVideoFilter * transform,
-    GstBuffer * buffer, IplImage * img)
+    GstBuffer * buffer, Mat img)
 {
   GstHanddetect *filter = GST_HANDDETECT (transform);
   Rect *r;
@@ -405,36 +404,34 @@ gst_handdetect_transform_ip (GstOpencvVideoFilter * transform,
 
   /* check detection cascades */
   if (filter->cvCascade_fist && filter->cvCascade_palm) {
-  /* cvt to gray colour space for hand detect */
-    cvCvtColor (img, filter->cvGray, CV_RGB2GRAY);
+    /* cvt to gray colour space for hand detect */
+    cvtColor (img, filter->cvGray, COLOR_RGB2GRAY);
 
     /* detect FIST gesture fist */
-    Mat image = cvarrToMat(filter->cvGray);
-    Mat roi (image, Rect (filter->cvGray->origin,
-            filter->cvGray->origin, filter->cvGray->width,
-            filter->cvGray->height));
+    Mat roi (filter->cvGray, Rect (0,
+            0, filter->cvGray.size ().width, filter->cvGray.size ().height));
     filter->cvCascade_fist->detectMultiScale (roi, hands, 1.1, 2,
-        CV_HAAR_DO_CANNY_PRUNING, cvSize (24, 24), cvSize (0, 0));
+        CASCADE_DO_CANNY_PRUNING, Size (24, 24), Size (0, 0));
 
     /* if FIST gesture detected */
     if (!hands.empty ()) {
 
       int min_distance, distance;
       Rect temp_r;
-      CvPoint c;
+      Point c;
 
       /* Go through all detected FIST gestures to get the best one
        * prev_r => previous hand
        * best_r => best hand in this frame
        */
       /* set min_distance for init comparison */
-      min_distance = img->width + img->height;
+      min_distance = img.size ().width + img.size ().height;
       /* Init filter->prev_r */
       temp_r = Rect (0, 0, 0, 0);
       if (filter->prev_r == NULL)
         filter->prev_r = &temp_r;
       /* Get the best FIST gesture */
-      for (i = 0; i < hands.size(); i++) {
+      for (i = 0; i < hands.size (); i++) {
         r = &hands[i];
         distance = (int) sqrt (pow ((r->x - filter->prev_r->x),
                 2) + pow ((r->y - filter->prev_r->y), 2));
@@ -449,7 +446,7 @@ gst_handdetect_transform_ip (GstOpencvVideoFilter * transform,
 
       /* send msg to app/bus if the detected gesture falls in the region of interest */
       /* get center point of gesture */
-      c = cvPoint (filter->best_r->x + filter->best_r->width / 2,
+      c = Point (filter->best_r->x + filter->best_r->width / 2,
           filter->best_r->y + filter->best_r->height / 2);
       /* send message:
        * if the center point is in the region of interest, OR,
@@ -491,26 +488,26 @@ gst_handdetect_transform_ip (GstOpencvVideoFilter * transform,
       /* Check filter->display,
        * If TRUE, displaying red circle marker in the out frame */
       if (filter->display) {
-        CvPoint center;
+        Point center;
         int radius;
         center.x = cvRound ((filter->best_r->x + filter->best_r->width * 0.5));
         center.y = cvRound ((filter->best_r->y + filter->best_r->height * 0.5));
         radius =
             cvRound ((filter->best_r->width + filter->best_r->height) * 0.25);
-        cvCircle (img, center, radius, CV_RGB (0, 0, 200), 1, 8, 0);
+        circle (img, center, radius, CV_RGB (0, 0, 200), 1, 8, 0);
       }
     } else {
-     /* if NO FIST gesture, detecting PALM gesture */
+      /* if NO FIST gesture, detecting PALM gesture */
       filter->cvCascade_palm->detectMultiScale (roi, hands, 1.1, 2,
-          CV_HAAR_DO_CANNY_PRUNING, cvSize (24, 24), cvSize (0, 0));
+          CASCADE_DO_CANNY_PRUNING, Size (24, 24), Size (0, 0));
       /* if PALM detected */
       if (!hands.empty ()) {
         int min_distance, distance;
         Rect temp_r;
-        CvPoint c;
+        Point c;
 
         if (filter->display) {
-          GST_DEBUG_OBJECT (filter, "%d PALM gestures detected\n",
+          GST_DEBUG_OBJECT (filter, "%d PALM gestures detected",
               (int) hands.size ());
         }
         /* Go through all detected PALM gestures to get the best one
@@ -518,10 +515,10 @@ gst_handdetect_transform_ip (GstOpencvVideoFilter * transform,
          * best_r => best hand in this frame
          */
         /* suppose a min_distance for init comparison */
-        min_distance = img->width + img->height;
+        min_distance = img.size ().width + img.size ().height;
         /* Init filter->prev_r */
         temp_r = Rect (0, 0, 0, 0);
-       if (filter->prev_r == NULL)
+        if (filter->prev_r == NULL)
           filter->prev_r = &temp_r;
         /* Get the best PALM gesture */
         for (i = 0; i < hands.size (); ++i) {
@@ -539,7 +536,7 @@ gst_handdetect_transform_ip (GstOpencvVideoFilter * transform,
 
         /* send msg to app/bus if the detected gesture falls in the region of interest */
         /* get center point of gesture */
-        c = cvPoint (filter->best_r->x + filter->best_r->width / 2,
+        c = Point (filter->best_r->x + filter->best_r->width / 2,
             filter->best_r->y + filter->best_r->height / 2);
         /* send message:
          * if the center point is in the region of interest, OR,
@@ -595,7 +592,7 @@ gst_handdetect_transform_ip (GstOpencvVideoFilter * transform,
         /* Check filter->display,
          * If TRUE, displaying red circle marker in the out frame */
         if (filter->display) {
-          CvPoint center;
+          Point center;
           int radius;
           center.x =
               cvRound ((filter->best_r->x + filter->best_r->width * 0.5));
@@ -603,7 +600,7 @@ gst_handdetect_transform_ip (GstOpencvVideoFilter * transform,
               cvRound ((filter->best_r->y + filter->best_r->height * 0.5));
           radius =
               cvRound ((filter->best_r->width + filter->best_r->height) * 0.25);
-          cvCircle (img, center, radius, CV_RGB (0, 0, 200), 1, 8, 0);
+          circle (img, center, radius, CV_RGB (0, 0, 200), 1, 8, 0);
         }
       }
     }

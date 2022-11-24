@@ -63,10 +63,10 @@ enum
   PROP_CONNECTION_ID,
   PROP_PEM,
   PROP_PEER_PEM,
-
   PROP_DECODER_KEY,
   PROP_SRTP_CIPHER,
   PROP_SRTP_AUTH,
+  PROP_CONNECTION_STATE,
   NUM_PROPERTIES
 };
 
@@ -128,8 +128,7 @@ gst_dtls_dec_class_init (GstDtlsDecClass * klass)
 
   signals[SIGNAL_ON_KEY_RECEIVED] =
       g_signal_new ("on-key-received", G_TYPE_FROM_CLASS (klass),
-      G_SIGNAL_RUN_LAST, 0, NULL, NULL,
-      g_cclosure_marshal_generic, G_TYPE_NONE, 0);
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 
   properties[PROP_CONNECTION_ID] =
       g_param_spec_string ("connection-id",
@@ -141,7 +140,8 @@ gst_dtls_dec_class_init (GstDtlsDecClass * klass)
       g_param_spec_string ("pem",
       "PEM string",
       "A string containing a X509 certificate and RSA private key in PEM format",
-      DEFAULT_PEM, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+      DEFAULT_PEM,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_DOC_SHOW_DEFAULT);
 
   properties[PROP_PEER_PEM] =
       g_param_spec_string ("peer-pem",
@@ -170,6 +170,13 @@ gst_dtls_dec_class_init (GstDtlsDecClass * klass)
       "The value will be set to an GstDtlsSrtpAuth.",
       0, GST_DTLS_SRTP_AUTH_HMAC_SHA1_80, DEFAULT_SRTP_AUTH,
       G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+
+  properties[PROP_CONNECTION_STATE] =
+      g_param_spec_enum ("connection-state",
+      "Connection State",
+      "Current connection state",
+      GST_DTLS_TYPE_CONNECTION_STATE,
+      GST_DTLS_CONNECTION_STATE_NEW, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (gobject_class, NUM_PROPERTIES, properties);
 
@@ -300,6 +307,13 @@ gst_dtls_dec_get_property (GObject * object, guint prop_id, GValue * value,
       break;
     case PROP_SRTP_AUTH:
       g_value_set_uint (value, self->srtp_auth);
+      break;
+    case PROP_CONNECTION_STATE:
+      if (self->connection)
+        g_object_get_property (G_OBJECT (self->connection), "connection-state",
+            value);
+      else
+        g_value_set_enum (value, GST_DTLS_CONNECTION_STATE_CLOSED);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (self, prop_id, pspec);
@@ -452,62 +466,105 @@ on_peer_certificate_received (GstDtlsConnection * connection, gchar * pem,
   return TRUE;
 }
 
-static gint
+static GstFlowReturn
 process_buffer (GstDtlsDec * self, GstBuffer * buffer)
 {
+  GstFlowReturn flow_ret;
   GstMapInfo map_info;
-  gint size;
+  GError *err = NULL;
+  gsize written = 0;
 
   if (!gst_buffer_map (buffer, &map_info, GST_MAP_READWRITE))
-    return 0;
+    return GST_FLOW_ERROR;
 
   if (!map_info.size) {
     gst_buffer_unmap (buffer, &map_info);
-    return 0;
+    return GST_FLOW_ERROR;
   }
 
-  size =
+  flow_ret =
       gst_dtls_connection_process (self->connection, map_info.data,
-      map_info.size);
+      map_info.size, &written, &err);
   gst_buffer_unmap (buffer, &map_info);
 
-  if (size <= 0)
-    return size;
+  switch (flow_ret) {
+    case GST_FLOW_OK:
+      GST_LOG_OBJECT (self,
+          "Decoded buffer of size %" G_GSIZE_FORMAT " B to %" G_GSIZE_FORMAT,
+          map_info.size, written);
+      gst_buffer_set_size (buffer, written);
+      break;
+    case GST_FLOW_EOS:
+      gst_buffer_set_size (buffer, written);
+      GST_DEBUG_OBJECT (self, "Peer closed the connection");
+      break;
+    case GST_FLOW_ERROR:
+      GST_ERROR_OBJECT (self, "Error processing buffer: %s", err->message);
+      GST_ELEMENT_ERROR (self, RESOURCE, READ, (NULL), ("%s", err->message));
+      g_clear_error (&err);
+      break;
+    default:
+      g_assert_not_reached ();
+  }
+  g_assert (err == NULL);
 
-  gst_buffer_set_size (buffer, size);
-
-  return size;
+  return flow_ret;
 }
+
+typedef struct
+{
+  GstDtlsDec *self;
+  GstFlowReturn flow_ret;
+  guint processed;
+} ProcessListData;
 
 static gboolean
 process_buffer_from_list (GstBuffer ** buffer, guint idx, gpointer user_data)
 {
-  GstDtlsDec *self = GST_DTLS_DEC (user_data);
-  gint size;
+  ProcessListData *process_list_data = user_data;
+  GstDtlsDec *self = GST_DTLS_DEC (process_list_data->self);
+  GstFlowReturn flow_ret;
 
   *buffer = gst_buffer_make_writable (*buffer);
-  size = process_buffer (self, *buffer);
-  if (size <= 0)
-    gst_buffer_replace (buffer, NULL);
+  flow_ret = process_buffer (self, *buffer);
 
-  return TRUE;
+  process_list_data->flow_ret = flow_ret;
+  if (gst_buffer_get_size (*buffer) == 0)
+    gst_buffer_replace (buffer, NULL);
+  else if (flow_ret != GST_FLOW_ERROR)
+    process_list_data->processed++;
+
+  return flow_ret == GST_FLOW_OK;
 }
 
 static GstFlowReturn
 sink_chain_list (GstPad * pad, GstObject * parent, GstBufferList * list)
 {
   GstDtlsDec *self = GST_DTLS_DEC (parent);
-  GstFlowReturn ret = GST_FLOW_OK;
   GstPad *other_pad;
+  ProcessListData process_list_data = { self, GST_FLOW_OK, 0 };
 
   list = gst_buffer_list_make_writable (list);
-  gst_buffer_list_foreach (list, process_buffer_from_list, self);
+  gst_buffer_list_foreach (list, process_buffer_from_list, &process_list_data);
+
+  /* If we successfully processed at least some buffers then forward those */
+  if (process_list_data.flow_ret != GST_FLOW_OK
+      && process_list_data.processed == 0) {
+    GST_ERROR_OBJECT (self, "Failed to process buffer list: %s",
+        gst_flow_get_name (process_list_data.flow_ret));
+    gst_buffer_list_unref (list);
+    return process_list_data.flow_ret;
+  }
+
+  /* Remove all buffers after the first one that failed to be processed */
+  gst_buffer_list_remove (list, process_list_data.processed,
+      gst_buffer_list_length (list) - process_list_data.processed);
 
   if (gst_buffer_list_length (list) == 0) {
     GST_DEBUG_OBJECT (self, "Not produced any buffers");
     gst_buffer_list_unref (list);
 
-    return GST_FLOW_OK;
+    return process_list_data.flow_ret;
   }
 
   g_mutex_lock (&self->src_mutex);
@@ -517,17 +574,25 @@ sink_chain_list (GstPad * pad, GstObject * parent, GstBufferList * list)
   g_mutex_unlock (&self->src_mutex);
 
   if (other_pad) {
-    GST_LOG_OBJECT (self, "decoded buffer list with length %u, pushing",
+    gboolean was_eos = process_list_data.flow_ret == GST_FLOW_EOS;
+
+    GST_LOG_OBJECT (self, "pushing buffer list with length %u",
         gst_buffer_list_length (list));
-    ret = gst_pad_push_list (other_pad, list);
+    process_list_data.flow_ret = gst_pad_push_list (other_pad, list);
+
+    /* If the peer closed the connection, signal that we're done here now */
+    if (was_eos)
+      gst_pad_push_event (other_pad, gst_event_new_eos ());
+
     gst_object_unref (other_pad);
   } else {
-    GST_LOG_OBJECT (self, "dropped buffer list with length %d, not linked",
+    GST_LOG_OBJECT (self,
+        "dropping buffer list with length %d, have no source pad",
         gst_buffer_list_length (list));
     gst_buffer_list_unref (list);
   }
 
-  return ret;
+  return process_list_data.flow_ret;
 }
 
 static GstFlowReturn
@@ -535,7 +600,6 @@ sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
 {
   GstDtlsDec *self = GST_DTLS_DEC (parent);
   GstFlowReturn ret = GST_FLOW_OK;
-  gint size;
   GstPad *other_pad;
 
   if (!self->agent) {
@@ -548,12 +612,12 @@ sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
       self->connection_id, gst_buffer_get_size (buffer));
 
   buffer = gst_buffer_make_writable (buffer);
-  size = process_buffer (self, buffer);
-
-  if (size <= 0) {
+  ret = process_buffer (self, buffer);
+  if (ret == GST_FLOW_ERROR) {
+    GST_ERROR_OBJECT (self, "Failed to process buffer: %s",
+        gst_flow_get_name (ret));
     gst_buffer_unref (buffer);
-
-    return GST_FLOW_OK;
+    return ret;
   }
 
   g_mutex_lock (&self->src_mutex);
@@ -563,11 +627,25 @@ sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
   g_mutex_unlock (&self->src_mutex);
 
   if (other_pad) {
-    GST_LOG_OBJECT (self, "decoded buffer with length %d, pushing", size);
-    ret = gst_pad_push (other_pad, buffer);
+    gboolean was_eos = (ret == GST_FLOW_EOS);
+
+    if (gst_buffer_get_size (buffer) > 0) {
+      GST_LOG_OBJECT (self, "pushing buffer");
+      ret = gst_pad_push (other_pad, buffer);
+    } else {
+      gst_buffer_unref (buffer);
+    }
+
+    /* If the peer closed the connection, signal that we're done here now */
+    if (was_eos) {
+      gst_pad_push_event (other_pad, gst_event_new_eos ());
+      if (ret == GST_FLOW_OK)
+        ret = GST_FLOW_EOS;
+    }
+
     gst_object_unref (other_pad);
   } else {
-    GST_LOG_OBJECT (self, "dropped buffer with length %d, not linked", size);
+    GST_LOG_OBJECT (self, "dropping buffer, have no source pad");
     gst_buffer_unref (buffer);
   }
 
@@ -587,9 +665,12 @@ get_agent_by_pem (const gchar * pem)
   if (!pem) {
     if (g_once_init_enter (&generated_cert_agent)) {
       GstDtlsAgent *new_agent;
+      GObject *certificate;
 
+      certificate = g_object_new (GST_TYPE_DTLS_CERTIFICATE, NULL);
       new_agent = g_object_new (GST_TYPE_DTLS_AGENT, "certificate",
-          g_object_new (GST_TYPE_DTLS_CERTIFICATE, NULL), NULL);
+          certificate, NULL);
+      g_object_unref (certificate);
 
       GST_DEBUG_OBJECT (generated_cert_agent,
           "no agent with generated cert found, creating new");
@@ -612,9 +693,12 @@ get_agent_by_pem (const gchar * pem)
     agent = GST_DTLS_AGENT (g_hash_table_lookup (agent_table, pem));
 
     if (!agent) {
-      agent = g_object_new (GST_TYPE_DTLS_AGENT,
-          "certificate", g_object_new (GST_TYPE_DTLS_CERTIFICATE, "pem", pem,
-              NULL), NULL);
+      GObject *certificate;
+
+      certificate = g_object_new (GST_TYPE_DTLS_CERTIFICATE, "pem", pem, NULL);
+      agent = g_object_new (GST_TYPE_DTLS_AGENT, "certificate", certificate,
+          NULL);
+      g_object_unref (certificate);
 
       g_object_weak_ref (G_OBJECT (agent), (GWeakNotify) agent_weak_ref_notify,
           (gpointer) g_strdup (pem));
@@ -674,12 +758,23 @@ gst_dtls_dec_fetch_connection (gchar * id)
 }
 
 static void
+on_connection_state_changed (GObject * object, GParamSpec * pspec,
+    gpointer user_data)
+{
+  GstDtlsDec *self = GST_DTLS_DEC (user_data);
+
+  g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_CONNECTION_STATE]);
+}
+
+static void
 create_connection (GstDtlsDec * self, gchar * id)
 {
   g_return_if_fail (GST_IS_DTLS_DEC (self));
   g_return_if_fail (GST_IS_DTLS_AGENT (self->agent));
 
   if (self->connection) {
+    g_signal_handlers_disconnect_by_func (self->connection,
+        on_connection_state_changed, self);
     g_object_unref (self->connection);
     self->connection = NULL;
   }
@@ -699,6 +794,10 @@ create_connection (GstDtlsDec * self, gchar * id)
 
   self->connection =
       g_object_new (GST_TYPE_DTLS_CONNECTION, "agent", self->agent, NULL);
+  g_signal_connect_object (self->connection,
+      "notify::connection-state", G_CALLBACK (on_connection_state_changed),
+      self, 0);
+  on_connection_state_changed (NULL, NULL, self);
 
   g_object_weak_ref (G_OBJECT (self->connection),
       (GWeakNotify) connection_weak_ref_notify, g_strdup (id));

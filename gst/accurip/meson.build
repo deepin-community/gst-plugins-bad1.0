@@ -10,3 +10,5 @@ gstaccurip = library('gstaccurip',
   install : true,
   install_dir : plugins_install_dir,
 )
+pkgconfig.generate(gstaccurip, install_dir : plugins_pkgconfig_install_dir)
+plugins += [gstaccurip]

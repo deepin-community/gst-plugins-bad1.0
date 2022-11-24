@@ -58,12 +58,12 @@
  * For each packet received, it checks if the internal SSRC is in the list
  * of streams already in use. If this is not the case, it sends a signal to
  * the user to get the needed parameters to create a new stream : master
- * key, encryption and authentication mecanisms for both RTP and RTCP. If
+ * key, encryption and authentication mechanisms for both RTP and RTCP. If
  * the user can't provide those parameters, the buffer is dropped and a
  * warning is emitted.
  *
  * This element uses libsrtp library. The encryption and authentication
- * mecanisms available are :
+ * mechanisms available are :
  *
  * Encryption
  * - AES_ICM 256 bits (maximum security)
@@ -96,9 +96,16 @@
  * other means. If no rollover counter is provided by the user, 0 is
  * used by default.
  *
+ * It is possible to receive a stream protected by multiple master keys, each buffer
+ * then contains a Master Key Identifier (MKI) to identify which key was used for this
+ * buffer. If multiple keys are needed, the first key can be specified in the caps as
+ * "srtp-key=(buffer)key1data, mki=(buffer)mki1data", then the second one can be given in
+ * the same caps as "srtp-key2=(buffer)key2data, mki2=(buffer)mki2data", and more can
+ * be added up to 15.
+ *
  * ## Example pipelines
  * |[
- * gst-launch-1.0 udpsrc port=5004 caps='application/x-srtp, payload=(int)8, ssrc=(uint)1356955624, srtp-key=(buffer)012345678901234567890123456789012345678901234567890123456789, srtp-cipher=(string)aes-128-icm, srtp-auth=(string)hmac-sha1-80, srtcp-cipher=(string)aes-128-icm, srtcp-auth=(string)hmac-sha1-80, roc=(uint)0' !  srtpdec ! rtppcmadepay ! alawdec ! pulsesink
+ * gst-launch-1.0 udpsrc port=5004 caps='application/x-srtp, payload=(int)8, ssrc=(uint)1356955624, srtp-key=(buffer)012345678901234567890123456789012345678901234567890123456789, srtp-cipher=(string)aes-128-icm, srtp-auth=(string)hmac-sha1-80, srtcp-cipher=(string)aes-128-icm, srtcp-auth=(string)hmac-sha1-80' !  srtpdec ! rtppcmadepay ! alawdec ! pulsesink
  * ]| Receive PCMA SRTP packets through UDP using caps to specify
  * master key and protection.
  * |[
@@ -217,7 +224,16 @@ struct _GstSrtpDecSsrcStream
   GstSrtpAuthType rtp_auth;
   GstSrtpCipherType rtcp_cipher;
   GstSrtpAuthType rtcp_auth;
+  GArray *keys;
 };
+
+#ifdef HAVE_SRTP2
+struct GstSrtpDecKey
+{
+  GstBuffer *mki;
+  GstBuffer *key;
+};
+#endif
 
 #define STREAM_HAS_CRYPTO(stream)                       \
   (stream->rtp_cipher != GST_SRTP_CIPHER_NULL ||        \
@@ -276,7 +292,7 @@ gst_srtp_dec_class_init (GstSrtpDecClass * klass)
    * @gstsrtpdec: the element on which the signal is emitted
    * @ssrc: The unique SSRC of the stream
    *
-   * Signal emited to get the parameters relevant to stream
+   * Signal emitted to get the parameters relevant to stream
    * with @ssrc. User should provide the key and the RTP and
    * RTCP encryption ciphers and authentication, and return
    * them wrapped in a GstCaps.
@@ -302,7 +318,7 @@ gst_srtp_dec_class_init (GstSrtpDecClass * klass)
    * @gstsrtpdec: the element on which the signal is emitted
    * @ssrc: The unique SSRC of the stream
    *
-   * Signal emited when the stream with @ssrc has reached the
+   * Signal emitted when the stream with @ssrc has reached the
    * soft limit of utilisation of it's master encryption key.
    * User should provide a new key and new RTP and RTCP encryption
    * ciphers and authentication, and return them wrapped in a
@@ -317,7 +333,7 @@ gst_srtp_dec_class_init (GstSrtpDecClass * klass)
    * @gstsrtpdec: the element on which the signal is emitted
    * @ssrc: The unique SSRC of the stream
    *
-   * Signal emited when the stream with @ssrc has reached the
+   * Signal emitted when the stream with @ssrc has reached the
    * hard limit of utilisation of it's master encryption key.
    * User should provide a new key and new RTP and RTCP encryption
    * ciphers and authentication, and return them wrapped in a
@@ -345,7 +361,7 @@ gst_srtp_dec_class_init (GstSrtpDecClass * klass)
 
 /* initialize the new element
  * instantiate pads and add them to element
- * set pad calback functions
+ * set pad callback functions
  * initialize instance structure
  */
 static void
@@ -399,10 +415,6 @@ gst_srtp_dec_init (GstSrtpDec * filter)
   gst_element_add_pad (GST_ELEMENT (filter), filter->rtcp_srcpad);
 
   filter->first_session = TRUE;
-
-#ifndef HAVE_SRTP2
-  filter->roc_changed = FALSE;
-#endif
 }
 
 static GstStructure *
@@ -512,6 +524,17 @@ find_stream_by_ssrc (GstSrtpDec * filter, guint32 ssrc)
   return g_hash_table_lookup (filter->streams, GUINT_TO_POINTER (ssrc));
 }
 
+#ifdef HAVE_SRTP2
+static void
+clear_key (gpointer data)
+{
+  struct GstSrtpDecKey *key = data;
+
+  gst_clear_buffer (&key->mki);
+  gst_clear_buffer (&key->key);
+}
+#endif
+
 
 /* get info from buffer caps
  */
@@ -556,8 +579,13 @@ get_stream_from_caps (GstSrtpDec * filter, GstCaps * caps, guint32 ssrc)
     goto error;
   }
 
-  if (stream->rtcp_cipher != SRTP_NULL_CIPHER &&
-      stream->rtcp_auth == SRTP_NULL_AUTH) {
+  /* RFC 3711 says in "3. SRTP Framework" that SRTCP message authentication
+   * is MANDATORY. In case of GCM let the pipeline handle any errors.
+   */
+  if (stream->rtcp_cipher != GST_SRTP_CIPHER_AES_128_GCM
+      && stream->rtcp_cipher != GST_SRTP_CIPHER_AES_256_GCM
+      && stream->rtcp_cipher != GST_SRTP_CIPHER_NULL
+      && stream->rtcp_auth == GST_SRTP_AUTH_NULL) {
     GST_WARNING_OBJECT (filter,
         "Cannot have SRTP NULL authentication with a not-NULL encryption"
         " cipher.");
@@ -565,8 +593,63 @@ get_stream_from_caps (GstSrtpDec * filter, GstCaps * caps, guint32 ssrc)
   }
 
   if (gst_structure_get (s, "srtp-key", GST_TYPE_BUFFER, &buf, NULL) || !buf) {
+#ifdef HAVE_SRTP2
+    GstBuffer *mki = NULL;
+    guint i;
+    gsize mki_size = 0;
+#endif
+
     GST_DEBUG_OBJECT (filter, "Got key [%p] for SSRC %u", buf, ssrc);
-    stream->key = buf;
+
+#ifdef HAVE_SRTP2
+    if (gst_structure_get (s, "mki", GST_TYPE_BUFFER, &mki, NULL) && mki) {
+      struct GstSrtpDecKey key = {.mki = mki,.key = buf };
+
+      mki_size = gst_buffer_get_size (mki);
+      if (mki_size > SRTP_MAX_MKI_LEN) {
+        GST_WARNING_OBJECT (filter, "MKI is longer than allowed (%"
+            G_GSIZE_FORMAT " > %d).", mki_size, SRTP_MAX_MKI_LEN);
+        gst_buffer_unref (mki);
+        gst_buffer_unref (buf);
+        goto error;
+      }
+
+      stream->keys =
+          g_array_sized_new (FALSE, TRUE, sizeof (struct GstSrtpDecKey), 2);
+      g_array_set_clear_func (stream->keys, clear_key);
+
+      g_array_append_val (stream->keys, key);
+
+      /* Append more MKIs */
+      for (i = 1; i < SRTP_MAX_NUM_MASTER_KEYS; i++) {
+        char mki_id[16];
+        char key_id[16];
+        g_snprintf (mki_id, 16, "mki%d", i + 1);
+        g_snprintf (key_id, 16, "srtp-key%d", i + 1);
+
+        if (gst_structure_get (s, mki_id, GST_TYPE_BUFFER, &mki,
+                key_id, GST_TYPE_BUFFER, &buf, NULL)) {
+          if (gst_buffer_get_size (mki) != mki_size) {
+            GST_WARNING_OBJECT (filter,
+                "MKIs need to all have the same size (first was %"
+                G_GSIZE_FORMAT ", current is %" G_GSIZE_FORMAT ").",
+                mki_size, gst_buffer_get_size (mki));
+            gst_buffer_unref (mki);
+            gst_buffer_unref (buf);
+            goto error;
+          }
+          key.mki = mki;
+          key.key = buf;
+          g_array_append_val (stream->keys, key);
+        } else {
+          break;
+        }
+      }
+    } else
+#endif
+    {
+      stream->key = buf;
+    }
   } else if (STREAM_HAS_CRYPTO (stream)) {
     goto error;
   }
@@ -603,6 +686,10 @@ init_session_stream (GstSrtpDec * filter, guint32 ssrc,
   srtp_policy_t policy;
   GstMapInfo map;
   guchar tmp[1];
+#ifdef HAVE_SRTP2
+  GstMapInfo *key_maps = NULL;
+  GstMapInfo *mki_maps = NULL;
+#endif
 
   memset (&policy, 0, sizeof (srtp_policy_t));
 
@@ -616,6 +703,31 @@ init_session_stream (GstSrtpDec * filter, guint32 ssrc,
   set_crypto_policy_cipher_auth (stream->rtcp_cipher, stream->rtcp_auth,
       &policy.rtcp);
 
+#ifdef HAVE_SRTP2
+  if (stream->keys) {
+    guint i;
+    srtp_master_key_t *keys;
+
+    keys = g_alloca (sizeof (srtp_master_key_t) * stream->keys->len);
+    policy.keys = g_alloca (sizeof (gpointer) * stream->keys->len);
+    key_maps = g_alloca (sizeof (GstMapInfo) * stream->keys->len);
+    mki_maps = g_alloca (sizeof (GstMapInfo) * stream->keys->len);
+
+    for (i = 0; i < stream->keys->len; i++) {
+      struct GstSrtpDecKey *key =
+          &g_array_index (stream->keys, struct GstSrtpDecKey, i);
+      policy.keys[i] = &keys[i];
+
+      gst_buffer_map (key->mki, &mki_maps[i], GST_MAP_READ);
+      gst_buffer_map (key->key, &key_maps[i], GST_MAP_READ);
+
+      policy.keys[i]->key = (guchar *) key_maps[i].data;
+      policy.keys[i]->mki_id = (guchar *) mki_maps[i].data;
+      policy.keys[i]->mki_size = mki_maps[i].size;
+    }
+    policy.num_master_keys = stream->keys->len;
+  } else
+#endif
   if (stream->key) {
     gst_buffer_map (stream->key, &map, GST_MAP_READ);
     policy.key = (guchar *) map.data;
@@ -639,6 +751,20 @@ init_session_stream (GstSrtpDec * filter, guint32 ssrc,
   if (stream->key)
     gst_buffer_unmap (stream->key, &map);
 
+#ifdef HAVE_SRTP2
+  if (key_maps) {
+    guint i;
+
+    for (i = 0; i < stream->keys->len; i++) {
+      struct GstSrtpDecKey *key = &g_array_index (stream->keys,
+          struct GstSrtpDecKey, i);
+      gst_buffer_unmap (key->mki, &mki_maps[i]);
+      gst_buffer_unmap (key->key, &key_maps[i]);
+    }
+
+  }
+#endif
+
   if (ret == srtp_err_status_ok) {
     srtp_err_status_t status;
 
@@ -650,7 +776,7 @@ init_session_stream (GstSrtpDec * filter, guint32 ssrc,
       /* Here, we just set the ROC, but we also need to set the initial
        * RTP sequence number later, otherwise libsrtp will not be able
        * to get the right packet index. */
-      filter->roc_changed = TRUE;
+      g_hash_table_add (filter->streams_roc_changed, GUINT_TO_POINTER (ssrc));
     }
 #endif
 
@@ -706,7 +832,69 @@ free_stream (GstSrtpDecSsrcStream * stream)
 {
   if (stream->key)
     gst_buffer_unref (stream->key);
+  if (stream->keys)
+    g_array_free (stream->keys, TRUE);
   g_slice_free (GstSrtpDecSsrcStream, stream);
+}
+
+static gboolean
+buffers_are_equal (GstBuffer * a, GstBuffer * b)
+{
+  GstMapInfo info;
+
+  if (a == b)
+    return TRUE;
+
+  if (a == NULL || b == NULL)
+    return FALSE;
+
+  if (gst_buffer_get_size (a) != gst_buffer_get_size (b))
+    return FALSE;
+
+  if (gst_buffer_map (a, &info, GST_MAP_READ)) {
+    gboolean equal;
+
+    equal = (gst_buffer_memcmp (b, 0, info.data, info.size) == 0);
+    gst_buffer_unmap (a, &info);
+
+    return equal;
+  } else {
+    return FALSE;
+  }
+}
+
+static gboolean
+keys_are_equal (GArray * a, GArray * b)
+{
+#ifdef HAVE_SRTP2
+  guint i;
+
+  if (a == b)
+    return TRUE;
+
+  if (a == NULL || b == NULL)
+    return FALSE;
+
+  if (a->len != b->len)
+    return FALSE;
+
+  for (i = 0; i < a->len; i++) {
+    struct GstSrtpDecKey *key_a = &g_array_index (a,
+        struct GstSrtpDecKey, i);
+    struct GstSrtpDecKey *key_b = &g_array_index (b,
+        struct GstSrtpDecKey, i);
+
+    if (!buffers_are_equal (key_a->mki, key_b->mki))
+      return FALSE;
+
+    if (!buffers_are_equal (key_a->key, key_b->key))
+      return FALSE;
+  }
+
+  return TRUE;
+#else
+  return FALSE;
+#endif
 }
 
 /* Create new stream from params in caps
@@ -730,22 +918,10 @@ update_session_stream_from_caps (GstSrtpDec * filter, guint32 ssrc,
       stream->rtcp_cipher == old_stream->rtcp_cipher &&
       stream->rtp_auth == old_stream->rtp_auth &&
       stream->rtcp_auth == old_stream->rtcp_auth &&
-      stream->key && old_stream->key &&
-      gst_buffer_get_size (stream->key) ==
-      gst_buffer_get_size (old_stream->key)) {
-    GstMapInfo info;
-
-    if (gst_buffer_map (old_stream->key, &info, GST_MAP_READ)) {
-      gboolean equal;
-
-      equal = (gst_buffer_memcmp (stream->key, 0, info.data, info.size) == 0);
-      gst_buffer_unmap (old_stream->key, &info);
-
-      if (equal) {
-        free_stream (stream);
-        return old_stream;
-      }
-    }
+      ((stream->keys && keys_are_equal (stream->keys, old_stream->keys)) ||
+          buffers_are_equal (stream->key, old_stream->key))) {
+    free_stream (stream);
+    return old_stream;
   }
 
   /* Remove existing stream, if any */
@@ -756,6 +932,7 @@ update_session_stream_from_caps (GstSrtpDec * filter, guint32 ssrc,
     err = init_session_stream (filter, ssrc, stream);
 
     if (err != srtp_err_status_ok) {
+      GST_WARNING_OBJECT (filter, "Failed to create the stream (err: %d)", err);
       if (stream->key)
         gst_buffer_unref (stream->key);
       g_slice_free (GstSrtpDecSsrcStream, stream);
@@ -835,7 +1012,6 @@ gst_srtp_dec_sink_setcaps (GstPad * pad, GstObject * parent,
   ps = gst_caps_get_structure (caps, 0);
 
   if (gst_structure_has_field_typed (ps, "ssrc", G_TYPE_UINT) &&
-      gst_structure_has_field_typed (ps, "roc", G_TYPE_UINT) &&
       gst_structure_has_field_typed (ps, "srtp-cipher", G_TYPE_STRING) &&
       gst_structure_has_field_typed (ps, "srtp-auth", G_TYPE_STRING) &&
       gst_structure_has_field_typed (ps, "srtcp-cipher", G_TYPE_STRING) &&
@@ -854,7 +1030,7 @@ gst_srtp_dec_sink_setcaps (GstPad * pad, GstObject * parent,
   caps = gst_caps_copy (caps);
   ps = gst_caps_get_structure (caps, 0);
   gst_structure_remove_fields (ps, "srtp-key", "srtp-cipher", "srtp-auth",
-      "srtcp-cipher", "srtcp-auth", NULL);
+      "srtcp-cipher", "srtcp-auth", "mki", NULL);
 
   if (is_rtcp)
     gst_structure_set_name (ps, "application/x-rtcp");
@@ -968,7 +1144,7 @@ gst_srtp_dec_sink_query (GstPad * pad, GstObject * parent, GstQuery * query,
           else
             gst_structure_set_name (ps, "application/x-rtp");
           gst_structure_remove_fields (ps, "srtp-key", "srtp-cipher",
-              "srtp-auth", "srtcp-cipher", "srtcp-auth", NULL);
+              "srtp-auth", "srtcp-cipher", "srtcp-auth", "mki", NULL);
         }
       }
 
@@ -1160,13 +1336,21 @@ unprotect:
 
   gst_srtp_init_event_reporter ();
 
-  if (is_rtcp)
+  if (is_rtcp) {
+#ifdef HAVE_SRTP2
+    GstSrtpDecSsrcStream *stream = find_stream_by_ssrc (filter, ssrc);
+
+    err = srtp_unprotect_rtcp_mki (filter->session, map.data, &size,
+        stream && stream->keys);
+#else
     err = srtp_unprotect_rtcp (filter->session, map.data, &size);
-  else {
+#endif
+  } else {
 #ifndef HAVE_SRTP2
     /* If ROC has changed, we know we need to set the initial RTP
      * sequence number too. */
-    if (filter->roc_changed) {
+    if (g_hash_table_contains (filter->streams_roc_changed,
+            GUINT_TO_POINTER (ssrc))) {
       srtp_stream_t stream;
 
       stream = srtp_get_stream (filter->session, htonl (ssrc));
@@ -1186,61 +1370,77 @@ unprotect:
         stream->rtp_rdbx.index |= seqnum;
       }
 
-      filter->roc_changed = FALSE;
+      g_hash_table_remove (filter->streams_roc_changed,
+          GUINT_TO_POINTER (ssrc));
     }
 #endif
+
+#ifdef HAVE_SRTP2
+    {
+      GstSrtpDecSsrcStream *stream = find_stream_by_ssrc (filter, ssrc);
+
+      err = srtp_unprotect_mki (filter->session, map.data, &size,
+          stream && stream->keys);
+    }
+#else
     err = srtp_unprotect (filter->session, map.data, &size);
+#endif
   }
 
-  GST_OBJECT_UNLOCK (filter);
+  /* Signal user depending on type of error */
+  switch (err) {
+    case srtp_err_status_ok:
+      /* success! */
+      break;
+    case srtp_err_status_replay_fail:
+      GST_DEBUG_OBJECT (filter,
+          "Dropping replayed packet, probably retransmission");
+      goto err;
+    case srtp_err_status_replay_old:
+      GST_DEBUG_OBJECT (filter,
+          "Dropping replayed old packet, probably retransmission");
+      goto err;
+    case srtp_err_status_key_expired:{
+      GstSrtpDecSsrcStream *stream;
 
-  if (err != srtp_err_status_ok) {
-    GST_WARNING_OBJECT (pad,
-        "Unable to unprotect buffer (unprotect failed code %d)", err);
+      /* Check we have an existing stream to rekey */
+      stream = find_stream_by_ssrc (filter, ssrc);
+      if (stream == NULL) {
+        GST_WARNING_OBJECT (filter, "Could not find matching stream, dropping");
+        goto err;
+      }
 
-    /* Signal user depending on type of error */
-    switch (err) {
-      case srtp_err_status_key_expired:
-        GST_OBJECT_LOCK (filter);
+      GST_OBJECT_UNLOCK (filter);
+      stream = request_key_with_signal (filter, ssrc, SIGNAL_HARD_LIMIT);
+      GST_OBJECT_LOCK (filter);
 
-        /* Update stream */
-        if (find_stream_by_ssrc (filter, ssrc)) {
-          GST_OBJECT_UNLOCK (filter);
-          if (request_key_with_signal (filter, ssrc, SIGNAL_HARD_LIMIT)) {
-            GST_OBJECT_LOCK (filter);
-            goto unprotect;
-          } else {
-            GST_WARNING_OBJECT (filter, "Hard limit reached, no new key, "
-                "dropping");
-          }
-        } else {
-          GST_WARNING_OBJECT (filter, "Could not find matching stream, "
-              "dropping");
-        }
-        break;
-      case srtp_err_status_auth_fail:
-        GST_WARNING_OBJECT (filter, "Error authentication packet, dropping");
-        break;
-      case srtp_err_status_cipher_fail:
-        GST_WARNING_OBJECT (filter, "Error while decrypting packet, dropping");
-        break;
-      default:
-        GST_WARNING_OBJECT (filter, "Other error, dropping");
-        break;
+      /* Check the key request created a new stream */
+      if (stream == NULL) {
+        GST_WARNING_OBJECT (filter, "Hard limit reached, no new key, dropping");
+        goto err;
+      }
+
+      goto unprotect;
     }
-
-    gst_buffer_unmap (buf, &map);
-
-    GST_OBJECT_LOCK (filter);
-    return FALSE;
+    case srtp_err_status_auth_fail:
+      GST_WARNING_OBJECT (filter, "Error authentication packet, dropping");
+      goto err;
+    case srtp_err_status_cipher_fail:
+      GST_WARNING_OBJECT (filter, "Error while decrypting packet, dropping");
+      goto err;
+    default:
+      GST_WARNING_OBJECT (pad,
+          "Unable to unprotect buffer (unprotect failed code %d)", err);
+      goto err;
   }
 
   gst_buffer_unmap (buf, &map);
-
   gst_buffer_set_size (buf, size);
-
-  GST_OBJECT_LOCK (filter);
   return TRUE;
+
+err:
+  gst_buffer_unmap (buf, &map);
+  return FALSE;
 }
 
 static GstFlowReturn
@@ -1329,6 +1529,12 @@ gst_srtp_dec_change_state (GstElement * element, GstStateChange transition)
     case GST_STATE_CHANGE_READY_TO_PAUSED:
       filter->streams = g_hash_table_new_full (g_direct_hash, g_direct_equal,
           NULL, (GDestroyNotify) free_stream);
+
+#ifndef HAVE_SRTP2
+      filter->streams_roc_changed =
+          g_hash_table_new (g_direct_hash, g_direct_equal);
+#endif
+
       filter->rtp_has_segment = FALSE;
       filter->rtcp_has_segment = FALSE;
       break;
@@ -1350,6 +1556,12 @@ gst_srtp_dec_change_state (GstElement * element, GstStateChange transition)
       gst_srtp_dec_clear_streams (filter);
       g_hash_table_unref (filter->streams);
       filter->streams = NULL;
+
+#ifndef HAVE_SRTP2
+      g_hash_table_unref (filter->streams_roc_changed);
+      filter->streams_roc_changed = NULL;
+#endif
+
       break;
     case GST_STATE_CHANGE_READY_TO_NULL:
       break;

@@ -45,18 +45,10 @@
 #ifndef __GST_HANDDETECT_H__
 #define __GST_HANDDETECT_H__
 
-#include <cv.h>
-
 #include <gst/opencv/gstopencvvideofilter.h>
 /* opencv */
-#include <opencv2/core/version.hpp>
-#ifdef HAVE_HIGHGUI_H
-#include <highgui.h>            // includes highGUI definitions
-#endif
-#ifdef HAVE_OPENCV2_HIGHGUI_HIGHGUI_C_H
-#include <opencv2/highgui/highgui_c.h>            // includes highGUI definitions
-#endif
-#include <opencv2/objdetect/objdetect.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/objdetect.hpp>
 
 G_BEGIN_DECLS
 /* #defines don't like whitespacey bits */
@@ -89,7 +81,7 @@ struct _GstHanddetect
   /* opencv
    * cvGray - image to gray colour
    */
-  IplImage *cvGray;
+  cv::Mat cvGray;
   cv::CascadeClassifier *cvCascade_fist;
   cv::CascadeClassifier *cvCascade_palm;
   cv::Rect *prev_r;

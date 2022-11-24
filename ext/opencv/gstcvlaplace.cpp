@@ -46,12 +46,11 @@
  *
  * Applies cvLaplace OpenCV function to the image.
  *
- * <refsect2>
- * <title>Example launch line</title>
+ * Example launch line
+ *
  * |[
  * gst-launch-1.0 videotestsrc ! cvlaplace ! videoconvert ! autovideosink
  * ]|
- * </refsect2>
  */
 
 #ifdef HAVE_CONFIG_H
@@ -59,7 +58,8 @@
 #endif
 
 #include "gstcvlaplace.h"
-#include <opencv2/imgproc/imgproc_c.h>
+#include <opencv2/imgproc.hpp>
+
 
 GST_DEBUG_CATEGORY_STATIC (gst_cv_laplace_debug);
 #define GST_CAT_DEFAULT gst_cv_laplace_debug
@@ -104,11 +104,11 @@ static void gst_cv_laplace_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec);
 
 static GstFlowReturn gst_cv_laplace_transform (GstOpencvVideoFilter * filter,
-    GstBuffer * buf, IplImage * img, GstBuffer * outbuf, IplImage * outimg);
+    GstBuffer * buf, cv::Mat img, GstBuffer * outbuf, cv::Mat outimg);
 
 static gboolean gst_cv_laplace_cv_set_caps (GstOpencvVideoFilter * trans,
-    gint in_width, gint in_height, gint in_depth, gint in_channels,
-    gint out_width, gint out_height, gint out_depth, gint out_channels);
+    gint in_width, gint in_height, int in_cv_type,
+    gint out_width, gint out_height, int out_cv_type);
 
 /* Clean up */
 static void
@@ -116,11 +116,9 @@ gst_cv_laplace_finalize (GObject * obj)
 {
   GstCvLaplace *filter = GST_CV_LAPLACE (obj);
 
-  if (filter->intermediary_img) {
-    cvReleaseImage (&filter->intermediary_img);
-    cvReleaseImage (&filter->cvGray);
-    cvReleaseImage (&filter->Laplace);
-  }
+  filter->intermediary_img.release ();
+  filter->cvGray.release ();
+  filter->Laplace.release ();
 
   G_OBJECT_CLASS (gst_cv_laplace_parent_class)->finalize (obj);
 }
@@ -146,19 +144,22 @@ gst_cv_laplace_class_init (GstCvLaplaceClass * klass)
   g_object_class_install_property (gobject_class, PROP_APERTURE_SIZE,
       g_param_spec_int ("aperture-size", "aperture size",
           "Size of the extended Laplace Kernel (1, 3, 5 or 7)", 1, 7,
-          DEFAULT_APERTURE_SIZE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+          DEFAULT_APERTURE_SIZE,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
   g_object_class_install_property (gobject_class, PROP_SCALE,
-      g_param_spec_double ("scale", "scale factor",
-          "Scale factor", 0.0, G_MAXDOUBLE,
-          DEFAULT_SCALE_FACTOR, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+      g_param_spec_double ("scale", "scale factor", "Scale factor", 0.0,
+          G_MAXDOUBLE, DEFAULT_SCALE_FACTOR,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
   g_object_class_install_property (gobject_class, PROP_SHIFT,
       g_param_spec_double ("shift", "Shift",
           "Value added to the scaled source array elements", 0.0, G_MAXDOUBLE,
-          DEFAULT_SHIFT, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+          DEFAULT_SHIFT,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
   g_object_class_install_property (gobject_class, PROP_MASK,
       g_param_spec_boolean ("mask", "Mask",
           "Sets whether the detected edges should be used as a mask on the original input or not",
-          DEFAULT_MASK, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+          DEFAULT_MASK,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
   gst_element_class_add_static_pad_template (element_class, &src_factory);
   gst_element_class_add_static_pad_template (element_class, &sink_factory);
@@ -184,21 +185,14 @@ gst_cv_laplace_init (GstCvLaplace * filter)
 
 static gboolean
 gst_cv_laplace_cv_set_caps (GstOpencvVideoFilter * trans, gint in_width,
-    gint in_height, gint in_depth, gint in_channels, gint out_width,
-    gint out_height, gint out_depth, gint out_channels)
+    gint in_height, int in_cv_type, gint out_width,
+    gint out_height, int out_cv_type)
 {
   GstCvLaplace *filter = GST_CV_LAPLACE (trans);
 
-  if (filter->intermediary_img != NULL) {
-      cvReleaseImage (&filter->intermediary_img);
-      cvReleaseImage (&filter->cvGray);
-      cvReleaseImage (&filter->Laplace);
-  }
-
-  filter->intermediary_img =
-      cvCreateImage (cvSize (out_width, out_height), IPL_DEPTH_16S, 1);
-  filter->cvGray = cvCreateImage (cvSize (in_width, in_height), IPL_DEPTH_8U, 1);
-  filter->Laplace = cvCreateImage (cvSize (in_width, in_height), IPL_DEPTH_8U, 1);
+  filter->intermediary_img.create (cv::Size (out_width, out_height), CV_16SC1);
+  filter->cvGray.create (cv::Size (in_width, in_height), CV_8UC1);
+  filter->Laplace.create (cv::Size (in_width, in_height), CV_8UC1);
 
   return TRUE;
 }
@@ -261,22 +255,21 @@ gst_cv_laplace_get_property (GObject * object, guint prop_id,
 
 static GstFlowReturn
 gst_cv_laplace_transform (GstOpencvVideoFilter * base, GstBuffer * buf,
-    IplImage * img, GstBuffer * outbuf, IplImage * outimg)
+    cv::Mat img, GstBuffer * outbuf, cv::Mat outimg)
 {
   GstCvLaplace *filter = GST_CV_LAPLACE (base);
 
-  g_assert (filter->intermediary_img);
+  cv::cvtColor (img, filter->cvGray, cv::COLOR_RGB2GRAY);
+  cv::Laplacian (filter->cvGray, filter->intermediary_img,
+      filter->intermediary_img.depth (), filter->aperture_size);
+  filter->intermediary_img.convertTo (filter->Laplace, filter->Laplace.type (),
+      filter->scale, filter->shift);
 
-  cvCvtColor (img, filter->cvGray, CV_RGB2GRAY);
-  cvLaplace (filter->cvGray, filter->intermediary_img, filter->aperture_size);
-  cvConvertScale (filter->intermediary_img, filter->Laplace, filter->scale,
-      filter->shift);
-
-  cvZero (outimg);
+  outimg.setTo (cv::Scalar::all (0));
   if (filter->mask) {
-    cvCopy (img, outimg, filter->Laplace);
+    img.copyTo (outimg, filter->Laplace);
   } else {
-    cvCvtColor (filter->Laplace, outimg, CV_GRAY2RGB);
+    cv::cvtColor (filter->Laplace, outimg, cv::COLOR_GRAY2RGB);
   }
 
   return GST_FLOW_OK;

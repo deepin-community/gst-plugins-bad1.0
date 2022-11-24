@@ -7,21 +7,20 @@ bluez_sources = [
   'gstavrcputil.c',
 ]
 
-bluez_dep = dependency('bluez', version : '>= 5.0', required : false)
-gio_unix_dep = dependency('gio-unix-2.0', version : glib_req, required : false)
+if host_system == 'windows'
+  subdir_done()
+endif
+
+bluez_dep = dependency('bluez', version : '>= 5.0', required : get_option('bluez'))
+gio_unix_dep = dependency('gio-unix-2.0', version : glib_req,
+                          fallback: ['glib', 'libgiounix_dep'],
+                          required : get_option('bluez'))
 
 if bluez_dep.found() and gio_unix_dep.found()
-  # FIXME: do we really need the meson.current_build_dir() here? Shouldn't
-  # the custom command be executed with the current build directoy as working
-  # directory? Without this, bluez.[ch] are created in the top-level build dir!
-  bluez_ch = custom_target('bluez_ch',
-    output : [ 'bluez.h', 'bluez.c' ] ,
-    input : 'org.bluez.xml',
-    command : [ find_program('gdbus-codegen'),
-                '--c-namespace=Bluez',
-                '--generate-c-code=' + meson.current_build_dir() + '/bluez',
-                '--interface-prefix=org.bluez',
-                '@INPUT@' ])
+  bluez_ch = gnome.gdbus_codegen('bluez',
+      sources : 'org.bluez.xml',
+      interface_prefix : 'org.bluez',
+      namespace : 'Bluez')
 
   gstbluez = library('gstbluez',
     bluez_sources, bluez_ch,
@@ -31,4 +30,6 @@ if bluez_dep.found() and gio_unix_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstbluez, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstbluez]
 endif

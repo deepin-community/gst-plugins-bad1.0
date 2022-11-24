@@ -65,11 +65,17 @@ struct _GstKMSSink {
   gboolean can_scale;
 
   gboolean modesetting_enabled;
+  gboolean restore_crtc;
+  GstStructure *connector_props;
+  GstStructure *plane_props;
 
   GstVideoInfo vinfo;
   GstCaps *allowed_caps;
   GstBufferPool *pool;
   GstAllocator *allocator;
+  GstVideoInfo last_vinfo;
+  guint last_width;
+  guint last_height;
   GstBuffer *last_buffer;
   GstMemory *tmp_kmsmem;
 
@@ -77,7 +83,7 @@ struct _GstKMSSink {
   gchar *bus_id;
 
   guint32 mm_width, mm_height;
-
+  gpointer saved_crtc;
   GstPoll *poll;
   GstPollFD pollfd;
 

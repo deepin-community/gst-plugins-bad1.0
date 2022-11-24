@@ -48,8 +48,9 @@
  * @title: katedec
  * @see_also: oggdemux
  *
- * This element decodes Kate streams
- * <ulink url="http://libkate.googlecode.com/">Kate</ulink> is a free codec
+ * This element decodes Kate streams.
+ *
+ * [Kate](http://libkate.googlecode.com/) is a free codec
  * for text based data, such as subtitles. Any number of kate streams can be
  * embedded in an Ogg stream.
  *
@@ -57,7 +58,7 @@
  *
  * ## Example pipeline
  *
- * This explicitely decodes a Kate stream:
+ * This explicitly decodes a Kate stream:
  * |[
  * gst-launch-1.0 filesrc location=test.ogg ! oggdemux ! katedec ! fakesink silent=TRUE
  * ]|

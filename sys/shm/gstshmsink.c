@@ -352,6 +352,7 @@ gst_shm_sink_init (GstShmSink * self)
 {
   g_cond_init (&self->cond);
   self->size = DEFAULT_SIZE;
+  self->unlock = FALSE;
   self->wait_for_connection = DEFAULT_WAIT_FOR_CONNECTION;
   self->perms = DEFAULT_PERMS;
 
@@ -417,12 +418,12 @@ gst_shm_sink_class_init (GstShmSinkClass * klass)
           G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   signals[SIGNAL_CLIENT_CONNECTED] = g_signal_new ("client-connected",
-      GST_TYPE_SHM_SINK, G_SIGNAL_RUN_LAST, 0, NULL, NULL,
-      g_cclosure_marshal_VOID__INT, G_TYPE_NONE, 1, G_TYPE_INT);
+      GST_TYPE_SHM_SINK, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+      G_TYPE_NONE, 1, G_TYPE_INT);
 
   signals[SIGNAL_CLIENT_DISCONNECTED] = g_signal_new ("client-disconnected",
-      GST_TYPE_SHM_SINK, G_SIGNAL_RUN_LAST, 0, NULL, NULL,
-      g_cclosure_marshal_VOID__INT, G_TYPE_NONE, 1, G_TYPE_INT);
+      GST_TYPE_SHM_SINK, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+      G_TYPE_NONE, 1, G_TYPE_INT);
 
   gst_element_class_add_static_pad_template (gstelement_class, &sinktemplate);
 
@@ -670,6 +671,11 @@ gst_shm_sink_render (GstBaseSink * bsink, GstBuffer * buf)
   gsize written_bytes;
 
   GST_OBJECT_LOCK (self);
+  if (self->unlock) {
+    GST_OBJECT_UNLOCK (self);
+    return GST_FLOW_FLUSHING;
+  }
+
   while (self->wait_for_connection && !self->clients) {
     g_cond_wait (&self->cond, GST_OBJECT_GET_LOCK (self));
     if (self->unlock) {

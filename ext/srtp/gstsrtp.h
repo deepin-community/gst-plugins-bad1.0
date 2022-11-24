@@ -60,18 +60,25 @@
 #else
 #  include <srtp/srtp.h>
 #  include <srtp/srtp_priv.h>
+#  include <srtp/crypto_types.h>
 
 #  define srtp_crypto_policy_t crypto_policy_t
 #  define SRTP_AES_ICM_128 AES_ICM
 #  define SRTP_AES_ICM_256 AES_ICM
+#  define SRTP_AES_GCM_128 AES_128_GCM
+#  define SRTP_AES_GCM_256 AES_256_GCM
 #  define SRTP_NULL_CIPHER NULL_CIPHER
 #  define SRTP_AES_ICM_128_KEY_LEN_WSALT 30
 #  define SRTP_AES_ICM_256_KEY_LEN_WSALT 46
+#  define SRTP_AES_GCM_128_KEY_LEN_WSALT AES_128_GCM_KEYSIZE_WSALT
+#  define SRTP_AES_GCM_256_KEY_LEN_WSALT AES_256_GCM_KEYSIZE_WSALT
 #  define SRTP_HMAC_SHA1 HMAC_SHA1
 #  define SRTP_NULL_AUTH NULL_AUTH
 #  define srtp_err_status_t err_status_t
 #  define srtp_err_status_ok err_status_ok
 #  define srtp_err_status_bad_param err_status_bad_param
+#  define srtp_err_status_replay_fail err_status_replay_fail
+#  define srtp_err_status_replay_old err_status_replay_old
 #  define srtp_err_status_key_expired err_status_key_expired
 #  define srtp_err_status_auth_fail err_status_auth_fail
 #  define srtp_err_status_cipher_fail err_status_cipher_fail

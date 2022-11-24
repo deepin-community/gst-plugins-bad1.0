@@ -22,8 +22,8 @@
 
 
 /**
- * SECTION:element-uvch264-src
- * @title: uvch264-src
+ * SECTION:element-uvch264src
+ * @title: uvch264src
  *
  * A camera bin src element that wraps v4l2src and implements UVC H264
  * Extension Units (XU) to control the H264 encoder in the camera
@@ -34,39 +34,6 @@
 #endif
 
 #include "gstuvch264_src.h"
-
-#include <gst/video/video.h>
-#include <linux/uvcvideo.h>
-#include <linux/usb/video.h>
-#include <sys/ioctl.h>
-#include <string.h>
-
-#include "gstuvch264_src.h"
-#include <gudev/gudev.h>
-#include <libusb.h>
-#ifndef LIBUSB_CLASS_VIDEO
-#define LIBUSB_CLASS_VIDEO 0x0e
-#endif
-
-typedef struct
-{
-  int8_t bLength;
-  int8_t bDescriptorType;
-  int8_t bDescriptorSubType;
-  int8_t bUnitID;
-  uint8_t guidExtensionCode[16];
-} __attribute__ ((__packed__)) xu_descriptor;
-
-#define GUID_FORMAT "02X%02X%02X%02X-%02X%02X%02X%02X-"\
-  "%02X%02X%02X%02X-%02X%02X%02X%02X"
-#define GUID_ARGS(guid) guid[0], guid[1], guid[2], guid[3],       \
-    guid[4], guid[5], guid[6], guid[7],                           \
-    guid[8], guid[9], guid[10], guid[11],                         \
-    guid[12], guid[13], guid[14], guid[15]
-
-#define USB_VIDEO_CONTROL		1
-#define USB_VIDEO_CONTROL_INTERFACE	0x24
-#define USB_VIDEO_CONTROL_XU_TYPE	0x06
 
 enum
 {
@@ -174,6 +141,11 @@ G_DEFINE_TYPE (GstUvcH264Src, gst_uvc_h264_src, GST_TYPE_BASE_CAMERA_SRC);
   "alignment = (string) au, "                                           \
   "profile = (string) { high, main, baseline, constrained-baseline }"
 
+/**
+ * GstUvcH264Src!vfsrc:
+ *
+ * The video src pad template
+ */
 static GstStaticPadTemplate vfsrc_template =
 GST_STATIC_PAD_TEMPLATE (GST_BASE_CAMERA_SRC_VIEWFINDER_PAD_NAME,
     GST_PAD_SRC,
@@ -460,9 +432,10 @@ gst_uvc_h264_src_class_init (GstUvcH264SrcClass * klass)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
           GST_PARAM_MUTABLE_PLAYING));
   g_object_class_install_property (gobject_class, PROP_LTR_ENCODER_CONTROL,
-      g_param_spec_int ("ltr-encoder-control", "LTR frames controled by device",
-          "Number of LTR frames the device can control (dynamic control)",
-          0, G_MAXUINT8, DEFAULT_LTR_ENCODER_CONTROL,
+      g_param_spec_int ("ltr-encoder-control",
+          "LTR frames controlled by device",
+          "Number of LTR frames the device can control (dynamic control)", 0,
+          G_MAXUINT8, DEFAULT_LTR_ENCODER_CONTROL,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
           GST_PARAM_MUTABLE_PLAYING));
 
@@ -486,6 +459,11 @@ gst_uvc_h264_src_class_init (GstUvcH264SrcClass * klass)
       G_CALLBACK (gst_uvc_h264_src_get_int_setting), NULL, NULL, NULL,
       G_TYPE_BOOLEAN, 4, G_TYPE_STRING, G_TYPE_POINTER, G_TYPE_POINTER,
       G_TYPE_POINTER, 0);
+
+  gst_type_mark_as_plugin_api (UVC_H264_ENTROPY_TYPE, 0);
+  gst_type_mark_as_plugin_api (UVC_H264_RATECONTROL_TYPE, 0);
+  gst_type_mark_as_plugin_api (UVC_H264_SLICEMODE_TYPE, 0);
+  gst_type_mark_as_plugin_api (UVC_H264_USAGETYPE_TYPE, 0);
 }
 
 static void
@@ -513,7 +491,8 @@ gst_uvc_h264_src_init (GstUvcH264Src * self)
       gst_uvc_h264_src_buffer_probe, self, NULL);
   gst_pad_add_probe (self->vfsrc, GST_PAD_PROBE_TYPE_EVENT_UPSTREAM,
       gst_uvc_h264_src_event_probe, self, NULL);
-  gst_pad_add_probe (self->vidsrc, GST_PAD_PROBE_TYPE_EVENT_UPSTREAM,
+  gst_pad_add_probe (self->vidsrc,
+      GST_PAD_PROBE_TYPE_EVENT_UPSTREAM | GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
       gst_uvc_h264_src_event_probe, self, NULL);
 
   self->srcpad_event_func = GST_PAD_EVENTFUNC (self->vfsrc);
@@ -1563,6 +1542,14 @@ gst_uvc_h264_src_event_probe (GstPad * pad, GstPadProbeInfo * info,
   GstEvent *event = info->data;
 
   switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_SEGMENT:
+      if (pad == self->vidsrc) {
+        const GstSegment *s;
+
+        gst_event_parse_segment (event, &s);
+        gst_segment_copy_into (s, &self->segment);
+      }
+      break;
     case GST_EVENT_EOS:
       ret = self->reconfiguring ? GST_PAD_PROBE_DROP : GST_PAD_PROBE_OK;
       break;
@@ -1783,100 +1770,6 @@ gst_uvc_h264_src_event (GstPad * pad, GstObject * parent, GstEvent * event)
       break;
   }
   return self->srcpad_event_func (pad, parent, event);
-}
-
-static guint8
-xu_get_id (GstUvcH264Src * self)
-{
-  static const __u8 guid[16] = GUID_UVCX_H264_XU;
-  GUdevClient *client;
-  GUdevDevice *udevice;
-  GUdevDevice *parent;
-  guint64 busnum;
-  guint64 devnum;
-  libusb_device **device_list = NULL;
-  libusb_device *device = NULL;
-  ssize_t cnt;
-  int i, j, k;
-
-
-  if (self->usb_ctx == NULL)
-    libusb_init (&self->usb_ctx);
-
-  client = g_udev_client_new (NULL);
-  if (client) {
-    udevice = g_udev_client_query_by_device_file (client, self->device);
-    if (udevice) {
-      parent = g_udev_device_get_parent_with_subsystem (udevice, "usb",
-          "usb_device");
-      if (parent) {
-        busnum = g_udev_device_get_sysfs_attr_as_uint64 (parent, "busnum");
-        devnum = g_udev_device_get_sysfs_attr_as_uint64 (parent, "devnum");
-
-        cnt = libusb_get_device_list (self->usb_ctx, &device_list);
-        for (i = 0; i < cnt; i++) {
-          if (busnum == libusb_get_bus_number (device_list[i]) &&
-              devnum == libusb_get_device_address (device_list[i])) {
-            device = libusb_ref_device (device_list[i]);
-            break;
-          }
-        }
-        libusb_free_device_list (device_list, 1);
-        g_object_unref (parent);
-      }
-      g_object_unref (udevice);
-    }
-    g_object_unref (client);
-  }
-
-  if (device) {
-    struct libusb_device_descriptor desc;
-
-    if (libusb_get_device_descriptor (device, &desc) == 0) {
-      for (i = 0; i < desc.bNumConfigurations; ++i) {
-        struct libusb_config_descriptor *config = NULL;
-
-        if (libusb_get_config_descriptor (device, i, &config) == 0) {
-          for (j = 0; j < config->bNumInterfaces; j++) {
-            for (k = 0; k < config->interface[j].num_altsetting; k++) {
-              const struct libusb_interface_descriptor *interface;
-              const guint8 *ptr = NULL;
-
-              interface = &config->interface[j].altsetting[k];
-              if (interface->bInterfaceClass != LIBUSB_CLASS_VIDEO ||
-                  interface->bInterfaceSubClass != USB_VIDEO_CONTROL)
-                continue;
-              ptr = interface->extra;
-              while (ptr - interface->extra +
-                  sizeof (xu_descriptor) < interface->extra_length) {
-                xu_descriptor *desc = (xu_descriptor *) ptr;
-
-                GST_DEBUG_OBJECT (self, "Found VideoControl interface with "
-                    "unit id %d : %" GUID_FORMAT, desc->bUnitID,
-                    GUID_ARGS (desc->guidExtensionCode));
-                if (desc->bDescriptorType == USB_VIDEO_CONTROL_INTERFACE &&
-                    desc->bDescriptorSubType == USB_VIDEO_CONTROL_XU_TYPE &&
-                    memcmp (desc->guidExtensionCode, guid, 16) == 0) {
-                  guint8 unit_id = desc->bUnitID;
-
-                  GST_DEBUG_OBJECT (self, "Found H264 XU unit : %d", unit_id);
-
-                  libusb_free_config_descriptor (config);
-                  libusb_unref_device (device);
-                  return unit_id;
-                }
-                ptr += desc->bLength;
-              }
-            }
-          }
-          libusb_free_config_descriptor (config);
-        }
-      }
-    }
-    libusb_unref_device (device);
-  }
-
-  return 0;
 }
 
 static gboolean
@@ -2521,7 +2414,8 @@ ensure_v4l2src (GstUvcH264Src * self)
 
   /* Set/Update the fd and unit id after we go to READY */
   g_object_get (self->v4l2_src, "device-fd", &self->v4l2_fd, NULL);
-  self->h264_unit_id = xu_get_id (self);
+  self->h264_unit_id =
+      xu_get_id (GST_OBJECT (self), self->device, &self->usb_ctx);
 
   if (self->h264_unit_id == 0) {
     GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,

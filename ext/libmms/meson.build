@@ -1,4 +1,4 @@
-mms_dep = dependency('libmms', version : '>= 0.4', required : false)
+mms_dep = dependency('libmms', version : '>= 0.4', required : get_option('libmms'))
 
 if mms_dep.found()
   gstmms = library('gstmms',
@@ -10,4 +10,6 @@ if mms_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstmms, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstmms]
 endif

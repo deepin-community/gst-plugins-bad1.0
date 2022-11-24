@@ -33,6 +33,27 @@
 
 #include "msdk-enums.h"
 
+/*========= MSDK Decoder Enums =========================*/
+GType
+gst_msdkdec_output_order_get_type (void)
+{
+  static GType type = 0;
+
+  static const GEnumValue values[] = {
+    {GST_MSDKDEC_OUTPUT_ORDER_DISPLAY, "Output frames in Display order",
+        "display"},
+    {GST_MSDKDEC_OUTPUT_ORDER_DECODE, "Output frames in Decoded order",
+        "decoded"},
+    {0, NULL, NULL}
+  };
+
+  if (!type) {
+    type = g_enum_register_static ("GstMsdkDecOutputOrder", values);
+  }
+  return type;
+}
+
+/*========= MSDK Encoder Enums =========================*/
 GType
 gst_msdkenc_rate_control_get_type (void)
 {
@@ -151,6 +172,178 @@ gst_msdkenc_adaptive_b_get_type (void)
 
   if (!type) {
     type = g_enum_register_static ("GstMsdkEncAdaptiveB", values);
+  }
+  return type;
+}
+
+GType
+gst_msdkenc_tune_mode_get_type (void)
+{
+  static GType type = 0;
+
+  static const GEnumValue values[] = {
+    {MFX_CODINGOPTION_UNKNOWN, "Auto ", "auto"},
+    {MFX_CODINGOPTION_OFF, "None ", "none"},
+    {MFX_CODINGOPTION_ON, "Low power mode ", "low-power"},
+    {0, NULL, NULL}
+  };
+
+  if (!type) {
+    type = g_enum_register_static ("GstMsdkEncTuneMode", values);
+  }
+
+  return type;
+}
+
+/*========= MSDK VPP Enums =========================*/
+
+#ifndef GST_REMOVE_DEPRECATED
+GType
+gst_msdkvpp_rotation_get_type (void)
+{
+  static GType type = 0;
+
+  static const GEnumValue values[] = {
+    {MFX_ANGLE_0, "Unrotated mode", "0"},
+    {MFX_ANGLE_90, "Rotated by 90°", "90"},
+    {MFX_ANGLE_180, "Rotated by 180°", "180"},
+    {MFX_ANGLE_270, "Rotated by 270°", "270"},
+    {0, NULL, NULL}
+  };
+
+  if (!type) {
+    type = g_enum_register_static ("GstMsdkVPPRotation", values);
+  }
+  return type;
+}
+#endif
+
+GType
+gst_msdkvpp_deinterlace_mode_get_type (void)
+{
+  static GType type = 0;
+
+  static const GEnumValue values[] = {
+    {GST_MSDKVPP_DEINTERLACE_MODE_AUTO,
+        "Auto detection", "auto"},
+    {GST_MSDKVPP_DEINTERLACE_MODE_INTERLACED,
+        "Force deinterlacing", "interlaced"},
+    {GST_MSDKVPP_DEINTERLACE_MODE_DISABLED,
+        "Never deinterlace", "disabled"},
+    {0, NULL, NULL},
+  };
+
+  if (!type) {
+    type = g_enum_register_static ("GstMsdkVPPDeinterlaceMode", values);
+  }
+  return type;
+}
+
+GType
+gst_msdkvpp_deinterlace_method_get_type (void)
+{
+  static GType type = 0;
+
+  static const GEnumValue values[] = {
+    {_MFX_DEINTERLACE_METHOD_NONE,
+        "Disable deinterlacing", "none"},
+    {MFX_DEINTERLACING_BOB, "Bob deinterlacing", "bob"},
+    {MFX_DEINTERLACING_ADVANCED, "Advanced deinterlacing (Motion adaptive)",
+        "advanced"},
+#if 0
+    {MFX_DEINTERLACING_AUTO_DOUBLE,
+          "Auto mode with deinterlacing double framerate output",
+        "auto-double"},
+    {MFX_DEINTERLACING_AUTO_SINGLE,
+          "Auto mode with deinterlacing single framerate output",
+        "auto-single"},
+    {MFX_DEINTERLACING_FULL_FR_OUT,
+        "Deinterlace only mode with full framerate output", "full-fr"},
+    {MFX_DEINTERLACING_HALF_FR_OUT,
+        "Deinterlace only Mode with half framerate output", "half-fr"},
+    {MFX_DEINTERLACING_24FPS_OUT, "24 fps fixed output mode", "24-fps"},
+    {MFX_DEINTERLACING_FIXED_TELECINE_PATTERN,
+        "Fixed telecine pattern removal mode", "fixed-telecine-removal"},
+    {MFX_DEINTERLACING_30FPS_OUT, "30 fps fixed output mode", "30-fps"},
+    {MFX_DEINTERLACING_DETECT_INTERLACE, "Only interlace detection",
+        "only-detect"},
+#endif
+    {MFX_DEINTERLACING_ADVANCED_NOREF,
+          "Advanced deinterlacing mode without using of reference frames",
+        "advanced-no-ref"},
+    {MFX_DEINTERLACING_ADVANCED_SCD,
+          "Advanced deinterlacing mode with scene change detection",
+        "advanced-scd"},
+    {MFX_DEINTERLACING_FIELD_WEAVING, "Field weaving", "field-weave"},
+    {0, NULL, NULL},
+  };
+
+  if (!type) {
+    type = g_enum_register_static ("GstMsdkVPPDeinterlaceMethod", values);
+  }
+  return type;
+}
+
+#ifndef GST_REMOVE_DEPRECATED
+GType
+gst_msdkvpp_mirroring_get_type (void)
+{
+  static GType type = 0;
+
+  static const GEnumValue values[] = {
+    {MFX_MIRRORING_DISABLED, "Disable mirroring", "disable"},
+    {MFX_MIRRORING_HORIZONTAL, "Horizontal Mirroring", "horizontal"},
+    {MFX_MIRRORING_VERTICAL, "Vertical Mirroring", "vertical"},
+    {0, NULL, NULL}
+  };
+
+  if (!type) {
+    type = g_enum_register_static ("GstMsdkVPPMirroring", values);
+  }
+  return type;
+}
+#endif
+
+GType
+gst_msdkvpp_scaling_mode_get_type (void)
+{
+  static GType type = 0;
+
+  static const GEnumValue values[] = {
+    {MFX_SCALING_MODE_DEFAULT, "Default Scaling", "disable"},
+    {MFX_SCALING_MODE_LOWPOWER, "Lowpower Scaling", "lowpower"},
+    {MFX_SCALING_MODE_QUALITY, "High Quality Scaling", "quality"},
+    {0, NULL, NULL}
+  };
+
+  if (!type) {
+    type = g_enum_register_static ("GstMsdkVPPScalingMode", values);
+  }
+  return type;
+}
+
+GType
+gst_msdkvpp_frc_algorithm_get_type (void)
+{
+  static GType type = 0;
+
+  static const GEnumValue values[] = {
+    {_MFX_FRC_ALGORITHM_NONE, "No FrameRate Control algorithm", "none"},
+    {MFX_FRCALGM_PRESERVE_TIMESTAMP,
+        "Frame dropping/repetition, Preserve timestamp", "preserve-ts"},
+    {MFX_FRCALGM_DISTRIBUTED_TIMESTAMP,
+        "Frame dropping/repetition, Distribute timestamp", "distribute-ts"},
+    {MFX_FRCALGM_FRAME_INTERPOLATION, "Frame interpolation", "interpolate"},
+    {MFX_FRCALGM_FRAME_INTERPOLATION | MFX_FRCALGM_PRESERVE_TIMESTAMP,
+        "Frame interpolation, Preserve timestamp", "interpolate-preserve-ts"},
+    {MFX_FRCALGM_FRAME_INTERPOLATION | MFX_FRCALGM_DISTRIBUTED_TIMESTAMP,
+          "Frame interpolation, Distribute timestamp",
+        "interpolate-distribute-ts"},
+    {0, NULL, NULL}
+  };
+
+  if (!type) {
+    type = g_enum_register_static ("GstMsdkVPPFrcAlgorithm", values);
   }
   return type;
 }

@@ -60,6 +60,7 @@ struct _GstD3DVideoSink
   GstVideoRectangle  render_rect;
 
   GRecMutex    lock;
+  GThread *internal_window_thread;
 
   /* Properties */
   gboolean           force_aspect_ratio;
@@ -73,19 +74,29 @@ struct _GstD3DVideoSinkClass
   GstVideoSinkClass parent_class;
   GstD3DDataClass   d3d;
   GRecMutex   lock;
+  /* this count is incremented each time the sink is destroyed, so that
+   * old queue events can be ignored */
+  guint create_count;
 };
 
-#if 1
-# define LOCK_SINK(sink)          g_rec_mutex_lock(&sink->lock);
-# define UNLOCK_SINK(sink)        g_rec_mutex_unlock(&sink->lock);
-# define LOCK_CLASS(obj, klass)   g_rec_mutex_lock(&klass->lock);
-# define UNLOCK_CLASS(obj, klass) g_rec_mutex_unlock(&klass->lock);
-#else
-# define LOCK_SINK(sink)          GST_LOG_OBJECT(sink, "SINK   LOCK"); g_rec_mutex_lock(&sink->lock); GST_LOG_OBJECT(sink, "SINK LOCKED");
-# define UNLOCK_SINK(sink)        g_rec_mutex_unlock(&sink->lock); GST_LOG_OBJECT(sink, "SINK UNLOCKED");
-# define LOCK_CLASS(obj, klass)   GST_LOG_OBJECT(obj, "CLASS   LOCK"); g_rec_mutex_lock(&klass->lock); GST_LOG_OBJECT(obj, "CLASS LOCKED");
-# define UNLOCK_CLASS(obj, klass) g_rec_mutex_unlock(&klass->lock); GST_LOG_OBJECT(obj, "CLASS UNLOCKED");
-#endif
+#define LOCK_SINK(sink) G_STMT_START { \
+    GST_TRACE_OBJECT(sink, "Locking sink from thread %p", g_thread_self()); \
+    g_rec_mutex_lock(&sink->lock); \
+    GST_TRACE_OBJECT(sink, "Locked sink from thread %p", g_thread_self()); \
+} G_STMT_END
+#define UNLOCK_SINK(sink) G_STMT_START { \
+  GST_TRACE_OBJECT(sink, "Unlocking sink from thread %p", g_thread_self()); \
+  g_rec_mutex_unlock(&sink->lock); \
+} G_STMT_END
+#define LOCK_CLASS(obj, klass) G_STMT_START { \
+    GST_TRACE_OBJECT(obj, "Locking class from thread %p", g_thread_self()); \
+    g_rec_mutex_lock(&klass->lock); \
+    GST_TRACE_OBJECT(obj, "Locked class from thread %p", g_thread_self()); \
+} G_STMT_END
+#define UNLOCK_CLASS(obj, klass) G_STMT_START { \
+  GST_TRACE_OBJECT(obj, "Unlocking class from thread %p", g_thread_self()); \
+  g_rec_mutex_unlock(&klass->lock); \
+} G_STMT_END
 
 GType    gst_d3dvideosink_get_type (void);
 

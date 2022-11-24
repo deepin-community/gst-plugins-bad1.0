@@ -26,6 +26,9 @@
  * #GstPcapParse:src-port and #GstPcapParse:dst-port to restrict which packets
  * should be included.
  *
+ * The supported data format is the classical
+ * [libpcap file format](https://wiki.wireshark.org/Development/LibpcapFileFormat)
+ *
  * ## Example pipelines
  * |[
  * gst-launch-1.0 filesrc location=h264crasher.pcap ! pcapparse ! rtph264depay
@@ -321,6 +324,7 @@ gst_pcap_parse_reset (GstPcapParse * self)
   self->cur_ts = GST_CLOCK_TIME_NONE;
   self->base_ts = GST_CLOCK_TIME_NONE;
   self->newsegment_sent = FALSE;
+  self->first_packet = TRUE;
 
   gst_adapter_clear (self->adapter);
 }
@@ -362,12 +366,15 @@ gst_pcap_parse_scan_frame (GstPcapParse * self,
   guint16 eth_type;
   guint8 b;
   guint8 ip_header_size;
+  guint8 flags;
+  guint16 fragment_offset;
   guint8 ip_protocol;
   guint32 ip_src_addr;
   guint32 ip_dst_addr;
   guint16 src_port;
   guint16 dst_port;
   guint16 len;
+  guint16 ip_packet_len;
 
   switch (self->linktype) {
     case LINKTYPE_ETHER:
@@ -415,12 +422,22 @@ gst_pcap_parse_scan_frame (GstPcapParse * self,
   }
 
   b = *buf_ip;
+
+  /* Check that the packet is IPv4 */
   if (((b >> 4) & 0x0f) != 4)
     return FALSE;
 
   ip_header_size = (b & 0x0f) * 4;
   if (buf_ip + ip_header_size > buf + buf_size)
     return FALSE;
+
+  flags = buf_ip[6] >> 5;
+  fragment_offset =
+      (GUINT16_FROM_BE (*((guint16 *) (buf_ip + 6))) & 0x1fff) * 8;
+  if (flags & 0x1 || fragment_offset > 0) {
+    GST_ERROR_OBJECT (self, "Fragmented packets are not supported");
+    return FALSE;
+  }
 
   ip_protocol = *(buf_ip + 9);
   GST_LOG_OBJECT (self, "ip proto %d", (gint) ip_protocol);
@@ -432,6 +449,7 @@ gst_pcap_parse_scan_frame (GstPcapParse * self,
   ip_src_addr = *((guint32 *) (buf_ip + 12));
   ip_dst_addr = *((guint32 *) (buf_ip + 16));
   buf_proto = buf_ip + ip_header_size;
+  ip_packet_len = GUINT16_FROM_BE (*(guint16 *) (buf_ip + 2));
 
   /* ok for tcp and udp */
   src_port = GUINT16_FROM_BE (*((guint16 *) (buf_proto + 0)));
@@ -454,7 +472,7 @@ gst_pcap_parse_scan_frame (GstPcapParse * self,
 
     /* all remaining data following tcp header is payload */
     *payload = buf_proto + len;
-    *payload_size = self->cur_packet_size - (buf_proto - buf) - len;
+    *payload_size = ip_packet_len - ip_header_size - len;
   }
 
   /* but still filter as configured */
@@ -490,6 +508,7 @@ gst_pcap_parse_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
 
     if (self->initialized) {
       if (self->cur_packet_size >= 0) {
+        /* Parse the Packet Data */
         if (avail < self->cur_packet_size)
           break;
 
@@ -518,6 +537,15 @@ gst_pcap_parse_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
             } else {
               out_buf = gst_buffer_new ();
             }
+
+            /* only first packet should have DISCONT flag */
+            if (G_LIKELY (!self->first_packet)) {
+              GST_BUFFER_FLAG_UNSET (out_buf, GST_BUFFER_FLAG_DISCONT);
+            } else {
+              GST_BUFFER_FLAG_SET (out_buf, GST_BUFFER_FLAG_DISCONT);
+              self->first_packet = FALSE;
+            }
+
             gst_adapter_flush (self->adapter,
                 self->cur_packet_size - offset - payload_size);
 
@@ -543,10 +571,12 @@ gst_pcap_parse_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
 
         self->cur_packet_size = -1;
       } else {
+        /* Parse the Record (Packet) Header */
         guint32 ts_sec;
         guint32 ts_usec;
         guint32 incl_len;
 
+        /* sizeof(pcaprec_hdr_t) == 16 */
         if (avail < 16)
           break;
 
@@ -566,10 +596,12 @@ gst_pcap_parse_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
         self->cur_packet_size = incl_len;
       }
     } else {
+      /* Parse the Global Header */
       guint32 magic;
       guint32 linktype;
       guint16 major_version;
 
+      /* sizeof(pcap_hdr_t) == 24 */
       if (avail < 24)
         break;
 

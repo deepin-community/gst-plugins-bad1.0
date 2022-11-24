@@ -1,5 +1,6 @@
 /* GStreamer
  * Copyright (C) <2010> Thiago Santos <thiago.sousa.santos@collabora.co.uk>
+ * Copyright (C) <2018> Nicola Murino <nicola.murino@gmail.com>
  *
  * gstopencvutils.c: miscellaneous utility functions
  *
@@ -24,7 +25,7 @@
 #endif
 
 #include "gstopencvutils.h"
-#include <opencv2/core/core_c.h>
+#include <opencv2/core.hpp>
 
 /*
 The various opencv image containers or headers store the following information:
@@ -75,9 +76,8 @@ Some have restrictions but if a format is supported then both BGR and RGB
 layouts will be supported.
 */
 
-gboolean
-gst_opencv_parse_iplimage_params_from_caps (GstCaps * caps, gint * width,
-    gint * height, gint * ipldepth, gint * channels, GError ** err)
+gboolean gst_opencv_parse_cv_mat_params_from_caps
+    (GstCaps * caps, gint * width, gint * height, int *cv_type, GError ** err)
 {
   GstVideoInfo info;
   gchar *caps_str;
@@ -91,34 +91,30 @@ gst_opencv_parse_iplimage_params_from_caps (GstCaps * caps, gint * width,
     return FALSE;
   }
 
-  return gst_opencv_iplimage_params_from_video_info (&info, width, height,
-          ipldepth, channels, err);
+  return gst_opencv_cv_mat_params_from_video_info (&info, width, height,
+      cv_type, err);
 }
 
-gboolean
-gst_opencv_iplimage_params_from_video_info (GstVideoInfo * info, gint * width,
-    gint * height, gint * ipldepth, gint * channels, GError ** err)
+gboolean gst_opencv_cv_mat_params_from_video_info
+    (GstVideoInfo * info, gint * width, gint * height, int *cv_type,
+    GError ** err)
 {
   GstVideoFormat format;
-  int cv_type;
 
   format = GST_VIDEO_INFO_FORMAT (info);
-  if (!gst_opencv_cv_image_type_from_video_format (format, &cv_type, err)) {
+  if (!gst_opencv_cv_image_type_from_video_format (format, cv_type, err)) {
     return FALSE;
   }
 
   *width = GST_VIDEO_INFO_WIDTH (info);
   *height = GST_VIDEO_INFO_HEIGHT (info);
 
-  *ipldepth = cvIplDepth (cv_type);
-  *channels = CV_MAT_CN (cv_type);
-
   return TRUE;
 }
 
 gboolean
 gst_opencv_cv_image_type_from_video_format (GstVideoFormat format,
-    int * cv_type, GError ** err)
+    int *cv_type, GError ** err)
 {
   const gchar *format_str;
 

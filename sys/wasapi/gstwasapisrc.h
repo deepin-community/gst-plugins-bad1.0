@@ -46,11 +46,12 @@ struct _GstWasapiSrc
   guint64 client_clock_freq;
   IAudioCaptureClient *capture_client;
   HANDLE event_handle;
+  HANDLE cancellable;
+  /* Smooth frames captured from WASAPI, which can be irregular sometimes */
+  GstAdapter *adapter;
   /* Client was reset, so it needs to be started again */
   gboolean client_needs_restart;
 
-  /* Actual size of the allocated buffer */
-  guint buffer_frame_count;
   /* The mix format that wasapi prefers in shared mode */
   WAVEFORMATEX *mix_format;
   /* The probed caps that we can accept */
@@ -60,9 +61,17 @@ struct _GstWasapiSrc
    * translate it to the native GStreamer channel layout. */
   GstAudioChannelPosition *positions;
 
+  /* Used for loopback use case in order to keep feeding silence into client */
+  IAudioClient *loopback_client;
+  IAudioRenderClient *loopback_render_client;
+  GThread *loopback_thread;
+  HANDLE loopback_event_handle;
+  HANDLE loopback_cancellable;
+
   /* properties */
   gint role;
   gint sharemode;
+  gboolean loopback;
   gboolean low_latency;
   gboolean try_audioclient3;
   wchar_t *device_strid;

@@ -18,6 +18,9 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include <glib.h>
 #include <gst/base/gsttypefindhelper.h>
@@ -26,8 +29,6 @@
 #include "gsturidownloader_debug.h"
 
 #define GST_CAT_DEFAULT uridownloader_debug
-
-#define GST_FRAGMENT_GET_PRIVATE(obj) (G_TYPE_INSTANCE_GET_PRIVATE ((obj), GST_TYPE_FRAGMENT, GstFragmentPrivate))
 
 enum
 {
@@ -48,7 +49,7 @@ struct _GstFragmentPrivate
   GMutex lock;
 };
 
-G_DEFINE_TYPE (GstFragment, gst_fragment, G_TYPE_OBJECT);
+G_DEFINE_TYPE_WITH_PRIVATE (GstFragment, gst_fragment, G_TYPE_OBJECT);
 
 static void gst_fragment_dispose (GObject * object);
 static void gst_fragment_finalize (GObject * object);
@@ -116,8 +117,6 @@ gst_fragment_class_init (GstFragmentClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
 
-  g_type_class_add_private (klass, sizeof (GstFragmentPrivate));
-
   gobject_class->set_property = gst_fragment_set_property;
   gobject_class->get_property = gst_fragment_get_property;
   gobject_class->dispose = gst_fragment_dispose;
@@ -132,7 +131,7 @@ gst_fragment_class_init (GstFragmentClass * klass)
           "Name of the fragment (eg:fragment-12.ts)", NULL, G_PARAM_READABLE));
 
   g_object_class_install_property (gobject_class, PROP_DISCONTINOUS,
-      g_param_spec_boolean ("discontinuous", "Discontinous",
+      g_param_spec_boolean ("discontinuous", "Discontinuous",
           "Whether this fragment has a discontinuity or not",
           FALSE, G_PARAM_READABLE));
 
@@ -156,7 +155,7 @@ gst_fragment_init (GstFragment * fragment)
 {
   GstFragmentPrivate *priv;
 
-  fragment->priv = priv = GST_FRAGMENT_GET_PRIVATE (fragment);
+  fragment->priv = priv = gst_fragment_get_instance_private (fragment);
 
   g_mutex_init (&fragment->priv->lock);
   priv->buffer = NULL;

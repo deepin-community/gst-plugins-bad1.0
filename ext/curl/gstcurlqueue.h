@@ -51,7 +51,7 @@
 struct _GstCurlHttpSrcQueueElement
 {
   GstCurlHttpSrc *p;
-  GMutex running;
+  gint running;
   GstCurlHttpSrcQueueElement *next;
 };
 

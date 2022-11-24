@@ -44,6 +44,8 @@ struct _WebRTCTransceiver
   GstWebRTCFECType         fec_type;
   guint                    fec_percentage;
   gboolean                 do_nack;
+
+  GstCaps                  *last_configured_caps;
 };
 
 struct _WebRTCTransceiverClass
@@ -57,6 +59,9 @@ WebRTCTransceiver *       webrtc_transceiver_new            (GstWebRTCBin * webr
 
 void                      webrtc_transceiver_set_transport  (WebRTCTransceiver * trans,
                                                              TransportStream * stream);
+
+GstWebRTCDTLSTransport *  webrtc_transceiver_get_dtls_transport (GstWebRTCRTPTransceiver * trans);
+GstWebRTCDTLSTransport *  webrtc_transceiver_get_rtcp_dtls_transport (GstWebRTCRTPTransceiver * trans);
 
 G_END_DECLS
 

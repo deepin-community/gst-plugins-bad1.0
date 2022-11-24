@@ -94,6 +94,8 @@ static gint64 gst_audiolatency_get_latency (GstAudioLatency * self);
 static gint64 gst_audiolatency_get_average_latency (GstAudioLatency * self);
 static GstFlowReturn gst_audiolatency_sink_chain (GstPad * pad,
     GstObject * parent, GstBuffer * buffer);
+static gboolean gst_audiolatency_sink_event (GstPad * pad,
+    GstObject * parent, GstEvent * event);
 static GstPadProbeReturn gst_audiolatency_src_probe (GstPad * pad,
     GstPadProbeInfo * info, gpointer user_data);
 
@@ -182,11 +184,15 @@ gst_audiolatency_init (GstAudioLatency * self)
   self->sinkpad = gst_pad_new_from_static_template (&sink_template, "sink");
   gst_pad_set_chain_function (self->sinkpad,
       GST_DEBUG_FUNCPTR (gst_audiolatency_sink_chain));
+  gst_pad_set_event_function (self->sinkpad,
+      GST_DEBUG_FUNCPTR (gst_audiolatency_sink_event));
+
   gst_element_add_pad (GST_ELEMENT (self), self->sinkpad);
 
   /* Setup srcpad */
   self->audiosrc = gst_element_factory_make ("audiotestsrc", NULL);
-  g_object_set (self->audiosrc, "wave", 8, "samplesperbuffer", 240, NULL);
+  g_object_set (self->audiosrc, "wave", 8, "samplesperbuffer", 240,
+      "is-live", TRUE, NULL);
   gst_bin_add (GST_BIN (self), self->audiosrc);
 
   templ = gst_static_pad_template_get (&src_template);
@@ -282,7 +288,7 @@ buffer_has_wave (GstBuffer * buffer, GstPad * pad)
   GstMapInfo minfo;
   guint64 duration;
   gint64 offset;
-  gint ii, channels, fsize;
+  gint ii, channels, fsize, rate;
   gfloat *fdata;
   gboolean ret;
   GstMemory *memory = NULL;
@@ -307,18 +313,26 @@ buffer_has_wave (GstBuffer * buffer, GstPad * pad)
 
   caps = gst_pad_get_current_caps (pad);
   s = gst_caps_get_structure (caps, 0);
-  ret = gst_structure_get_int (s, "channels", &channels);
+  /* channels and rate are required in caps, so will always be present */
+  gst_structure_get_int (s, "channels", &channels);
+  gst_structure_get_int (s, "rate", &rate);
   gst_caps_unref (caps);
-  if (!ret) {
-    GST_WARNING_OBJECT (pad, "unknown number of channels, can't detect wave");
-    return -1;
-  }
 
   fdata = (gfloat *) minfo.data;
   fsize = minfo.size / sizeof (gfloat);
 
   offset = -1;
-  duration = GST_BUFFER_DURATION (buffer);
+  if (GST_BUFFER_DURATION_IS_VALID (buffer)) {
+    duration = GST_BUFFER_DURATION (buffer);
+  } else {
+    /* Cannot do a rounding-accurate duration calculation here because in the
+     * case when the duration is invalid, the pts might also be invalid */
+    duration = gst_util_uint64_scale_int_round (GST_SECOND, fsize / channels,
+        rate);
+    GST_LOG_OBJECT (pad, "buffer duration is invalid, calculated likely "
+        "duration as %" G_GINT64_FORMAT "us", duration / GST_USECOND);
+  }
+
   /* Read only one channel */
   for (ii = 1; ii < fsize; ii += channels) {
     if (ABS (fdata[ii]) > 0.7) {
@@ -410,12 +424,30 @@ gst_audiolatency_sink_chain (GstPad * pad, GstObject * parent,
   latency = (self->recv_pts - self->send_pts);
   gst_audiolatency_set_latency (self, latency);
 
-  GST_INFO ("recv pts: %" G_GINT64_FORMAT "us, latency: %" G_GINT64_FORMAT "ms",
-      self->recv_pts, latency / 1000);
+  GST_INFO ("recv pts: %" G_GINT64_FORMAT "us, latency: %" G_GINT64_FORMAT
+      "ms, offset: %" G_GINT64_FORMAT "ms", self->recv_pts, latency / 1000,
+      offset / 1000);
 
 out:
   gst_buffer_unref (buffer);
   return GST_FLOW_OK;
+}
+
+static gboolean
+gst_audiolatency_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
+{
+  switch (GST_EVENT_TYPE (event)) {
+      /* Drop below events. audiotestsrc will push its own event */
+    case GST_EVENT_STREAM_START:
+    case GST_EVENT_CAPS:
+    case GST_EVENT_SEGMENT:
+      gst_event_unref (event);
+      return TRUE;
+    default:
+      break;
+  }
+
+  return gst_pad_event_default (pad, parent, event);
 }
 
 /* Element registration */

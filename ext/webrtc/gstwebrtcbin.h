@@ -23,21 +23,9 @@
 #include <gst/sdp/sdp.h>
 #include "fwd.h"
 #include "gstwebrtcice.h"
+#include "transportstream.h"
 
 G_BEGIN_DECLS
-
-#define GST_WEBRTC_BIN_ERROR gst_webrtc_bin_error_quark ()
-GQuark gst_webrtc_bin_error_quark (void);
-
-typedef enum
-{
-  GST_WEBRTC_BIN_ERROR_FAILED,
-  GST_WEBRTC_BIN_ERROR_INVALID_SYNTAX,
-  GST_WEBRTC_BIN_ERROR_INVALID_MODIFICATION,
-  GST_WEBRTC_BIN_ERROR_INVALID_STATE,
-  GST_WEBRTC_BIN_ERROR_BAD_SDP,
-  GST_WEBRTC_BIN_ERROR_FINGERPRINT,
-} GstWebRTCJSEPSDPError;
 
 GType gst_webrtc_bin_pad_get_type(void);
 #define GST_TYPE_WEBRTC_BIN_PAD            (gst_webrtc_bin_pad_get_type())
@@ -80,6 +68,7 @@ struct _GstWebRTCBin
   GstBin                            parent;
 
   GstElement                       *rtpbin;
+  GstElement                       *rtpfunnel;
 
   GstWebRTCSignalingState           signaling_state;
   GstWebRTCICEGatheringState        ice_gathering_state;
@@ -90,6 +79,9 @@ struct _GstWebRTCBin
   GstWebRTCSessionDescription      *pending_local_description;
   GstWebRTCSessionDescription      *current_remote_description;
   GstWebRTCSessionDescription      *pending_remote_description;
+
+  GstWebRTCBundlePolicy             bundle_policy;
+  GstWebRTCICETransportPolicy       ice_transport_policy;
 
   GstWebRTCBinPrivate              *priv;
 };
@@ -104,18 +96,28 @@ struct _GstWebRTCBinPrivate
   guint max_sink_pad_serial;
 
   gboolean bundle;
-  GArray *transceivers;
+  GPtrArray *transceivers;
   GArray *session_mid_map;
-  GArray *transports;
+  GPtrArray *transports;
+  GPtrArray *data_channels;
+  /* list of data channels we've received a sctp stream for but no data
+   * channel protocol for */
+  GPtrArray *pending_data_channels;
+
+  guint jb_latency;
+
+  GstWebRTCSCTPTransport *sctp_transport;
+  TransportStream *data_channel_transport;
 
   GstWebRTCICE *ice;
   GArray *ice_stream_map;
-  GArray *pending_ice_candidates;
+  GMutex ice_lock;
+  GArray *pending_remote_ice_candidates;
+  GArray *pending_local_ice_candidates;
 
   /* peerconnection variables */
   gboolean is_closed;
   gboolean need_negotiation;
-  gpointer sctp_transport;      /* FIXME */
 
   /* peerconnection helper thread for promises */
   GMainContext *main_context;
@@ -133,6 +135,10 @@ struct _GstWebRTCBinPrivate
   /* count of the number of media streams we've offered for uniqueness */
   /* FIXME: overflow? */
   guint media_counter;
+  /* the number of times create_offer has been called for the version field */
+  guint offer_count;
+  GstWebRTCSessionDescription *last_generated_offer;
+  GstWebRTCSessionDescription *last_generated_answer;
 
   GstStructure *stats;
 };
@@ -145,13 +151,14 @@ typedef struct
   GstWebRTCBinFunc op;
   gpointer data;
   GDestroyNotify notify;
-//  GstPromise *promise;      /* FIXME */
+  GstPromise *promise;
 } GstWebRTCBinTask;
 
-void            gst_webrtc_bin_enqueue_task             (GstWebRTCBin * pc,
+gboolean        gst_webrtc_bin_enqueue_task             (GstWebRTCBin * pc,
                                                          GstWebRTCBinFunc func,
                                                          gpointer data,
-                                                         GDestroyNotify notify);
+                                                         GDestroyNotify notify,
+                                                         GstPromise *promise);
 
 G_END_DECLS
 

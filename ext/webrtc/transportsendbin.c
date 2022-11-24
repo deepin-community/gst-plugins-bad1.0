@@ -27,9 +27,11 @@
 /*
  *           ,------------------------transport_send_%u-------------------------,
  *           ;                          ,-----dtlssrtpenc---,                   ;
- *  rtp_sink o--------------------------o rtp_sink_0        ;  ,---nicesink---, ;
- *           ;                          ;               src o--o sink         ; ;
- *           ;   ,--outputselector--, ,-o rtcp_sink_0       ;  '--------------' ;
+ * data_sink o--------------------------o data_sink         ;                   ;
+ *           ;                          ;                   ;  ,---nicesink---, ;
+ *  rtp_sink o--------------------------o rtp_sink_0    src o--o sink         ; ;
+ *           ;                          ;                   ;  '--------------' ;
+ *           ;   ,--outputselector--, ,-o rtcp_sink_0       ;                   ;
  *           ;   ;            src_0 o-' '-------------------'                   ;
  * rtcp_sink ;---o sink             ;   ,----dtlssrtpenc----,  ,---nicesink---, ;
  *           ;   ;            src_1 o---o rtcp_sink_0   src o--o sink         ; ;
@@ -61,6 +63,12 @@ GST_STATIC_PAD_TEMPLATE ("rtcp_sink",
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS ("application/x-rtp"));
 
+static GstStaticPadTemplate data_sink_template =
+GST_STATIC_PAD_TEMPLATE ("data_sink",
+    GST_PAD_SINK,
+    GST_PAD_ALWAYS,
+    GST_STATIC_CAPS_ANY);
+
 enum
 {
   PROP_0,
@@ -73,7 +81,6 @@ enum
 #define TSB_UNLOCK(tsb) (g_mutex_unlock (TSB_GET_LOCK(tsb)))
 
 static void cleanup_blocks (TransportSendBin * send);
-static void tsb_remove_probe (struct pad_block *block);
 
 static void
 _set_rtcp_mux (TransportSendBin * send, gboolean rtcp_mux)
@@ -139,6 +146,17 @@ transport_send_bin_get_property (GObject * object, guint prop_id,
 static GstPadProbeReturn
 pad_block (GstPad * pad, GstPadProbeInfo * info, gpointer unused)
 {
+  /* Drop all events: we don't care about them and don't want to block on
+   * them. Sticky events would be forwarded again later once we unblock
+   * and we don't want to forward them here already because that might
+   * cause a spurious GST_FLOW_FLUSHING */
+  if (GST_IS_EVENT (info->data))
+    return GST_PAD_PROBE_DROP;
+
+  /* But block on any actual data-flow so we don't accidentally send that
+   * to a pad that is not ready yet, causing GST_FLOW_FLUSHING and everything
+   * to silently stop.
+   */
   GST_LOG_OBJECT (pad, "blocking pad with data %" GST_PTR_FORMAT, info->data);
 
   return GST_PAD_PROBE_OK;
@@ -158,21 +176,11 @@ block_peer_pad (GstElement * elem, const gchar * pad_name)
   peer = gst_pad_get_peer (pad);
   block = _create_pad_block (elem, peer, 0, NULL, NULL);
   block->block_id = gst_pad_add_probe (peer,
-      GST_PAD_PROBE_TYPE_BLOCK | GST_PAD_PROBE_TYPE_BUFFER |
-      GST_PAD_PROBE_TYPE_BUFFER_LIST, (GstPadProbeCallback) pad_block, NULL,
-      NULL);
+      GST_PAD_PROBE_TYPE_BLOCK | GST_PAD_PROBE_TYPE_DATA_DOWNSTREAM,
+      (GstPadProbeCallback) pad_block, NULL, NULL);
   gst_object_unref (pad);
   gst_object_unref (peer);
   return block;
-}
-
-static void
-tsb_remove_probe (struct pad_block *block)
-{
-  if (block && block->block_id) {
-    gst_pad_remove_probe (block->pad, block->block_id);
-    block->block_id = 0;
-  }
 }
 
 static GstStateChangeReturn
@@ -239,12 +247,7 @@ transport_send_bin_change_state (GstElement * element,
        * if they still exist, without accidentally feeding data to the
        * dtlssrtpenc elements */
       TSB_LOCK (send);
-      tsb_remove_probe (send->rtp_ctx.rtp_block);
-      tsb_remove_probe (send->rtp_ctx.rtcp_block);
-      tsb_remove_probe (send->rtp_ctx.nice_block);
-
-      tsb_remove_probe (send->rtcp_ctx.rtcp_block);
-      tsb_remove_probe (send->rtcp_ctx.nice_block);
+      cleanup_blocks (send);
       TSB_UNLOCK (send);
       break;
     }
@@ -422,6 +425,16 @@ transport_send_bin_constructed (GObject * object)
   gst_element_add_pad (GST_ELEMENT (send), ghost);
   gst_object_unref (pad);
 
+  /* push the data stream onto the RTP dtls element */
+  templ = _find_pad_template (transport->dtlssrtpenc,
+      GST_PAD_SINK, GST_PAD_REQUEST, "data_sink");
+  pad = gst_element_request_pad (transport->dtlssrtpenc, templ, "data_sink",
+      NULL);
+
+  ghost = gst_ghost_pad_new ("data_sink", pad);
+  gst_element_add_pad (GST_ELEMENT (send), ghost);
+  gst_object_unref (pad);
+
   /* RTCP */
   transport = send->stream->rtcp_transport;
   /* Do the common init for the context struct */
@@ -498,6 +511,85 @@ transport_send_bin_finalize (GObject * object)
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
+static gboolean
+gst_transport_send_bin_element_query (GstElement * element, GstQuery * query)
+{
+  gboolean ret = TRUE;
+  GstClockTime min_latency;
+
+  GST_LOG_OBJECT (element, "got query %s", GST_QUERY_TYPE_NAME (query));
+
+  switch (GST_QUERY_TYPE (query)) {
+    case GST_QUERY_LATENCY:
+      /* when latency is queried, use the result to configure our
+       * own latency internally, piggybacking off the global
+       * latency configuration sequence. */
+      GST_DEBUG_OBJECT (element, "handling latency query");
+
+      /* Call the parent query handler to actually get the query
+       * sent upstream */
+      ret =
+          GST_ELEMENT_CLASS (transport_send_bin_parent_class)->query
+          (GST_ELEMENT (element), query);
+      if (!ret)
+        break;
+
+      gst_query_parse_latency (query, NULL, &min_latency, NULL);
+
+      GST_DEBUG_OBJECT (element,
+          "got min latency %" GST_TIME_FORMAT, GST_TIME_ARGS (min_latency));
+
+      /* configure latency on elements */
+      /* Call the parent event handler, because our sub-class handler
+       * will drop the LATENCY event. We also don't need to that
+       * the latency configuration is valid (min < max), because
+       * the pipeline will do it when checking the query results */
+      if (GST_ELEMENT_CLASS (transport_send_bin_parent_class)->send_event
+          (GST_ELEMENT (element), gst_event_new_latency (min_latency))) {
+        GST_INFO_OBJECT (element, "configured latency of %" GST_TIME_FORMAT,
+            GST_TIME_ARGS (min_latency));
+      } else {
+        GST_WARNING_OBJECT (element,
+            "did not really configure latency of %" GST_TIME_FORMAT,
+            GST_TIME_ARGS (min_latency));
+      }
+
+      break;
+    default:
+      ret =
+          GST_ELEMENT_CLASS (transport_send_bin_parent_class)->query
+          (GST_ELEMENT (element), query);
+      break;
+  }
+
+  return ret;
+}
+
+static gboolean
+gst_transport_send_bin_element_event (GstElement * element, GstEvent * event)
+{
+  gboolean ret = TRUE;
+
+  GST_LOG_OBJECT (element, "got event %s", GST_EVENT_TYPE_NAME (event));
+
+  switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_LATENCY:
+      /* Ignore the pipeline configured latency, we choose our own
+       * instead when the latency query happens, so that sending
+       * isn't affected by other parts of the pipeline */
+      GST_DEBUG_OBJECT (element, "Ignoring latency event from parent");
+      gst_event_unref (event);
+      break;
+    default:
+      ret =
+          GST_ELEMENT_CLASS (transport_send_bin_parent_class)->send_event
+          (GST_ELEMENT (element), event);
+      break;
+  }
+
+  return ret;
+}
+
 static void
 transport_send_bin_class_init (TransportSendBinClass * klass)
 {
@@ -509,6 +601,8 @@ transport_send_bin_class_init (TransportSendBinClass * klass)
   gst_element_class_add_static_pad_template (element_class, &rtp_sink_template);
   gst_element_class_add_static_pad_template (element_class,
       &rtcp_sink_template);
+  gst_element_class_add_static_pad_template (element_class,
+      &data_sink_template);
 
   gst_element_class_set_metadata (element_class, "WebRTC Transport Send Bin",
       "Filter/Network/WebRTC", "A bin for webrtc connections",
@@ -519,6 +613,9 @@ transport_send_bin_class_init (TransportSendBinClass * klass)
   gobject_class->get_property = transport_send_bin_get_property;
   gobject_class->set_property = transport_send_bin_set_property;
   gobject_class->finalize = transport_send_bin_finalize;
+
+  element_class->send_event = gst_transport_send_bin_element_event;
+  element_class->query = gst_transport_send_bin_element_query;
 
   g_object_class_install_property (gobject_class,
       PROP_STREAM,

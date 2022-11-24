@@ -68,14 +68,6 @@ GST_DEBUG_CATEGORY_STATIC (gst_amc_video_dec_debug_category);
   g_clear_error (&err); \
 } G_STMT_END
 
-#if GLIB_SIZEOF_VOID_P == 8
-#define JLONG_TO_GST_AMC_VIDEO_DEC(value) (GstAmcVideoDec *)(value)
-#define GST_AMC_VIDEO_DEC_TO_JLONG(value) (jlong)(value)
-#else
-#define JLONG_TO_GST_AMC_VIDEO_DEC(value) (GstAmcVideoDec *)(jint)(value)
-#define GST_AMC_VIDEO_DEC_TO_JLONG(value) (jlong)(jint)(value)
-#endif
-
 typedef struct _BufferIdentification BufferIdentification;
 struct _BufferIdentification
 {
@@ -123,7 +115,7 @@ struct gl_sync
   gint buffer_idx;              /* idx of the AMC buffer we should render */
   GstBuffer *buffer;            /* back reference to the buffer */
   GstGLMemory *oes_mem;         /* where amc is rendering into. The same for every gl_sync */
-  GstAmcSurface *surface;       /* java wrapper for where amc is rendering into */
+  GstAmcSurfaceTexture *surface;        /* java wrapper for where amc is rendering into */
   guint gl_frame_no;            /* effectively the frame id */
   gint64 released_ts;           /* microseconds from g_get_monotonic_time() */
   struct gl_sync_result *result;
@@ -153,6 +145,7 @@ _gl_sync_unref (struct gl_sync *sync)
 
     _gl_sync_result_unref (sync->result);
 
+    g_object_unref (sync->sink);
     g_object_unref (sync->surface);
     gst_memory_unref ((GstMemory *) sync->oes_mem);
 
@@ -180,8 +173,8 @@ static void
 _attach_mem_to_context (GstGLContext * context, GstAmcVideoDec * self)
 {
   GST_TRACE_OBJECT (self, "attaching texture %p id %u to current context",
-      self->surface->texture, self->oes_mem->tex_id);
-  if (!gst_amc_surface_texture_attach_to_gl_context (self->surface->texture,
+      self->surface, self->oes_mem->tex_id);
+  if (!gst_amc_surface_texture_attach_to_gl_context (self->surface,
           self->oes_mem->tex_id, &self->gl_error)) {
     GST_ERROR_OBJECT (self, "Failed to attach texture to the GL context");
     GST_ELEMENT_ERROR_FROM_ERROR (self, self->gl_error);
@@ -197,9 +190,9 @@ _dettach_mem_from_context (GstGLContext * context, GstAmcVideoDec * self)
     guint tex_id = self->oes_mem ? self->oes_mem->tex_id : 0;
 
     GST_TRACE_OBJECT (self, "detaching texture %p id %u from current context",
-        self->surface->texture, tex_id);
+        self->surface, tex_id);
 
-    if (!gst_amc_surface_texture_detach_from_gl_context (self->surface->texture,
+    if (!gst_amc_surface_texture_detach_from_gl_context (self->surface,
             &self->gl_error)) {
       GST_ERROR_OBJECT (self, "Failed to attach texture to the GL context");
       GST_ELEMENT_ERROR_FROM_ERROR (self, self->gl_error);
@@ -251,8 +244,8 @@ static gboolean gst_amc_video_dec_src_query (GstVideoDecoder * bdec,
 static GstFlowReturn gst_amc_video_dec_drain (GstAmcVideoDec * self);
 static gboolean gst_amc_video_dec_check_codec_config (GstAmcVideoDec * self);
 static void
-gst_amc_video_dec_on_frame_available (JNIEnv * env, jobject thiz,
-    long long context, jobject surfaceTexture);
+gst_amc_video_dec_on_frame_available (GstAmcSurfaceTexture * texture,
+    gpointer user_data);
 
 enum
 {
@@ -270,7 +263,7 @@ static GstVideoDecoderClass *parent_class = NULL;
 GType
 gst_amc_video_dec_get_type (void)
 {
-  static volatile gsize type = 0;
+  static gsize type = 0;
 
   if (g_once_init_enter (&type)) {
     GType _type;
@@ -381,7 +374,7 @@ gst_amc_video_dec_base_init (gpointer g_class)
   longname = g_strdup_printf ("Android MediaCodec %s", codec_info->name);
   gst_element_class_set_metadata (element_class,
       codec_info->name,
-      "Codec/Decoder/Video",
+      "Codec/Decoder/Video/Hardware",
       longname, "Sebastian Dröge <sebastian.droege@collabora.co.uk>");
   g_free (longname);
 }
@@ -440,7 +433,7 @@ gst_amc_video_dec_open (GstVideoDecoder * decoder)
 
   GST_DEBUG_OBJECT (self, "Opening decoder");
 
-  self->codec = gst_amc_codec_new (klass->codec_info->name, &err);
+  self->codec = gst_amc_codec_new (klass->codec_info->name, FALSE, &err);
   if (!self->codec) {
     GST_ELEMENT_ERROR_FROM_ERROR (self, err);
     return FALSE;
@@ -483,24 +476,19 @@ gst_amc_video_dec_close (GstVideoDecoder * decoder)
   self->gl_last_rendered_frame = 0;
 
   if (self->surface) {
-    gst_object_unref (self->surface);
-    self->surface = NULL;
-  }
-
-  if (self->listener) {
-    JNIEnv *env = gst_amc_jni_get_env ();
     GError *err = NULL;
 
-    if (!gst_amc_jni_call_void_method (env, &err, self->listener,
-            self->set_context_id, GST_AMC_VIDEO_DEC_TO_JLONG (NULL))) {
-      GST_ERROR_OBJECT (self, "Failed to unset back pointer on the listener. "
+    if (!gst_amc_surface_texture_set_on_frame_available_callback (self->surface,
+            NULL, NULL, &err)) {
+      GST_ERROR_OBJECT (self,
+          "Failed to unset back pointer on the listener. "
           "crashes/hangs may ensue: %s", err ? err->message : "Unknown");
       GST_ELEMENT_ERROR_FROM_ERROR (self, err);
     }
 
-    gst_amc_jni_object_unref (env, self->listener);
+    gst_object_unref (self->surface);
+    self->surface = NULL;
   }
-  self->listener = NULL;
 
   if (self->codec) {
     GError *err = NULL;
@@ -770,37 +758,20 @@ gst_amc_video_dec_set_src_caps (GstAmcVideoDec * self, GstAmcFormat * format)
     return FALSE;
   }
 
-  if (!gst_amc_format_get_int (format, "stride", &stride, &err) ||
-      !gst_amc_format_get_int (format, "slice-height", &slice_height, &err)) {
-    GST_ERROR_OBJECT (self, "Failed to get stride and slice-height: %s",
-        err->message);
-    g_clear_error (&err);
-    return FALSE;
+  if (gst_amc_format_get_int (format, "crop-left", &crop_left, NULL) &&
+      gst_amc_format_get_int (format, "crop-right", &crop_right, NULL)) {
+    width = crop_right + 1 - crop_left;
   }
 
-  if (!gst_amc_format_get_int (format, "crop-left", &crop_left, &err) ||
-      !gst_amc_format_get_int (format, "crop-right", &crop_right, &err) ||
-      !gst_amc_format_get_int (format, "crop-top", &crop_top, &err) ||
-      !gst_amc_format_get_int (format, "crop-bottom", &crop_bottom, &err)) {
-    GST_ERROR_OBJECT (self, "Failed to get crop rectangle: %s", err->message);
-    g_clear_error (&err);
-    return FALSE;
+  if (gst_amc_format_get_int (format, "crop-top", &crop_top, NULL) &&
+      gst_amc_format_get_int (format, "crop-bottom", &crop_bottom, NULL)) {
+    height = crop_bottom + 1 - crop_top;
   }
 
   if (width == 0 || height == 0) {
     GST_ERROR_OBJECT (self, "Height or width not set");
     return FALSE;
   }
-
-  if (crop_bottom)
-    height = height - (height - crop_bottom - 1);
-  if (crop_top)
-    height = height - crop_top;
-
-  if (crop_right)
-    width = width - (width - crop_right - 1);
-  if (crop_left)
-    width = width - crop_left;
 
   mime = caps_to_mime (self->input_state->caps);
   if (!mime) {
@@ -854,6 +825,14 @@ gst_amc_video_dec_set_src_caps (GstAmcVideoDec * self, GstAmcFormat * format)
     self->color_format_info.crop_bottom = crop_bottom;
 
     goto out;
+  }
+
+  if (!gst_amc_format_get_int (format, "stride", &stride, &err) ||
+      !gst_amc_format_get_int (format, "slice-height", &slice_height, &err)) {
+    GST_ERROR_OBJECT (self, "Failed to get stride and slice-height: %s",
+        err->message);
+    g_clear_error (&err);
+    return FALSE;
   }
 
   self->format = gst_format;
@@ -982,6 +961,74 @@ _gl_sync_release_next_buffer (struct gl_sync *sync, gboolean render)
   }
 }
 
+#define I(x,y) ((y)*4+(x))
+static int
+affine_inverse (float in[], float out[])
+{
+  float s0, s1, s2, s3, s4, s5;
+  float c0, c1, c2, c3, c4, c5;
+  float det, invdet;
+
+  s0 = in[0] * in[I (1, 1)] - in[I (1, 0)] * in[I (0, 1)];
+  s1 = in[0] * in[I (1, 2)] - in[I (1, 0)] * in[I (0, 2)];
+  s2 = in[0] * in[I (1, 3)] - in[I (1, 0)] * in[I (0, 3)];
+  s3 = in[1] * in[I (1, 2)] - in[I (1, 1)] * in[I (0, 2)];
+  s4 = in[1] * in[I (1, 3)] - in[I (1, 1)] * in[I (0, 3)];
+  s5 = in[2] * in[I (1, 3)] - in[I (1, 2)] * in[I (0, 3)];
+
+  c0 = in[I (2, 0)] * in[I (3, 1)] - in[I (3, 0)] * in[I (2, 1)];
+  c1 = in[I (2, 0)] * in[I (3, 2)] - in[I (3, 0)] * in[I (2, 2)];
+  c2 = in[I (2, 0)] * in[I (3, 3)] - in[I (3, 0)] * in[I (2, 3)];
+  c3 = in[I (2, 1)] * in[I (3, 2)] - in[I (3, 1)] * in[I (2, 2)];
+  c4 = in[I (2, 1)] * in[I (3, 3)] - in[I (3, 1)] * in[I (2, 3)];
+  c5 = in[I (2, 2)] * in[I (3, 3)] - in[I (3, 2)] * in[I (2, 3)];
+
+  det = s0 * c5 - s1 * c4 + s2 * c3 + s3 * c2 - s4 * c1 + s5 * c0;
+  if (det == 0.0)
+    return 0;
+  invdet = 1.0 / det;
+
+  out[I (0, 0)] =
+      (in[I (1, 1)] * c5 - in[I (1, 2)] * c4 + in[I (1, 3)] * c3) * invdet;
+  out[I (0, 1)] =
+      (-in[I (0, 1)] * c5 + in[I (0, 2)] * c4 - in[I (0, 3)] * c3) * invdet;
+  out[I (0, 2)] =
+      (in[I (3, 1)] * s5 - in[I (3, 2)] * s4 + in[I (3, 3)] * s3) * invdet;
+  out[I (0, 3)] =
+      (-in[I (2, 1)] * s5 + in[I (2, 2)] * s4 - in[I (2, 3)] * s3) * invdet;
+
+  out[I (1, 0)] =
+      (-in[I (1, 0)] * c5 + in[I (1, 2)] * c2 - in[I (1, 3)] * c1) * invdet;
+  out[I (1, 1)] =
+      (in[I (0, 0)] * c5 - in[I (0, 2)] * c2 + in[I (0, 3)] * c1) * invdet;
+  out[I (1, 2)] =
+      (-in[I (3, 0)] * s5 + in[I (3, 2)] * s2 - in[I (3, 3)] * s1) * invdet;
+  out[I (1, 3)] =
+      (in[I (2, 0)] * s5 - in[I (2, 2)] * s2 + in[I (2, 3)] * s1) * invdet;
+
+  out[I (2, 0)] =
+      (in[I (1, 0)] * c4 - in[I (1, 1)] * c2 + in[I (1, 3)] * c0) * invdet;
+  out[I (2, 1)] =
+      (-in[I (0, 0)] * c4 + in[I (0, 1)] * c2 - in[I (0, 3)] * c0) * invdet;
+  out[I (2, 2)] =
+      (in[I (3, 0)] * s4 - in[I (3, 1)] * s2 + in[I (3, 3)] * s0) * invdet;
+  out[I (2, 3)] =
+      (-in[I (2, 0)] * s4 + in[I (2, 1)] * s2 - in[I (2, 3)] * s0) * invdet;
+
+  out[I (3, 0)] =
+      (-in[I (1, 0)] * c3 + in[I (1, 1)] * c1 - in[I (1, 2)] * c0) * invdet;
+  out[I (3, 1)] =
+      (in[I (0, 0)] * c3 - in[I (0, 1)] * c1 + in[I (0, 2)] * c0) * invdet;
+  out[I (3, 2)] =
+      (-in[I (3, 0)] * s3 + in[I (3, 1)] * s1 - in[I (3, 2)] * s0) * invdet;
+  out[I (3, 3)] =
+      (in[I (2, 0)] * s3 - in[I (2, 1)] * s1 + in[I (2, 2)] * s0) * invdet;
+
+  return 1;
+}
+
+#undef I
+
 /* caller should remove from the gl_queue after calling this function.
  * _gl_sync_release_buffer must be called before this function */
 static void
@@ -1000,8 +1047,7 @@ _gl_sync_render_unlocked (struct gl_sync *sync)
 
   /* FIXME: if this ever starts returning valid values we should attempt
    * to use it */
-  if (!gst_amc_surface_texture_get_timestamp (sync->surface->texture, &ts,
-          &error)) {
+  if (!gst_amc_surface_texture_get_timestamp (sync->surface, &ts, &error)) {
     GST_ERROR_OBJECT (sync->sink, "Failed to update texture image");
     GST_ELEMENT_ERROR_FROM_ERROR (sync->sink, error);
     goto out;
@@ -1010,8 +1056,7 @@ _gl_sync_render_unlocked (struct gl_sync *sync)
       sync, ts);
 
   GST_TRACE ("gl_sync %p update_tex_image", sync);
-  if (!gst_amc_surface_texture_update_tex_image (sync->surface->texture,
-          &error)) {
+  if (!gst_amc_surface_texture_update_tex_image (sync->surface, &error)) {
     GST_ERROR_OBJECT (sync->sink, "Failed to update texture image");
     GST_ELEMENT_ERROR_FROM_ERROR (sync->sink, error);
     goto out;
@@ -1020,8 +1065,7 @@ _gl_sync_render_unlocked (struct gl_sync *sync)
   sync->result->updated = TRUE;
   sync->sink->gl_last_rendered_frame = sync->gl_frame_no;
 
-  if (!gst_amc_surface_texture_get_timestamp (sync->surface->texture, &ts,
-          &error)) {
+  if (!gst_amc_surface_texture_get_timestamp (sync->surface, &ts, &error)) {
     GST_ERROR_OBJECT (sync->sink, "Failed to update texture image");
     GST_ELEMENT_ERROR_FROM_ERROR (sync->sink, error);
     goto out;
@@ -1031,17 +1075,30 @@ _gl_sync_render_unlocked (struct gl_sync *sync)
 
   af_meta = gst_buffer_get_video_affine_transformation_meta (sync->buffer);
   if (!af_meta) {
-    GST_WARNING ("Failed to retreive the transformation meta from the "
+    GST_WARNING ("Failed to retrieve the transformation meta from the "
         "gl_sync %p buffer %p", sync, sync->buffer);
-  } else if (gst_amc_surface_texture_get_transform_matrix (sync->surface->
-          texture, matrix, &error)) {
+  } else if (gst_amc_surface_texture_get_transform_matrix (sync->surface,
+          matrix, &error)) {
+    gfloat inv_mat[16];
 
-    gst_video_affine_transformation_meta_apply_matrix (af_meta, matrix);
+    /* The transform from mediacodec applies to the texture coords, but
+     * GStreamer affine meta applies to the video geometry, which is the
+     * opposite - so we invert it */
+    if (affine_inverse (matrix, inv_mat)) {
+      gst_video_affine_transformation_meta_apply_matrix (af_meta, inv_mat);
+    } else {
+      GST_WARNING
+          ("Failed to invert display transform - the video won't display right. "
+          "Transform matrix [ %f %f %f %f, %f %f %f %f, %f %f %f %f, %f %f %f %f ]",
+          matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5],
+          matrix[6], matrix[7], matrix[8], matrix[9], matrix[10], matrix[11],
+          matrix[12], matrix[13], matrix[14], matrix[15]);
+    }
     gst_video_affine_transformation_meta_apply_matrix (af_meta, yflip_matrix);
   }
 
   GST_LOG ("gl_sync %p successfully updated SurfaceTexture %p into "
-      "OES texture %u", sync, sync->surface->texture, sync->oes_mem->tex_id);
+      "OES texture %u", sync, sync->surface, sync->oes_mem->tex_id);
 
 out:
   if (error) {
@@ -1182,7 +1239,7 @@ _amc_gl_copy (GstGLSyncMeta * src, GstBuffer * sbuffer, GstGLSyncMeta * dest,
   g_mutex_lock (&sync->sink->gl_lock);
 
   tmp->refcount = 1;
-  tmp->sink = sync->sink;
+  tmp->sink = gst_object_ref (sync->sink);
   tmp->buffer = dbuffer;
   tmp->oes_mem = (GstGLMemory *) gst_memory_ref ((GstMemory *) sync->oes_mem);
   tmp->surface = g_object_ref (sync->surface);
@@ -1383,7 +1440,7 @@ retry:
 
     sync = g_new0 (struct gl_sync, 1);
     sync->refcount = 1;
-    sync->sink = self;
+    sync->sink = g_object_ref (self);
     sync->buffer = outbuf;
     sync->surface = g_object_ref (self->surface);
     sync->oes_mem =
@@ -1725,64 +1782,6 @@ gst_amc_video_dec_stop (GstVideoDecoder * decoder)
   return TRUE;
 }
 
-static jobject
-gst_amc_video_dec_new_on_frame_available_listener (GstAmcVideoDec * decoder,
-    JNIEnv * env, GError ** err)
-{
-  jobject listener = NULL;
-  jclass listener_cls = NULL;
-  jmethodID constructor_id = 0;
-
-  JNINativeMethod amcOnFrameAvailableListener = {
-    "native_onFrameAvailable",
-    "(JLandroid/graphics/SurfaceTexture;)V",
-    (void *) gst_amc_video_dec_on_frame_available,
-  };
-
-  listener_cls =
-      gst_amc_jni_get_application_class (env,
-      "org/freedesktop/gstreamer/androidmedia/GstAmcOnFrameAvailableListener",
-      err);
-  if (!listener_cls) {
-    return FALSE;
-  }
-
-  (*env)->RegisterNatives (env, listener_cls, &amcOnFrameAvailableListener, 1);
-  if ((*env)->ExceptionCheck (env)) {
-    (*env)->ExceptionClear (env);
-    goto done;
-  }
-
-  constructor_id =
-      gst_amc_jni_get_method_id (env, err, listener_cls, "<init>", "()V");
-  if (!constructor_id) {
-    goto done;
-  }
-
-  decoder->set_context_id =
-      gst_amc_jni_get_method_id (env, err, listener_cls, "setContext", "(J)V");
-  if (!decoder->set_context_id) {
-    goto done;
-  }
-
-  listener =
-      gst_amc_jni_new_object (env, err, TRUE, listener_cls, constructor_id);
-  if (!listener) {
-    goto done;
-  }
-
-  if (!gst_amc_jni_call_void_method (env, err, listener,
-          decoder->set_context_id, GST_AMC_VIDEO_DEC_TO_JLONG (decoder))) {
-    gst_amc_jni_object_unref (env, listener);
-    listener = NULL;
-  }
-
-done:
-  gst_amc_jni_object_unref (env, listener_cls);
-
-  return listener;
-}
-
 static gboolean
 gst_amc_video_dec_set_format (GstVideoDecoder * decoder,
     GstVideoCodecState * state)
@@ -1797,7 +1796,6 @@ gst_amc_video_dec_set_format (GstVideoDecoder * decoder,
   guint8 *codec_data = NULL;
   gsize codec_data_size = 0;
   GError *err = NULL;
-  jobject jsurface = NULL;
 
   self = GST_AMC_VIDEO_DEC (decoder);
   klass = GST_AMC_VIDEO_DEC_GET_CLASS (self);
@@ -1989,50 +1987,31 @@ gst_amc_video_dec_set_format (GstVideoDecoder * decoder,
   }
 
   if (self->downstream_supports_gl && self->surface) {
-    jsurface = self->surface->jobject;
+    self->codec_config = AMC_CODEC_CONFIG_WITH_SURFACE;
   } else if (self->downstream_supports_gl && !self->surface) {
     int ret = TRUE;
-    JNIEnv *env = NULL;
-    GstAmcSurfaceTexture *surface_texture = NULL;
 
-    env = gst_amc_jni_get_env ();
-    surface_texture = gst_amc_surface_texture_new (&err);
-    if (!surface_texture) {
+    self->surface = gst_amc_codec_new_surface_texture (&err);
+    if (!self->surface) {
       GST_ELEMENT_ERROR_FROM_ERROR (self, err);
       return FALSE;
     }
 
-    if (self->listener) {
-      if (!gst_amc_jni_call_void_method (env, &err, self->listener,
-              self->set_context_id, GST_AMC_VIDEO_DEC_TO_JLONG (NULL))) {
-        ret = FALSE;
-        goto done;
-      }
-
-      gst_amc_jni_object_unref (env, self->listener);
-    }
-    self->listener =
-        gst_amc_video_dec_new_on_frame_available_listener (self, env, &err);
-    if (!self->listener) {
+    if (!gst_amc_surface_texture_set_on_frame_available_callback
+        (self->surface, gst_amc_video_dec_on_frame_available, self, &err)) {
       ret = FALSE;
       goto done;
     }
 
-    if (!gst_amc_surface_texture_set_on_frame_available_listener
-        (surface_texture, self->listener, &err)) {
-      ret = FALSE;
-      goto done;
-    }
-
-    self->surface = gst_amc_surface_new (surface_texture, &err);
-    jsurface = self->surface->jobject;
+    self->codec_config = AMC_CODEC_CONFIG_WITH_SURFACE;
 
   done:
-    g_object_unref (surface_texture);
     if (!ret) {
       GST_ELEMENT_ERROR_FROM_ERROR (self, err);
       return FALSE;
     }
+  } else {
+    self->codec_config = AMC_CODEC_CONFIG_WITHOUT_SURFACE;
   }
 
   format_string = gst_amc_format_to_string (format, &err);
@@ -2042,15 +2021,10 @@ gst_amc_video_dec_set_format (GstVideoDecoder * decoder,
       GST_STR_NULL (format_string));
   g_free (format_string);
 
-  if (!gst_amc_codec_configure (self->codec, format, jsurface, 0, &err)) {
+  if (!gst_amc_codec_configure (self->codec, format, self->surface, &err)) {
     GST_ERROR_OBJECT (self, "Failed to configure codec");
     GST_ELEMENT_ERROR_FROM_ERROR (self, err);
     return FALSE;
-  }
-  if (jsurface) {
-    self->codec_config = AMC_CODEC_CONFIG_WITH_SURFACE;
-  } else {
-    self->codec_config = AMC_CODEC_CONFIG_WITHOUT_SURFACE;
   }
 
   gst_amc_format_free (format);
@@ -2524,10 +2498,10 @@ context_error:
 }
 
 static void
-gst_amc_video_dec_on_frame_available (JNIEnv * env, jobject thiz,
-    long long context, jobject surfaceTexture)
+gst_amc_video_dec_on_frame_available (GstAmcSurfaceTexture * texture,
+    gpointer user_data)
 {
-  GstAmcVideoDec *self = JLONG_TO_GST_AMC_VIDEO_DEC (context);
+  GstAmcVideoDec *self = (GstAmcVideoDec *) user_data;
 
   /* apparently we can be called after the decoder has been closed */
   if (!self)

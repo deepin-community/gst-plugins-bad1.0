@@ -2,7 +2,16 @@ fbdevsink_sources = [
   'gstfbdevsink.c',
 ]
 
-if cc.has_header('linux/fb.h', required : false)
+if get_option('fbdev').disabled()
+  subdir_done()
+endif
+
+have_fb_h = cc.has_header('linux/fb.h')
+if not have_fb_h and get_option('fbdev').enabled()
+  error('fbdev plugin enabled but fb.h not found')
+endif
+
+if have_fb_h
   gstfbdevsink = library('gstfbdevsink',
     fbdevsink_sources,
     c_args : gst_plugins_bad_args,
@@ -11,4 +20,6 @@ if cc.has_header('linux/fb.h', required : false)
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstfbdevsink, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstfbdevsink]
 endif

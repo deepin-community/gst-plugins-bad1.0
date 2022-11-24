@@ -1,0 +1,15 @@
+debian/tmp/usr/lib/*/libgstadaptivedemux-1.0.so.*
+debian/tmp/usr/lib/*/libgstphotography-1.0.so.*
+debian/tmp/usr/lib/*/libgstbadaudio-1.0.so.*
+debian/tmp/usr/lib/*/libgstbasecamerabinsrc-1.0.so.*
+debian/tmp/usr/lib/*/libgstinsertbin-1.0.so.*
+debian/tmp/usr/lib/*/libgstcodecparsers-1.0.so.*
+debian/tmp/usr/lib/*/libgstcodecs-1.0.so.*
+debian/tmp/usr/lib/*/libgstmpegts-1.0.so.*
+debian/tmp/usr/lib/*/libgstplayer-1.0.so.*
+debian/tmp/usr/lib/*/libgsturidownloader-1.0.so.*
+debian/tmp/usr/lib/*/libgstisoff-1.0.so.*
+debian/tmp/usr/lib/*/libgstsctp-1.0.so.*
+debian/tmp/usr/lib/*/libgstwebrtc-1.0.so.*
+debian/tmp/usr/lib/*/libgsttranscoder-1.0.so.*
+debian/tmp/usr/share/gstreamer-1.0/encoding-profiles

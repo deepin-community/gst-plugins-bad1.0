@@ -3,7 +3,7 @@
  * Copyright (C) 2007 Alessandro Decina
  * 
  * Authors:
- *   Alessandro Decina <alessandro@nnva.org>
+ *   Alessandro Decina <alessandro.d@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -246,7 +246,7 @@ cam_tl_connection_write_tpdu (CamTLConnection * connection,
 
   tl->expected_tpdus += 1;
 
-  GST_DEBUG ("Sucess writing tpdu 0x%x (%s)", buffer[2],
+  GST_DEBUG ("Success writing tpdu 0x%x (%s)", buffer[2],
       tag_get_name (buffer[2]));
 
   return CAM_RETURN_OK;

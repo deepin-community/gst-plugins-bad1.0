@@ -21,8 +21,16 @@
 # include "config.h"
 #endif
 
+#include <stdlib.h>
+
 #include "utils.h"
 #include "gstwebrtcbin.h"
+
+GQuark
+gst_webrtc_bin_error_quark (void)
+{
+  return g_quark_from_static_string ("gst-webrtc-bin-error-quark");
+}
 
 GstPadTemplate *
 _find_pad_template (GstElement * element, GstPadDirection direction,
@@ -47,7 +55,22 @@ _find_pad_template (GstElement * element, GstPadDirection direction,
 }
 
 GstSDPMessage *
-_get_latest_sdp (GstWebRTCBin * webrtc)
+_get_latest_offer (GstWebRTCBin * webrtc)
+{
+  if (webrtc->current_local_description &&
+      webrtc->current_local_description->type == GST_WEBRTC_SDP_TYPE_OFFER) {
+    return webrtc->current_local_description->sdp;
+  }
+  if (webrtc->current_remote_description &&
+      webrtc->current_remote_description->type == GST_WEBRTC_SDP_TYPE_OFFER) {
+    return webrtc->current_remote_description->sdp;
+  }
+
+  return NULL;
+}
+
+GstSDPMessage *
+_get_latest_answer (GstWebRTCBin * webrtc)
 {
   if (webrtc->current_local_description &&
       webrtc->current_local_description->type == GST_WEBRTC_SDP_TYPE_ANSWER) {
@@ -57,14 +80,30 @@ _get_latest_sdp (GstWebRTCBin * webrtc)
       webrtc->current_remote_description->type == GST_WEBRTC_SDP_TYPE_ANSWER) {
     return webrtc->current_remote_description->sdp;
   }
-  if (webrtc->current_local_description &&
-      webrtc->current_local_description->type == GST_WEBRTC_SDP_TYPE_OFFER) {
-    return webrtc->current_local_description->sdp;
-  }
-  if (webrtc->current_remote_description &&
-      webrtc->current_remote_description->type == GST_WEBRTC_SDP_TYPE_OFFER) {
-    return webrtc->current_remote_description->sdp;
-  }
+
+  return NULL;
+}
+
+GstSDPMessage *
+_get_latest_sdp (GstWebRTCBin * webrtc)
+{
+  GstSDPMessage *ret = NULL;
+
+  if ((ret = _get_latest_answer (webrtc)))
+    return ret;
+  if ((ret = _get_latest_offer (webrtc)))
+    return ret;
+
+  return NULL;
+}
+
+GstSDPMessage *
+_get_latest_self_generated_sdp (GstWebRTCBin * webrtc)
+{
+  if (webrtc->priv->last_generated_answer)
+    return webrtc->priv->last_generated_answer->sdp;
+  if (webrtc->priv->last_generated_offer)
+    return webrtc->priv->last_generated_offer->sdp;
 
   return NULL;
 }
@@ -135,4 +174,34 @@ _g_checksum_to_webrtc_string (GChecksumType type)
       g_warning ("unknown GChecksumType!");
       return NULL;
   }
+}
+
+GstCaps *
+_rtp_caps_from_media (const GstSDPMedia * media)
+{
+  GstCaps *ret;
+  int i, j;
+
+  ret = gst_caps_new_empty ();
+  for (i = 0; i < gst_sdp_media_formats_len (media); i++) {
+    guint pt = atoi (gst_sdp_media_get_format (media, i));
+    GstCaps *caps;
+
+    caps = gst_sdp_media_get_caps_from_media (media, pt);
+    if (!caps)
+      continue;
+
+    /* gst_sdp_media_get_caps_from_media() produces caps with name
+     * "application/x-unknown" which will fail intersection with
+     * "application/x-rtp" caps so mangle the returns caps to have the
+     * correct name here */
+    for (j = 0; j < gst_caps_get_size (caps); j++) {
+      GstStructure *s = gst_caps_get_structure (caps, j);
+      gst_structure_set_name (s, "application/x-rtp");
+    }
+
+    gst_caps_append (ret, caps);
+  }
+
+  return ret;
 }

@@ -1,13 +1,14 @@
 # SOME DESCRIPTIVE TITLE.
-# This file is put in the public domain.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the gst-plugins-bad-1.0 package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 #
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: gst-plugins-bad 1.14.4\n"
-"Report-Msgid-Bugs-To: http://bugzilla.gnome.org/\n"
-"POT-Creation-Date: 2018-10-02 23:08+0100\n"
+"Project-Id-Version: gst-plugins-bad-1.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2021-09-08 20:03+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -16,11 +17,11 @@ msgstr ""
 "Content-Type: text/plain; charset=CHARSET\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-#: ext/curl/gstcurlhttpsrc.c:1265
+#: ext/curl/gstcurlhttpsrc.c:1436
 msgid "No URL set."
 msgstr ""
 
-#: ext/opencv/gsttemplatematch.cpp:189
+#: ext/opencv/gsttemplatematch.cpp:184
 msgid "OpenCV failed to load template image"
 msgstr ""
 
@@ -47,8 +48,8 @@ msgstr ""
 msgid "Could not read DVD."
 msgstr ""
 
-#: ext/smoothstreaming/gstmssdemux.c:421
-#: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:721
+#: ext/smoothstreaming/gstmssdemux.c:429
+#: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:735
 msgid "This file contains no playable streams."
 msgstr ""
 
@@ -60,7 +61,7 @@ msgstr ""
 msgid "Generated file has a larger preroll time than its streams duration"
 msgstr ""
 
-#: gst/camerabin2/camerabingeneral.c:167 gst/camerabin2/gstcamerabin2.c:1859
+#: gst/camerabin2/camerabingeneral.c:167 gst/camerabin2/gstcamerabin2.c:1861
 #: gst/camerabin2/gstdigitalzoom.c:283 gst/camerabin2/gstviewfinderbin.c:270
 #, c-format
 msgid "Missing element '%s' - check your GStreamer installation."
@@ -78,45 +79,47 @@ msgstr ""
 msgid "Subpicture format was not configured before data flow"
 msgstr ""
 
-#: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:3553
+#: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:3626
 msgid "Failed to get fragment URL."
 msgstr ""
 
-#: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:3940
+#: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:4013
+#, c-format
 msgid "Couldn't download fragments"
 msgstr ""
 
-#: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:4029
-#: gst/mpegtsdemux/mpegtsbase.c:1617
+#: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:4102
+#: gst/mpegtsdemux/mpegtsbase.c:1674
 msgid "Internal data stream error."
 msgstr ""
 
-#: sys/dvb/gstdvbsrc.c:1580 sys/dvb/gstdvbsrc.c:1794
+#: sys/dvb/gstdvbsrc.c:1591 sys/dvb/gstdvbsrc.c:1805
 #, c-format
 msgid "Device \"%s\" does not exist."
 msgstr ""
 
-#: sys/dvb/gstdvbsrc.c:1584
+#: sys/dvb/gstdvbsrc.c:1595
 #, c-format
 msgid "Could not open frontend device \"%s\"."
 msgstr ""
 
-#: sys/dvb/gstdvbsrc.c:1603
+#: sys/dvb/gstdvbsrc.c:1614
 #, c-format
 msgid "Could not get settings from frontend device \"%s\"."
 msgstr ""
 
-#: sys/dvb/gstdvbsrc.c:1620
+#: sys/dvb/gstdvbsrc.c:1631
 #, c-format
 msgid "Cannot enumerate delivery systems from frontend device \"%s\"."
 msgstr ""
 
-#: sys/dvb/gstdvbsrc.c:1798
+#: sys/dvb/gstdvbsrc.c:1809
 #, c-format
 msgid "Could not open file \"%s\" for reading."
 msgstr ""
 
 #: sys/dvb/parsechannels.c:410
+#, c-format
 msgid "Couldn't find channel configuration file"
 msgstr ""
 
@@ -146,5 +149,6 @@ msgid "Couldn't find channel configuration file: '%s'"
 msgstr ""
 
 #: sys/dvb/parsechannels.c:570
+#, c-format
 msgid "Channel configuration file doesn't contain any channels"
 msgstr ""

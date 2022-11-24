@@ -25,9 +25,6 @@
 #include <gst/audio/gstaudiosrc.h>
 #include <gst/audio/gstaudiosink.h>
 
-#ifdef _MSC_VER
-#include <initguid.h>
-#endif
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 
@@ -42,18 +39,38 @@
 
 /* Standard error path */
 #define HR_FAILED_AND(hr,func,and) \
-  do { \
+  G_STMT_START { \
     if (FAILED (hr)) { \
       gchar *msg = gst_wasapi_util_hresult_to_string (hr); \
       GST_ERROR_OBJECT (self, #func " failed (%x): %s", (guint) hr, msg); \
       g_free (msg); \
       and; \
     } \
-  } while (0)
+  } G_STMT_END
 
 #define HR_FAILED_RET(hr,func,ret) HR_FAILED_AND(hr,func,return ret)
 
 #define HR_FAILED_GOTO(hr,func,where) HR_FAILED_AND(hr,func,res = FALSE; goto where)
+
+#define HR_FAILED_ELEMENT_ERROR_AND(hr,func,el,and) \
+  G_STMT_START { \
+    if (FAILED (hr)) { \
+      gchar *msg = gst_wasapi_util_hresult_to_string (hr); \
+      GST_ERROR_OBJECT (el, #func " failed (%x): %s", (guint) hr, msg); \
+      if (GST_IS_AUDIO_SRC (el)) \
+        GST_ELEMENT_ERROR(el, RESOURCE, READ, \
+            (#func " failed (%x): %s", (guint) hr, msg), (NULL)); \
+      else \
+        GST_ELEMENT_ERROR(el, RESOURCE, WRITE, \
+            (#func " failed (%x): %s", (guint) hr, msg), (NULL)); \
+      g_free (msg); \
+      and; \
+    } \
+  } G_STMT_END
+
+#define HR_FAILED_ELEMENT_ERROR_RET(hr,func,el,ret) \
+  HR_FAILED_ELEMENT_ERROR_AND(hr,func,el,return ret)
+
 
 /* Device role enum property */
 typedef enum
@@ -75,11 +92,11 @@ gint gst_wasapi_erole_to_device_role (gint erole);
 
 gchar *gst_wasapi_util_hresult_to_string (HRESULT hr);
 
-gboolean gst_wasapi_util_get_devices (GstElement * element, gboolean active,
+gboolean gst_wasapi_util_get_devices (GstObject * element, gboolean active,
     GList ** devices);
 
 gboolean gst_wasapi_util_get_device_client (GstElement * element,
-    gboolean capture, gint role, const wchar_t * device_strid,
+    gint data_flow, gint role, const wchar_t * device_strid,
     IMMDevice ** ret_device, IAudioClient ** ret_client);
 
 gboolean gst_wasapi_util_get_device_format (GstElement * element,
@@ -107,10 +124,11 @@ void gst_wasapi_util_get_best_buffer_sizes (GstAudioRingBufferSpec * spec,
 gboolean gst_wasapi_util_initialize_audioclient (GstElement * element,
     GstAudioRingBufferSpec * spec, IAudioClient * client,
     WAVEFORMATEX * format, guint sharemode, gboolean low_latency,
-    guint * ret_devicep_frames);
+    gboolean loopback, guint * ret_devicep_frames);
 
 gboolean gst_wasapi_util_initialize_audioclient3 (GstElement * element,
     GstAudioRingBufferSpec * spec, IAudioClient3 * client,
-    WAVEFORMATEX * format, gboolean low_latency, guint * ret_devicep_frames);
+    WAVEFORMATEX * format, gboolean low_latency, gboolean loopback,
+    guint * ret_devicep_frames);
 
 #endif /* __GST_WASAPI_UTIL_H__ */

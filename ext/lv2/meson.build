@@ -5,15 +5,17 @@ lv2_sources = [
   'gstlv2utils.c',
 ]
 
-lv2_dep = dependency('lilv-0', version : '>= 0.22', required : false)
+lv2_dep = dependency('lilv-0', version : '>= 0.22', required : get_option('lv2'))
 if lv2_dep.found()
-  gstrsvg = library('gstlv2',
+  gstlv2 = library('gstlv2',
     lv2_sources,
     c_args : gst_plugins_bad_args,
     link_args : noseh_link_args,
     include_directories : [configinc],
-    dependencies : [gstaudio_dep, gstbase_dep, lv2_dep, mathlib],
+    dependencies : [gstaudio_dep, gstbase_dep, lv2_dep, libm],
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstlv2, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstlv2]
 endif

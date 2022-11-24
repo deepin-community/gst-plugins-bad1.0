@@ -137,7 +137,7 @@ gst_mpegv_parse_class_init (GstMpegvParseClass * klass)
 
   g_object_class_install_property (gobject_class, PROP_DROP,
       g_param_spec_boolean ("drop", "drop",
-          "Drop data untill valid configuration data is received either "
+          "Drop data until valid configuration data is received either "
           "in the stream or through caps", DEFAULT_PROP_DROP,
           G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
@@ -174,6 +174,7 @@ gst_mpegv_parse_init (GstMpegvParse * parse)
   parse->config_flags = FLAG_NONE;
 
   gst_base_parse_set_pts_interpolation (GST_BASE_PARSE (parse), FALSE);
+  gst_base_parse_set_infer_ts (GST_BASE_PARSE (parse), FALSE);
   GST_PAD_SET_ACCEPT_INTERSECT (GST_BASE_PARSE_SINK_PAD (parse));
   GST_PAD_SET_ACCEPT_TEMPLATE (GST_BASE_PARSE_SINK_PAD (parse));
 }
@@ -461,6 +462,22 @@ parse_packet_extension (GstMpegvParse * mpvparse, GstMapInfo * info, guint off)
   }
 }
 
+static void
+parse_user_data_packet (GstMpegvParse * mpvparse, const guint8 * data,
+    guint size)
+{
+  GstByteReader br;
+  GstVideoParseUtilsField field = GST_VIDEO_PARSE_UTILS_FIELD_1;
+  gst_byte_reader_init (&br, data, size);
+
+  if (mpvparse->picext.picture_structure ==
+      (guint8) GST_MPEG_VIDEO_PICTURE_STRUCTURE_BOTTOM_FIELD)
+    field = GST_VIDEO_PARSE_UTILS_FIELD_2;
+  gst_video_parse_user_data ((GstElement *) mpvparse, &mpvparse->user_data, &br,
+      field, ITU_T_T35_MANUFACTURER_US_ATSC);
+
+}
+
 /* caller guarantees at least start code in @buf at @off ( - 4)*/
 /* for off == 4 initial code; returns TRUE if code starts a frame
  * otherwise returns TRUE if code terminates preceding frame */
@@ -513,6 +530,18 @@ gst_mpegv_parse_process_sc (GstMpegvParse * mpvparse,
         if (mpvparse->ext_count < G_N_ELEMENTS (mpvparse->ext_offsets))
           mpvparse->ext_offsets[mpvparse->ext_count++] = off;
       }
+      checkconfig = FALSE;
+      break;
+    case GST_MPEG_VIDEO_PACKET_USER_DATA:
+      GST_LOG_OBJECT (mpvparse, "USER_DATA packet of %d bytes", packet->size);
+
+      if (packet->size < 0) {
+        GST_LOG_OBJECT (mpvparse, "no size yet, need more data");
+        *need_more = TRUE;
+        return FALSE;
+      }
+
+      parse_user_data_packet (mpvparse, info->data + off, packet->size);
       checkconfig = FALSE;
       break;
     default:
@@ -877,9 +906,10 @@ gst_mpegv_parse_update_src_caps (GstMpegvParse * mpvparse)
     else
       GST_DEBUG_OBJECT (mpvparse, "Invalid level - %u", level_c);
 
-    gst_caps_set_simple (caps, "interlace-mode",
-        G_TYPE_STRING,
-        (mpvparse->sequenceext.progressive ? "progressive" : "mixed"), NULL);
+    if (!s || !gst_structure_has_field (s, "interlace-mode"))
+      gst_caps_set_simple (caps, "interlace-mode",
+          G_TYPE_STRING,
+          (mpvparse->sequenceext.progressive ? "progressive" : "mixed"), NULL);
   }
 
   gst_pad_set_caps (GST_BASE_PARSE_SRC_PAD (mpvparse), caps);
@@ -938,6 +968,7 @@ gst_mpegv_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
   GstMpegVideoPictureHdr *pic_hdr = NULL;
   GstMpegVideoPictureExt *pic_ext = NULL;
   GstMpegVideoQuantMatrixExt *quant_ext = NULL;
+  GstBuffer *parse_buffer = NULL;
 
   /* tag sending done late enough in hook to ensure pending events
    * have already been sent */
@@ -967,9 +998,6 @@ gst_mpegv_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
 
     mpvparse->send_codec_tag = FALSE;
   }
-
-  /* usual clipping applies */
-  frame->flags |= GST_BASE_PARSE_FRAME_FLAG_CLIP;
 
   if (mpvparse->send_mpeg_meta) {
     GstBuffer *buf;
@@ -1002,6 +1030,22 @@ gst_mpegv_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
     meta->num_slices = mpvparse->slice_count;
     meta->slice_offset = mpvparse->slice_offset;
   }
+
+  if (frame->out_buffer) {
+    parse_buffer = frame->out_buffer =
+        gst_buffer_make_writable (frame->out_buffer);
+  } else {
+    parse_buffer = frame->buffer = gst_buffer_make_writable (frame->buffer);
+  }
+
+  if (pic_ext && !pic_ext->progressive_frame) {
+    GST_BUFFER_FLAG_SET (parse_buffer, GST_VIDEO_BUFFER_FLAG_INTERLACED);
+    if (pic_ext->top_field_first)
+      GST_BUFFER_FLAG_SET (parse_buffer, GST_VIDEO_BUFFER_FLAG_TFF);
+  }
+  gst_video_push_user_data ((GstElement *) mpvparse, &mpvparse->user_data,
+      parse_buffer);
+
   return GST_FLOW_OK;
 }
 
@@ -1023,7 +1067,7 @@ gst_mpegv_parse_set_caps (GstBaseParse * parse, GstCaps * caps)
     gst_buffer_map (buf, &map, GST_MAP_READ);
     /* best possible parse attempt,
      * src caps are based on sink caps so it will end up in there
-     * whether sucessful or not */
+     * whether successful or not */
     mpvparse->seq_offset = 4;
     gst_mpegv_parse_process_config (mpvparse, &map, gst_buffer_get_size (buf));
     gst_buffer_unmap (buf, &map);

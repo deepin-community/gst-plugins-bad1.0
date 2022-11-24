@@ -78,7 +78,7 @@ struct _GstBPMDetectPrivate
 #endif
 
 #define gst_bpm_detect_parent_class parent_class
-G_DEFINE_TYPE (GstBPMDetect, gst_bpm_detect, GST_TYPE_AUDIO_FILTER);
+G_DEFINE_TYPE_WITH_PRIVATE (GstBPMDetect, gst_bpm_detect, GST_TYPE_AUDIO_FILTER);
 
 static void gst_bpm_detect_finalize (GObject * object);
 static gboolean gst_bpm_detect_stop (GstBaseTransform * trans);
@@ -118,16 +118,13 @@ gst_bpm_detect_class_init (GstBPMDetectClass * klass)
   trans_class->passthrough_on_same_caps = TRUE;
 
   filter_class->setup = GST_DEBUG_FUNCPTR (gst_bpm_detect_setup);
-
-  g_type_class_add_private (gobject_class, sizeof (GstBPMDetectPrivate));
 }
 
 static void
 gst_bpm_detect_init (GstBPMDetect * bpm_detect)
 {
-  bpm_detect->priv = G_TYPE_INSTANCE_GET_PRIVATE ((bpm_detect),
-      GST_TYPE_BPM_DETECT, GstBPMDetectPrivate);
-
+  bpm_detect->priv =
+      (GstBPMDetectPrivate *) gst_bpm_detect_get_instance_private (bpm_detect);
   bpm_detect->priv->detect = NULL;
   bpm_detect->bpm = 0.0;
 }
@@ -261,7 +258,7 @@ gst_bpm_detect_transform_ip (GstBaseTransform * trans, GstBuffer * in)
         bpm, (void *) NULL);
     gst_pad_push_event (trans->srcpad, gst_event_new_tag (tags));
 
-    GST_INFO_OBJECT (bpm_detect, "Detected BPM: %lf\n", bpm);
+    GST_INFO_OBJECT (bpm_detect, "Detected BPM: %lf", bpm);
     bpm_detect->bpm = bpm;
   }
 

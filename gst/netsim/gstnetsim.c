@@ -38,8 +38,8 @@ GST_DEBUG_CATEGORY (netsim_debug);
 static GType
 distribution_get_type (void)
 {
-  static volatile gsize g_define_type_id__volatile = 0;
-  if (g_once_init_enter (&g_define_type_id__volatile)) {
+  static gsize static_g_define_type_id = 0;
+  if (g_once_init_enter (&static_g_define_type_id)) {
     static const GEnumValue values[] = {
       {DISTRIBUTION_UNIFORM, "uniform", "uniform"},
       {DISTRIBUTION_NORMAL, "normal", "normal"},
@@ -48,9 +48,9 @@ distribution_get_type (void)
     };
     GType g_define_type_id =
         g_enum_register_static ("GstNetSimDistribution", values);
-    g_once_init_leave (&g_define_type_id__volatile, g_define_type_id);
+    g_once_init_leave (&static_g_define_type_id, g_define_type_id);
   }
-  return g_define_type_id__volatile;
+  return static_g_define_type_id;
 }
 
 enum
@@ -68,7 +68,7 @@ enum
   PROP_ALLOW_REORDERING,
 };
 
-/* these numbers are nothing but wild guesses and dont reflect any reality */
+/* these numbers are nothing but wild guesses and don't reflect any reality */
 #define DEFAULT_MIN_DELAY 200
 #define DEFAULT_MAX_DELAY 400
 #define DEFAULT_DELAY_DISTRIBUTION DISTRIBUTION_UNIFORM
@@ -211,7 +211,7 @@ typedef struct
   GstBuffer *buf;
 } PushBufferCtx;
 
-G_INLINE_FUNC PushBufferCtx *
+static inline PushBufferCtx *
 push_buffer_ctx_new (GstPad * pad, GstBuffer * buf)
 {
   PushBufferCtx *ctx = g_slice_new (PushBufferCtx);
@@ -220,7 +220,7 @@ push_buffer_ctx_new (GstPad * pad, GstBuffer * buf)
   return ctx;
 }
 
-G_INLINE_FUNC void
+static inline void
 push_buffer_ctx_free (PushBufferCtx * ctx)
 {
   if (G_LIKELY (ctx != NULL)) {
@@ -756,6 +756,8 @@ gst_net_sim_class_init (GstNetSimClass * klass)
           G_PARAM_READWRITE | G_PARAM_CONSTRUCT | G_PARAM_STATIC_STRINGS));
 
   GST_DEBUG_CATEGORY_INIT (netsim_debug, "netsim", 0, "Network simulator");
+
+  gst_type_mark_as_plugin_api (distribution_get_type (), 0);
 }
 
 static gboolean

@@ -21,7 +21,6 @@
  * SECTION:element-curlsink
  * @title: curlsink
  * @short_description: sink that uploads data to a server using libcurl
- * @see_also:
  *
  * This is a network sink that uses libcurl as a client to upload data to
  * a server (e.g. a HTTP/FTP server).
@@ -180,7 +179,6 @@ gst_curl_base_sink_class_init (GstCurlBaseSinkClass * klass)
 
   GST_DEBUG_CATEGORY_INIT (gst_curl_base_sink_debug, "curlbasesink", 0,
       "curl base sink element");
-  GST_DEBUG_OBJECT (klass, "class_init");
 
   gst_element_class_set_static_metadata (element_class,
       "Curl base sink",
@@ -236,6 +234,8 @@ gst_curl_base_sink_class_init (GstCurlBaseSinkClass * klass)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_add_static_pad_template (element_class, &sinktemplate);
+
+  gst_type_mark_as_plugin_api (GST_TYPE_CURL_BASE_SINK, 0);
 }
 
 static void
@@ -267,7 +267,6 @@ gst_curl_base_sink_finalize (GObject * gobject)
     g_thread_join (this->transfer_thread);
   }
 
-  gst_curl_base_sink_transfer_cleanup (this);
   g_cond_clear (&this->transfer_cond->cond);
   g_free (this->transfer_cond);
   g_free (this->transfer_buf);
@@ -903,7 +902,7 @@ gst_curl_base_sink_transfer_check (GstCurlBaseSink * sink)
     }
     if (easy) {
       curl_easy_getinfo (easy, CURLINFO_EFFECTIVE_URL, &eff_url);
-      GST_DEBUG ("transfer done %s (%s-%d)\n", eff_url,
+      GST_DEBUG ("transfer done %s (%s-%d)", eff_url,
           curl_easy_strerror (code), code);
     }
   } while (easy);
@@ -1129,8 +1128,7 @@ gst_curl_base_sink_transfer_start_unlocked (GstCurlBaseSink * sink)
   GST_LOG ("creating transfer thread");
   sink->transfer_thread_close = FALSE;
   sink->new_file = TRUE;
-  sink->transfer_thread =
-      g_thread_try_new ("Curl Transfer Thread", (GThreadFunc)
+  sink->transfer_thread = g_thread_try_new ("curl-transfer", (GThreadFunc)
       gst_curl_base_sink_transfer_thread_func, sink, &error);
 
   if (sink->transfer_thread == NULL || error != NULL) {
@@ -1221,6 +1219,8 @@ gst_curl_base_sink_transfer_thread_func (gpointer data)
   }
 
 done:
+  gst_curl_base_sink_transfer_cleanup (sink);
+
   /* extract the error code so the lock does not have to be
    * taken when calling the functions below that take the lock
    * on their own */

@@ -6,15 +6,17 @@ ipcpipeline_sources = [
   'gstipcslavepipeline.c'
 ]
 
-if cc.has_header ('sys/socket.h') and cc.has_function ('pipe') and cc.has_function ('socketpair')
-
-  gstipcpipeline = library('gstipcpipeline',
-    ipcpipeline_sources,
-    c_args : gst_plugins_bad_args,
-    include_directories : [configinc],
-    dependencies : [gstbase_dep],
-    install : true,
-    install_dir : plugins_install_dir,
-  )
-
+if get_option('ipcpipeline').disabled()
+  subdir_done()
 endif
+
+gstipcpipeline = library('gstipcpipeline',
+  ipcpipeline_sources,
+  c_args : gst_plugins_bad_args,
+  include_directories : [configinc],
+  dependencies : [gstbase_dep],
+  install : true,
+  install_dir : plugins_install_dir,
+)
+pkgconfig.generate(gstipcpipeline, install_dir : plugins_pkgconfig_install_dir)
+plugins += [gstipcpipeline]

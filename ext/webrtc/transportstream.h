@@ -37,6 +37,12 @@ typedef struct
   GstCaps *caps;
 } PtMapItem;
 
+typedef struct
+{
+  guint32 ssrc;
+  guint media_idx;
+} SsrcMapItem;
+
 struct _TransportStream
 {
   GstObject                 parent;
@@ -46,6 +52,7 @@ struct _TransportStream
   gboolean                  rtcp_mux;
   gboolean                  rtcp_rsize;
   gboolean                  dtls_client;
+  gboolean                  active;                 /* TRUE if any mline in the bundle/transport is active */
   TransportSendBin         *send_bin;               /* bin containing all the sending transport elements */
   TransportReceiveBin      *receive_bin;            /* bin containing all the receiving transport elements */
   GstWebRTCICEStream       *stream;
@@ -54,6 +61,11 @@ struct _TransportStream
   GstWebRTCDTLSTransport   *rtcp_transport;
 
   GArray                   *ptmap;                  /* array of PtMapItem's */
+  GArray                   *remote_ssrcmap;         /* array of SsrcMapItem's */
+  gboolean                  output_connected;       /* whether receive bin is connected to rtpbin */
+
+  GstElement               *rtxsend;
+  GstElement               *rtxreceive;
 };
 
 struct _TransportStreamClass
@@ -63,6 +75,13 @@ struct _TransportStreamClass
 
 TransportStream *       transport_stream_new        (GstWebRTCBin * webrtc,
                                                      guint session_id);
+int                     transport_stream_get_pt     (TransportStream * stream,
+                                                     const gchar * encoding_name);
+int *                   transport_stream_get_all_pt (TransportStream * stream,
+                                                     const gchar * encoding_name,
+                                                     gsize * pt_len);
+GstCaps *               transport_stream_get_caps_for_pt    (TransportStream * stream,
+                                                             guint pt);
 
 G_END_DECLS
 

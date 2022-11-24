@@ -34,6 +34,9 @@ GType gst_webrtc_ice_transport_get_type(void);
 #define GST_IS_WEBRTC_ICE_TRANSPORT_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass) ,GST_TYPE_WEBRTC_ICE_TRANSPORT))
 #define GST_WEBRTC_ICE_TRANSPORT_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS((obj) ,GST_TYPE_WEBRTC_ICE_TRANSPORT,GstWebRTCICETransportClass))
 
+/**
+ * GstWebRTCICETransport:
+ */
 struct _GstWebRTCICETransport
 {
   GstObject                          parent;
@@ -70,6 +73,8 @@ GST_WEBRTC_API
 void            gst_webrtc_ice_transport_selected_pair_change       (GstWebRTCICETransport * ice);
 GST_WEBRTC_API
 void            gst_webrtc_ice_transport_new_candidate              (GstWebRTCICETransport * ice, guint stream_id, GstWebRTCICEComponent component, gchar * attr);
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(GstWebRTCICETransport, gst_object_unref)
 
 G_END_DECLS
 

@@ -4,7 +4,7 @@ bz2_sources = [
   'gstbz2enc.c',
 ]
 
-bz2_dep = cc.find_library('bz2', required : false)
+bz2_dep = cc.find_library('bz2', required : get_option('bz2'))
 
 if bz2_dep.found() and cc.has_header_symbol('bzlib.h', 'BZ2_bzlibVersion')
   gstbz2 = library('gstbz2',
@@ -15,4 +15,6 @@ if bz2_dep.found() and cc.has_header_symbol('bzlib.h', 'BZ2_bzlibVersion')
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstbz2, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstbz2]
 endif

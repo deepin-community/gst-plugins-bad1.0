@@ -26,11 +26,11 @@
  * If the .#GstZBar:attach-frame property is %TRUE, the posted barcode message
  * includes a sample of the frame where the barcode was detected (Since 1.6).
  *
- * The element generate messages named`barcode`. The structure containes these fields:
+ * The element generate messages named`barcode`. The structure contains these fields:
  *
  * * #GstClockTime `timestamp`: the timestamp of the buffer that triggered the message.
  * * gchar * `type`: the symbol type.
- * * gchar * `symbol`: the deteted bar code data.
+ * * gchar * `symbol`: the detected bar code data.
  * * gint `quality`: an unscaled, relative quantity: larger values are better than smaller
  *   values.
  * * GstSample `frame`: the frame in which the barcode message was detected, if
@@ -166,7 +166,6 @@ gst_zbar_class_init (GstZBarClass * g_class)
 
   trans_class->start = GST_DEBUG_FUNCPTR (gst_zbar_start);
   trans_class->stop = GST_DEBUG_FUNCPTR (gst_zbar_stop);
-  trans_class->transform_ip_on_passthrough = FALSE;
 
   vfilter_class->transform_frame_ip =
       GST_DEBUG_FUNCPTR (gst_zbar_transform_frame_ip);
@@ -291,11 +290,26 @@ gst_zbar_transform_frame_ip (GstVideoFilter * vfilter, GstVideoFrame * frame)
       GstStructure *s;
       GstSample *sample;
       GstCaps *sample_caps;
+      GstClockTime timestamp, running_time, stream_time, duration;
+
+      timestamp = GST_BUFFER_TIMESTAMP (frame->buffer);
+      duration = GST_BUFFER_DURATION (frame->buffer);
+      running_time =
+          gst_segment_to_running_time (&GST_BASE_TRANSFORM (zbar)->segment,
+          GST_FORMAT_TIME, timestamp);
+      stream_time =
+          gst_segment_to_stream_time (&GST_BASE_TRANSFORM (zbar)->segment,
+          GST_FORMAT_TIME, timestamp);
 
       s = gst_structure_new ("barcode",
-          "timestamp", G_TYPE_UINT64, GST_BUFFER_TIMESTAMP (frame->buffer),
+          "timestamp", G_TYPE_UINT64, timestamp,
+          "stream-time", G_TYPE_UINT64, stream_time,
+          "running-time", G_TYPE_UINT64, running_time,
           "type", G_TYPE_STRING, zbar_get_symbol_name (typ),
           "symbol", G_TYPE_STRING, data, "quality", G_TYPE_INT, quality, NULL);
+
+      if (GST_CLOCK_TIME_IS_VALID (duration))
+        gst_structure_set (s, "duration", G_TYPE_UINT64, duration, NULL);
 
       if (zbar->attach_frame) {
         /* create a sample from image */

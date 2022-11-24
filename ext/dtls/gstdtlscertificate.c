@@ -45,16 +45,17 @@
 #endif
 #endif
 
+#include <openssl/bn.h>
+#include <openssl/rsa.h>
 #include <openssl/ssl.h>
+
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#define X509_getm_notBefore X509_get_notBefore
+#define X509_getm_notAfter X509_get_notAfter
+#endif
 
 GST_DEBUG_CATEGORY_STATIC (gst_dtls_certificate_debug);
 #define GST_CAT_DEFAULT gst_dtls_certificate_debug
-
-G_DEFINE_TYPE_WITH_CODE (GstDtlsCertificate, gst_dtls_certificate,
-    G_TYPE_OBJECT, GST_DEBUG_CATEGORY_INIT (gst_dtls_certificate_debug,
-        "dtlscertificate", 0, "DTLS Certificate"));
-
-#define GST_DTLS_CERTIFICATE_GET_PRIVATE(obj) (G_TYPE_INSTANCE_GET_PRIVATE((obj), GST_TYPE_DTLS_CERTIFICATE, GstDtlsCertificatePrivate))
 
 enum
 {
@@ -75,6 +76,11 @@ struct _GstDtlsCertificatePrivate
   gchar *pem;
 };
 
+G_DEFINE_TYPE_WITH_CODE (GstDtlsCertificate, gst_dtls_certificate,
+    G_TYPE_OBJECT, G_ADD_PRIVATE (GstDtlsCertificate)
+    GST_DEBUG_CATEGORY_INIT (gst_dtls_certificate_debug,
+        "dtlscertificate", 0, "DTLS Certificate"));
+
 static void gst_dtls_certificate_finalize (GObject * gobject);
 static void gst_dtls_certificate_set_property (GObject *, guint prop_id,
     const GValue *, GParamSpec *);
@@ -88,8 +94,6 @@ static void
 gst_dtls_certificate_class_init (GstDtlsCertificateClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
-
-  g_type_class_add_private (klass, sizeof (GstDtlsCertificatePrivate));
 
   gobject_class->set_property = gst_dtls_certificate_set_property;
   gobject_class->get_property = gst_dtls_certificate_get_property;
@@ -111,8 +115,9 @@ gst_dtls_certificate_class_init (GstDtlsCertificateClass * klass)
 static void
 gst_dtls_certificate_init (GstDtlsCertificate * self)
 {
-  GstDtlsCertificatePrivate *priv = GST_DTLS_CERTIFICATE_GET_PRIVATE (self);
-  self->priv = priv;
+  GstDtlsCertificatePrivate *priv;
+
+  self->priv = priv = gst_dtls_certificate_get_instance_private (self);
 
   priv->x509 = NULL;
   priv->private_key = NULL;
@@ -174,12 +179,24 @@ gst_dtls_certificate_get_property (GObject * object, guint prop_id,
   }
 }
 
+static const gchar base64_alphabet[64] = {
+  'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+  'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+  'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+  'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+  '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/'
+};
+
 static void
 init_generated (GstDtlsCertificate * self)
 {
   GstDtlsCertificatePrivate *priv = self->priv;
   RSA *rsa;
+  BIGNUM *serial_number;
+  ASN1_INTEGER *asn1_serial_number;
   X509_NAME *name = NULL;
+  gchar common_name[9] = { 0, };
+  gint i;
 
   g_return_if_fail (!priv->x509);
   g_return_if_fail (!priv->private_key);
@@ -239,18 +256,29 @@ init_generated (GstDtlsCertificate * self)
   rsa = NULL;
 
   X509_set_version (priv->x509, 2);
-  ASN1_INTEGER_set (X509_get_serialNumber (priv->x509), 0);
-  X509_gmtime_adj (X509_get_notBefore (priv->x509), 0);
-  X509_gmtime_adj (X509_get_notAfter (priv->x509), 31536000L);  /* A year */
-  X509_set_pubkey (priv->x509, priv->private_key);
 
-  name = X509_get_subject_name (priv->x509);
-  X509_NAME_add_entry_by_txt (name, "C", MBSTRING_ASC, (unsigned char *) "SE",
-      -1, -1, 0);
-  X509_NAME_add_entry_by_txt (name, "CN", MBSTRING_ASC,
-      (unsigned char *) "OpenWebRTC", -1, -1, 0);
+  /* Set a random 64 bit integer as serial number */
+  serial_number = BN_new ();
+  BN_pseudo_rand (serial_number, 64, 0, 0);
+  asn1_serial_number = X509_get_serialNumber (priv->x509);
+  BN_to_ASN1_INTEGER (serial_number, asn1_serial_number);
+  BN_free (serial_number);
+
+  /* Set a random 8 byte base64 string as issuer/subject */
+  name = X509_NAME_new ();
+  for (i = 0; i < 8; i++)
+    common_name[i] =
+        base64_alphabet[g_random_int_range (0, G_N_ELEMENTS (base64_alphabet))];
+  X509_NAME_add_entry_by_NID (name, NID_commonName, MBSTRING_ASC,
+      (const guchar *) common_name, -1, -1, 0);
+  X509_set_subject_name (priv->x509, name);
   X509_set_issuer_name (priv->x509, name);
-  name = NULL;
+  X509_NAME_free (name);
+
+  /* Set expiry in a year */
+  X509_gmtime_adj (X509_getm_notBefore (priv->x509), 0);
+  X509_gmtime_adj (X509_getm_notAfter (priv->x509), 31536000L); /* A year */
+  X509_set_pubkey (priv->x509, priv->private_key);
 
   if (!X509_sign (priv->x509, priv->private_key, EVP_sha256 ())) {
     GST_WARNING_OBJECT (self, "failed to sign certificate");

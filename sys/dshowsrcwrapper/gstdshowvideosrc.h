@@ -55,6 +55,9 @@ struct _GstDshowVideoSrc
   /* device friendly name */
   gchar *device_name;
 
+  /* device index */
+  gint device_index;
+
   /* list of caps created from the list of supported media types of the dshow capture filter */
   GstCaps *caps;
 
@@ -96,6 +99,11 @@ struct _GstDshowVideoSrcClass
 };
 
 GType gst_dshowvideosrc_get_type (void);
+
+
+GstCaps * gst_dshowvideosrc_getcaps_from_capture_filter (IBaseFilter * filter,
+    GList ** pins_mediatypes);
+
 
 G_END_DECLS
 #endif /* __GST_DSHOWVIDEOSRC_H__ */

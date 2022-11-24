@@ -31,23 +31,19 @@
 
 #include "vksink.h"
 #include "vkupload.h"
+#include "vkimageidentity.h"
+#include "vkcolorconvert.h"
+#include "vkdownload.h"
+#include "vkviewconvert.h"
+#include "vkdeviceprovider.h"
 
-#if GST_VULKAN_HAVE_WINDOW_X11
-#include <X11/Xlib.h>
-#endif
-
-#define GST_CAT_DEFAULT gst_gl_gstgl_debug
+#define GST_CAT_DEFAULT gst_vulkan_debug
 GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  GST_DEBUG_CATEGORY_INIT (gst_gl_gstgl_debug, "gstvulkan", 0, "gstvulkan");
-
-#if GST_VULKAN_HAVE_WINDOW_X11
-  if (g_getenv ("GST_VULKAN_XINITTHREADS"))
-    XInitThreads ();
-#endif
+  GST_DEBUG_CATEGORY_INIT (gst_vulkan_debug, "vulkan", 0, "vulkan");
 
   if (!gst_element_register (plugin, "vulkansink",
           GST_RANK_NONE, GST_TYPE_VULKAN_SINK)) {
@@ -58,6 +54,30 @@ plugin_init (GstPlugin * plugin)
           GST_RANK_NONE, GST_TYPE_VULKAN_UPLOAD)) {
     return FALSE;
   }
+
+  if (!gst_element_register (plugin, "vulkandownload",
+          GST_RANK_NONE, GST_TYPE_VULKAN_DOWNLOAD)) {
+    return FALSE;
+  }
+
+  if (!gst_element_register (plugin, "vulkancolorconvert",
+          GST_RANK_NONE, GST_TYPE_VULKAN_COLOR_CONVERT)) {
+    return FALSE;
+  }
+
+  if (!gst_element_register (plugin, "vulkanimageidentity",
+          GST_RANK_NONE, GST_TYPE_VULKAN_IMAGE_IDENTITY)) {
+    return FALSE;
+  }
+
+  if (!gst_element_register (plugin, "vulkanviewconvert",
+          GST_RANK_NONE, GST_TYPE_VULKAN_VIEW_CONVERT)) {
+    return FALSE;
+  }
+
+  if (!gst_device_provider_register (plugin, "vulkandeviceprovider",
+          GST_RANK_MARGINAL, GST_TYPE_VULKAN_DEVICE_PROVIDER))
+    return FALSE;
 
   return TRUE;
 }

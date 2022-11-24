@@ -46,12 +46,11 @@
  *
  * Applies the cvSobel OpenCV function to the image.
  *
- * <refsect2>
- * <title>Example launch line</title>
+ * ## Example launch line
+ *
  * |[
  * gst-launch-1.0 videotestsrc ! cvsobel ! videoconvert ! autovideosink
  * ]|
- * </refsect2>
  */
 
 #ifdef HAVE_CONFIG_H
@@ -59,7 +58,7 @@
 #endif
 
 #include "gstcvsobel.h"
-#include <opencv2/imgproc/imgproc_c.h>
+#include <opencv2/imgproc.hpp>
 
 GST_DEBUG_CATEGORY_STATIC (gst_cv_sobel_debug);
 #define GST_CAT_DEFAULT gst_cv_sobel_debug
@@ -104,10 +103,10 @@ static void gst_cv_sobel_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec);
 
 static GstFlowReturn gst_cv_sobel_transform (GstOpencvVideoFilter * filter,
-    GstBuffer * buf, IplImage * img, GstBuffer * outbuf, IplImage * outimg);
+    GstBuffer * buf, cv::Mat img, GstBuffer * outbuf, cv::Mat outimg);
 static gboolean gst_cv_sobel_set_caps (GstOpencvVideoFilter * transform,
-    gint in_width, gint in_height, gint in_depth, gint in_channels,
-    gint out_width, gint out_height, gint out_depth, gint out_channels);
+    gint in_width, gint in_height, int in_cv_type,
+    gint out_width, gint out_height, int out_cv_type);
 
 /* Clean up */
 static void
@@ -115,10 +114,8 @@ gst_cv_sobel_finalize (GObject * obj)
 {
   GstCvSobel *filter = GST_CV_SOBEL (obj);
 
-  if (filter->cvSobel != NULL) {
-    cvReleaseImage (&filter->cvGray);
-    cvReleaseImage (&filter->cvSobel);
-  }
+  filter->cvGray.release ();
+  filter->cvSobel.release ();
 
   G_OBJECT_CLASS (gst_cv_sobel_parent_class)->finalize (obj);
 }
@@ -158,7 +155,8 @@ gst_cv_sobel_class_init (GstCvSobelClass * klass)
   g_object_class_install_property (gobject_class, PROP_MASK,
       g_param_spec_boolean ("mask", "Mask",
           "Sets whether the detected derivative edges should be used as a mask on the original input or not",
-          DEFAULT_MASK, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+          DEFAULT_MASK,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
   gst_element_class_add_static_pad_template (element_class, &src_factory);
   gst_element_class_add_static_pad_template (element_class, &sink_factory);
@@ -185,18 +183,13 @@ gst_cv_sobel_init (GstCvSobel * filter)
 /* this function handles the link with other elements */
 static gboolean
 gst_cv_sobel_set_caps (GstOpencvVideoFilter * transform,
-    gint in_width, gint in_height, gint in_depth, gint in_channels,
-    gint out_width, gint out_height, gint out_depth, gint out_channels)
+    gint in_width, gint in_height, int in_cv_type,
+    gint out_width, gint out_height, int out_cv_type)
 {
   GstCvSobel *filter = GST_CV_SOBEL (transform);
 
-  if (filter->cvSobel != NULL) {
-      cvReleaseImage (&filter->cvGray);
-      cvReleaseImage (&filter->cvSobel);
-  }
-
-  filter->cvGray = cvCreateImage (cvSize (in_width, in_height), IPL_DEPTH_8U, 1);
-  filter->cvSobel = cvCreateImage (cvSize (out_width, out_height), IPL_DEPTH_8U, 1);
+  filter->cvGray.create (cv::Size (in_width, in_height), CV_8UC1);
+  filter->cvSobel.create (cv::Size (out_width, out_height), CV_8UC1);
 
   return TRUE;
 }
@@ -259,19 +252,19 @@ gst_cv_sobel_get_property (GObject * object, guint prop_id,
 
 static GstFlowReturn
 gst_cv_sobel_transform (GstOpencvVideoFilter * base, GstBuffer * buf,
-    IplImage * img, GstBuffer * outbuf, IplImage * outimg)
+    cv::Mat img, GstBuffer * outbuf, cv::Mat outimg)
 {
   GstCvSobel *filter = GST_CV_SOBEL (base);
 
-  cvCvtColor (img, filter->cvGray, CV_RGB2GRAY);
-  cvSobel (filter->cvGray, filter->cvSobel, filter->x_order, filter->y_order,
-      filter->aperture_size);
+  cv::cvtColor (img, filter->cvGray, cv::COLOR_RGB2GRAY);
+  cv::Sobel (filter->cvGray, filter->cvSobel, filter->cvGray.depth (),
+      filter->x_order, filter->y_order, filter->aperture_size);
 
-  cvZero (outimg);
+  outimg.setTo (cv::Scalar::all (0));
   if (filter->mask) {
-    cvCopy (img, outimg, filter->cvSobel);
+    img.copyTo (outimg, filter->cvSobel);
   } else {
-    cvCvtColor (filter->cvSobel, outimg, CV_GRAY2RGB);
+    cv::cvtColor (filter->cvSobel, outimg, cv::COLOR_GRAY2RGB);
   }
 
   return GST_FLOW_OK;

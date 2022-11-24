@@ -2207,7 +2207,8 @@ rsn_dvdsrc_update_highlight (resinDvdSrc * src)
     if (src->active_button < 1) {
       /* When setting the button for the first time, take the
          timestamp into account. */
-      GST_EVENT_TIMESTAMP (event) = MPEGTIME_TO_GSTTIME (area.pts);
+      gst_structure_set (s, "ts", GST_TYPE_CLOCK_TIME,
+          MPEGTIME_TO_GSTTIME (area.pts), NULL);
     }
 
     src->active_button = button;
@@ -2826,7 +2827,7 @@ rsn_dvdsrc_do_seek (GstBaseSrc * bsrc, GstSegment * segment)
   gboolean ret = FALSE;
 
   if (segment->format == rsndvd_format || src->first_seek) {
-    /* The internal format has alread served its purpose of waking
+    /* The internal format has already served its purpose of waking
      * everything up and flushing, we just need to step to the next
      * data block (below) so we know our new position */
     ret = TRUE;

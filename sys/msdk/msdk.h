@@ -40,14 +40,28 @@
 
 #include <gst/gst.h>
 #include <gst/video/video.h>
+#include <gst/allocators/allocators.h>
 
-#ifdef HAVE_LIBMFX
-#  include <mfx/mfxvideo.h>
-#else
-#  include "mfxvideo.h"
-#endif
+#include <mfxvideo.h>
+#include <mfxplugin.h>
 
 G_BEGIN_DECLS
+
+#define GST_MSDK_CAPS_MAKE(format) \
+  GST_VIDEO_CAPS_MAKE (format) ", " \
+  "interlace-mode = (string) progressive"
+
+#ifndef _WIN32
+#define GST_MSDK_CAPS_MAKE_WITH_DMABUF_FEATURE(dmaformat) \
+  GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_MEMORY_DMABUF, dmaformat) ", " \
+  "interlace-mode = (string) progressive"
+#else
+#define GST_MSDK_CAPS_MAKE_WITH_DMABUF_FEATURE(dmaformat) ""
+#endif
+
+#define GST_MSDK_CAPS_STR(format,dmaformat) \
+  GST_MSDK_CAPS_MAKE (format) "; " \
+  GST_MSDK_CAPS_MAKE_WITH_DMABUF_FEATURE (dmaformat)
 
 mfxSession msdk_open_session (mfxIMPL impl);
 void msdk_close_session (mfxSession session);
@@ -60,7 +74,7 @@ void msdk_frame_to_surface (GstVideoFrame * frame, mfxFrameSurface1 * surface);
 
 const gchar *msdk_status_to_string (mfxStatus status);
 
-void gst_msdk_set_video_alignment (GstVideoInfo * info,
+void gst_msdk_set_video_alignment (GstVideoInfo * info, guint alloc_w, guint alloc_h,
     GstVideoAlignment * alignment);
 
 /* Conversion from Gstreamer to libmfx */
@@ -74,6 +88,24 @@ gst_msdk_is_msdk_buffer (GstBuffer * buf);
 
 mfxFrameSurface1 *
 gst_msdk_get_surface_from_buffer (GstBuffer * buf);
+
+GstVideoFormat
+gst_msdk_get_video_format_from_mfx_fourcc (mfxU32 fourcc);
+
+void
+gst_msdk_update_mfx_frame_info_from_mfx_video_param (mfxFrameInfo * mfx_info,
+    mfxVideoParam * param);
+
+void
+gst_msdk_get_mfx_video_orientation_from_video_direction (guint value,
+    guint * mfx_mirror, guint * mfx_rotation);
+
+gboolean
+gst_msdk_load_plugin (mfxSession session, const mfxPluginUID * uid,
+    mfxU32 version, const gchar * plugin);
+
+mfxU16
+msdk_get_platform_codename (mfxSession session);
 
 G_END_DECLS
 

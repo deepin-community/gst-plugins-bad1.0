@@ -5,6 +5,7 @@ webrtc_sources = [
   'rtpreceiver.c',
   'rtpsender.c',
   'rtptransceiver.c',
+  'datachannel.c',
 ]
 
 webrtc_headers = [
@@ -14,6 +15,7 @@ webrtc_headers = [
   'rtpreceiver.h',
   'rtpsender.h',
   'rtptransceiver.h',
+  'datachannel.h',
   'webrtc_fwd.h',
   'webrtc.h',
 ]
@@ -25,29 +27,28 @@ webrtc_enumtypes_headers = [
   'webrtc_fwd.h',
 ]
 
-mkenums = find_program('webrtc_mkenum.py')
-gstwebrtc_h = custom_target('gstwebrtcenum_h',
-  output : 'webrtc-enumtypes.h',
-  input : webrtc_enumtypes_headers,
-  install : true,
-  install_dir : 'include/gstreamer-1.0/gst/webrtc/',
-  command : [mkenums, glib_mkenums, '@OUTPUT@', '@INPUT@'])
+webrtc_enums = gnome.mkenums_simple('webrtc-enumtypes',
+  sources : webrtc_enumtypes_headers,
+  body_prefix : '#ifdef HAVE_CONFIG_H\n#include "config.h"\n#endif',
+  header_prefix : '#include <gst/webrtc/webrtc_fwd.h>',
+  decorator: 'GST_WEBRTC_API',
+  install_header: true,
+  install_dir : join_paths(get_option('includedir'), 'gstreamer-1.0/gst/webrtc/'))
 
-gstwebrtc_c = custom_target('gstwebrtcenum_c',
-  output : 'webrtc-enumtypes.c',
-  input : webrtc_enumtypes_headers,
-  depends : [gstwebrtc_h],
-  command : [mkenums, glib_mkenums, '@OUTPUT@', '@INPUT@'])
+gstwebrtc_c = webrtc_enums[0]
+gstwebrtc_h = webrtc_enums[1]
+
 webrtc_gen_sources = [gstwebrtc_h]
 
 gstwebrtc_dependencies = [gstbase_dep, gstsdp_dep]
 
 gstwebrtc = library('gstwebrtc-' + api_version,
   webrtc_sources, gstwebrtc_c, gstwebrtc_h,
-  c_args : gst_plugins_bad_args + ['-DGST_USE_UNSTABLE_API'],
+  c_args : gst_plugins_bad_args + ['-DGST_USE_UNSTABLE_API', '-DBUILDING_GST_WEBRTC'],
   include_directories : [configinc, libsinc],
   version : libversion,
   soversion : soversion,
+  darwin_versions : osxversion,
   install : true,
   dependencies : gstwebrtc_dependencies,
 )

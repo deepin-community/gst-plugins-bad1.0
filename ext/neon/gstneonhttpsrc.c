@@ -298,7 +298,7 @@ gst_neonhttp_src_set_property (GObject * object, guint prop_id,
         goto done;
       }
       if (!gst_neonhttp_src_set_proxy (src, proxy)) {
-        GST_WARNING ("badly formated proxy");
+        GST_WARNING ("badly formatted proxy");
         goto done;
       }
       break;
@@ -314,14 +314,14 @@ gst_neonhttp_src_set_property (GObject * object, guint prop_id,
         goto done;
       }
       if (!gst_neonhttp_src_set_location (src, location, NULL)) {
-        GST_WARNING ("badly formated location");
+        GST_WARNING ("badly formatted location");
         goto done;
       }
       break;
     }
     case PROP_USER_AGENT:
       g_free (src->user_agent);
-      src->user_agent = g_strdup (g_value_get_string (value));
+      src->user_agent = g_value_dup_string (value);
       break;
     case PROP_COOKIES:
       if (src->cookies)
@@ -429,7 +429,7 @@ gst_neonhttp_src_get_property (GObject * object, guint prop_id,
 static void
 oom_callback (void)
 {
-  GST_ERROR ("memory exeception in neon");
+  GST_ERROR ("memory exception in neon");
 }
 
 static GstFlowReturn
@@ -817,7 +817,7 @@ ssl_verify_callback (void *data, int failures, const ne_ssl_certificate * cert)
     GST_ELEMENT_ERROR (src, RESOURCE, READ,
         (NULL), ("Server certificate signer not trusted"));
 
-  GST_DEBUG_OBJECT (src, "failures: %d\n", failures);
+  GST_DEBUG_OBJECT (src, "failures: %d", failures);
 
   return failures;
 }

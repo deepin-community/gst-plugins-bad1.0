@@ -52,6 +52,7 @@ struct _GstAvWait
   GstAvWaitMode mode;
 
   GstVideoTimeCode *end_tc;
+  GstClockTime end_running_time;
   GstClockTime running_time_to_end_at;
 
   GstPad *asrcpad, *asinkpad, *vsrcpad, *vsinkpad;
@@ -63,16 +64,32 @@ struct _GstAvWait
 
   GstClockTime running_time_to_wait_for;
   GstClockTime last_seen_video_running_time;
+  GstClockTime first_audio_running_time;
   GstVideoTimeCode *last_seen_tc;
 
+  /* If running_time_to_wait_for has been reached but we are
+   * not recording, audio shouldn't start running. It should
+   * instead start synchronised with the video when we start
+   * recording. Similarly when stopping recording manually vs
+   * when the target timecode has been reached. So we use
+   * different variables for the audio */
+  GstClockTime audio_running_time_to_wait_for;
+  GstClockTime audio_running_time_to_end_at;
+
   gboolean video_eos_flag;
+  gboolean audio_eos_flag;
+  gboolean video_flush_flag;
   gboolean audio_flush_flag;
   gboolean shutdown_flag;
 
   gboolean dropping;
+  gboolean recording;
+  gboolean was_recording;
+  gint must_send_end_message;
 
   GCond cond;
   GMutex mutex;
+  GCond audio_cond;
 };
 
 struct _GstAvWaitClass

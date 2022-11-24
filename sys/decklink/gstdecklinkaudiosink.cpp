@@ -17,6 +17,23 @@
  * Free Software Foundation, Inc., 51 Franklin Street, Suite 500,
  * Boston, MA 02110-1335, USA.
  */
+/**
+ * SECTION:element-decklinkaudiosink
+ * @short_description: Outputs Audio to a BlackMagic DeckLink Device
+ * @see_also: decklinkvideosink
+ *
+ * Playout Video and Audio to a BlackMagic DeckLink Device. Can only be used
+ * in conjunction with decklinkvideosink.
+ *
+ * ## Sample pipeline
+ * |[
+ * gst-launch-1.0 \
+ *   videotestsrc ! decklinkvideosink device-number=0 mode=1080p25 \
+ *   audiotestsrc ! decklinkaudiosink device-number=0
+ * ]|
+ * Playout a 1080p25 test-video with a test-audio signal to the SDI-Out of Card 0.
+ * Devices are numbered starting with 0.
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -152,7 +169,8 @@ gst_decklink_audio_sink_class_init (GstDecklinkAudioSinkClass * klass)
   gst_element_class_add_static_pad_template (element_class, &sink_template);
 
   gst_element_class_set_static_metadata (element_class, "Decklink Audio Sink",
-      "Audio/Sink", "Decklink Sink", "David Schleef <ds@entropywave.com>, "
+      "Audio/Sink/Hardware", "Decklink Sink",
+      "David Schleef <ds@entropywave.com>, "
       "Sebastian Dröge <sebastian@centricular.com>");
 
   GST_DEBUG_CATEGORY_INIT (gst_decklink_audio_sink_debug, "decklinkaudiosink",
@@ -591,7 +609,7 @@ gst_decklink_audio_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
     GstClockTime buffered_time;
     guint32 written = 0;
     GstClock *clock;
-    GstClockTime clock_ahead;
+    GstClockTimeDiff clock_ahead;
 
     if (GST_BASE_SINK_CAST (self)->flushing) {
       flow_ret = GST_FLOW_FLUSHING;
@@ -646,14 +664,13 @@ gst_decklink_audio_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
         else
           clock_now = 0;
 
-        if (clock_now < running_time)
-          clock_ahead = running_time - clock_now;
+        clock_ahead = running_time - clock_now;
       }
     }
 
     GST_DEBUG_OBJECT (self,
-        "Ahead %" GST_TIME_FORMAT " of the clock running time",
-        GST_TIME_ARGS (clock_ahead));
+        "Ahead %" GST_STIME_FORMAT " of the clock running time",
+        GST_STIME_ARGS (clock_ahead));
 
     if (self->output->
         output->GetBufferedAudioSampleFrameCount (&buffered_samples) != S_OK)
@@ -665,13 +682,35 @@ gst_decklink_audio_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
     GST_DEBUG_OBJECT (self,
         "Buffered %" GST_TIME_FORMAT " in the driver (%u samples)",
         GST_TIME_ARGS (buffered_time), buffered_samples);
+
+    {
+      GstClockTimeDiff buffered_ahead_of_clock_ahead = GST_CLOCK_DIFF (clock_ahead, buffered_time);
+
+      GST_DEBUG_OBJECT (self, "driver is %" GST_STIME_FORMAT " ahead of the "
+          "expected clock", GST_STIME_ARGS (buffered_ahead_of_clock_ahead));
+      /* we don't want to store too much data in the driver as decklink
+       * doesn't seem to actually use our provided timestamps to perform its
+       * own synchronisation. It seems to count samples instead. */
+      /* FIXME: do we need to split buffers? */
+      if (buffered_ahead_of_clock_ahead > 0 &&
+            buffered_ahead_of_clock_ahead > gst_base_sink_get_max_lateness (bsink)) {
+        GST_DEBUG_OBJECT (self, "Dropping buffer that is %" GST_STIME_FORMAT
+            " too late", GST_STIME_ARGS (buffered_ahead_of_clock_ahead));
+        if (self->resampler)
+          gst_audio_resampler_reset (self->resampler);
+        flow_ret = GST_FLOW_OK;
+        break;
+      }
+    }
+
     // We start waiting once we have more than buffer-time buffered
-    if (buffered_time > self->buffer_time || clock_ahead > self->buffer_time) {
+    if (((GstClockTime) clock_ahead) > self->buffer_time) {
       GstClockReturn clock_ret;
       GstClockTime wait_time = running_time;
 
       GST_DEBUG_OBJECT (self,
-          "Buffered enough, wait for preroll or the clock or flushing");
+          "Buffered enough, wait for preroll or the clock or flushing. "
+          "Configured buffer time: %" GST_TIME_FORMAT, GST_TIME_ARGS (self->buffer_time));
 
       if (wait_time < self->buffer_time)
         wait_time = 0;
@@ -751,7 +790,7 @@ gst_decklink_audio_sink_open (GstBaseSink * bsink)
 {
   GstDecklinkAudioSink *self = GST_DECKLINK_AUDIO_SINK_CAST (bsink);
 
-  GST_DEBUG_OBJECT (self, "Stopping");
+  GST_DEBUG_OBJECT (self, "Starting");
 
   self->output =
       gst_decklink_acquire_nth_output (self->device_number,
@@ -845,6 +884,14 @@ gst_decklink_audio_sink_change_state (GstElement * element,
       GST_OBJECT_LOCK (self);
       gst_audio_stream_align_mark_discont (self->stream_align);
       GST_OBJECT_UNLOCK (self);
+
+      g_mutex_lock (&self->output->lock);
+      if (self->output->start_scheduled_playback)
+        self->output->start_scheduled_playback (self->output->videosink);
+      g_mutex_unlock (&self->output->lock);
+      break;
+    case GST_STATE_CHANGE_PAUSED_TO_READY:
+      gst_decklink_audio_sink_stop (self);
       break;
     default:
       break;
@@ -855,16 +902,6 @@ gst_decklink_audio_sink_change_state (GstElement * element,
     return ret;
 
   switch (transition) {
-    case GST_STATE_CHANGE_PAUSED_TO_READY:
-      gst_decklink_audio_sink_stop (self);
-      break;
-    case GST_STATE_CHANGE_PAUSED_TO_PLAYING:{
-      g_mutex_lock (&self->output->lock);
-      if (self->output->start_scheduled_playback)
-        self->output->start_scheduled_playback (self->output->videosink);
-      g_mutex_unlock (&self->output->lock);
-      break;
-    }
     default:
       break;
   }

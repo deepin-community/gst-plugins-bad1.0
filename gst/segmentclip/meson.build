@@ -13,3 +13,5 @@ gstsegmentclip = library('gstsegmentclip',
   install : true,
   install_dir : plugins_install_dir,
 )
+pkgconfig.generate(gstsegmentclip, install_dir : plugins_pkgconfig_install_dir)
+plugins += [gstsegmentclip]

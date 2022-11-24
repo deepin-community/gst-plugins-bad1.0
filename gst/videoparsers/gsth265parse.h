@@ -24,6 +24,8 @@
 #include <gst/gst.h>
 #include <gst/base/gstbaseparse.h>
 #include <gst/codecparsers/gsth265parser.h>
+#include <gst/video/video.h>
+#include "gstvideoparseutils.h"
 
 G_BEGIN_DECLS
 
@@ -52,6 +54,8 @@ struct _GstH265Parse
   gint fps_num, fps_den;
   gint upstream_par_n, upstream_par_d;
   gint parsed_par_n, parsed_par_d;
+  gint parsed_fps_n, parsed_fps_d;
+  GstVideoColorimetry parsed_colorimetry;
   /* current codec_data in output caps, if any */
   GstBuffer *codec_data;
   /* input codec_data, if any */
@@ -63,6 +67,7 @@ struct _GstH265Parse
 
   /* state */
   GstH265Parser *nalparser;
+  guint in_align;
   guint state;
   guint align;
   guint format;
@@ -76,29 +81,54 @@ struct _GstH265Parse
   gboolean have_sps;
   gboolean have_pps;
 
+  /* per frame vps/sps/pps check for periodic push codec decision */
+  gboolean have_vps_in_frame;
+  gboolean have_sps_in_frame;
+  gboolean have_pps_in_frame;
+
+  gboolean first_frame;
+
   /* collected SPS and PPS NALUs */
   GstBuffer *vps_nals[GST_H265_MAX_VPS_COUNT];
   GstBuffer *sps_nals[GST_H265_MAX_SPS_COUNT];
   GstBuffer *pps_nals[GST_H265_MAX_PPS_COUNT];
 
+  /* Infos we need to keep track of */
+  guint8 sei_pic_struct;
+
+  /* Collected TimeCode SEI */
+  GstH265TimeCode time_code;
+
   gboolean discont;
+  gboolean marker;
 
   /* frame parsing */
   gint idr_pos, sei_pos;
   gboolean update_caps;
   GstAdapter *frame_out;
   gboolean keyframe;
+  gboolean predicted;
+  gboolean bidirectional;
   gboolean header;
   /* AU state */
   gboolean picture_start;
 
+  GstVideoParseUserData user_data;
+
   /* props */
   gint interval;
 
-  gboolean sent_codec_tag;
-
   GstClockTime pending_key_unit_ts;
   GstEvent *force_key_unit_event;
+
+  GstVideoMasteringDisplayInfo mastering_display_info;
+  guint mastering_display_info_state;
+
+  GstVideoContentLightLevel content_light_level;
+  guint content_light_level_state;
+
+  /* For forward predicted trickmode */
+  gboolean discard_bidirectional;
 };
 
 struct _GstH265ParseClass

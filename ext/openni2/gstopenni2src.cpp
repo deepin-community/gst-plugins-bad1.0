@@ -18,22 +18,17 @@
 /**
  * SECTION:element-openni2src
  *
- * <refsect2>
- * <title>Examples</title>
- * <para>
- * Some recorded .oni files are available at:
- * <programlisting>
- *  http://people.cs.pitt.edu/~chang/1635/proj11/kinectRecord
- * </programlisting>
+ * ## Examples
  *
- * <programlisting>
-  LD_LIBRARY_PATH=/usr/lib/OpenNI2/Drivers/ gst-launch-1.0 --gst-debug=openni2src:5   openni2src location='Downloads/mr.oni' sourcetype=depth ! videoconvert ! ximagesink
- * </programlisting>
- * <programlisting>
-  LD_LIBRARY_PATH=/usr/lib/OpenNI2/Drivers/ gst-launch-1.0 --gst-debug=openni2src:5   openni2src location='Downloads/mr.oni' sourcetype=color ! videoconvert ! ximagesink
- * </programlisting>
- * </para>
- * </refsect2>
+ * Some recorded .oni files are available at <http://people.cs.pitt.edu/~chang/1635/proj11/kinectRecord>
+ *
+ * ``` shell
+ * LD_LIBRARY_PATH=/usr/lib/OpenNI2/Drivers/ gst-launch-1.0 --gst-debug=openni2src:5   openni2src location='Downloads/mr.oni' sourcetype=depth ! videoconvert ! ximagesink
+ * ```
+ *
+ * ``` shell
+ * LD_LIBRARY_PATH=/usr/lib/OpenNI2/Drivers/ gst-launch-1.0 --gst-debug=openni2src:5   openni2src location='Downloads/mr.oni' sourcetype=color ! videoconvert ! ximagesink
+ * ```
  */
 
 #ifdef HAVE_CONFIG_H
@@ -145,6 +140,8 @@ gst_openni2_src_class_init (GstOpenni2SrcClass * klass)
           GST_TYPE_OPENNI2_SRC_SOURCETYPE, DEFAULT_SOURCETYPE,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
+  gst_type_mark_as_plugin_api (GST_TYPE_OPENNI2_SRC_SOURCETYPE,
+      (GstPluginAPIFlags) 0);
 
   basesrc_class->start = GST_DEBUG_FUNCPTR (gst_openni2_src_start);
   basesrc_class->stop = GST_DEBUG_FUNCPTR (gst_openni2_src_stop);
@@ -307,7 +304,7 @@ gst_openni2_src_start (GstBaseSrc * bsrc)
   if (src->depth->isValid ()) {
     rc = src->depth->start ();
     if (rc != openni::STATUS_OK) {
-      GST_ERROR_OBJECT (src, "Couldn't start the depth stream\n%s\n",
+      GST_ERROR_OBJECT (src, "Couldn't start the depth stream: %s",
           openni::OpenNI::getExtendedError ());
       return FALSE;
     }
@@ -316,7 +313,7 @@ gst_openni2_src_start (GstBaseSrc * bsrc)
   if (src->color->isValid ()) {
     rc = src->color->start ();
     if (rc != openni::STATUS_OK) {
-      GST_ERROR_OBJECT (src, "Couldn't start the color stream\n%s\n",
+      GST_ERROR_OBJECT (src, "Couldn't start the color stream: %s",
           openni::OpenNI::getExtendedError ());
       return FALSE;
     }
@@ -554,7 +551,7 @@ openni2_initialise_devices (GstOpenni2Src * src)
     return FALSE;
   }
 
-  /** depth sensor **/
+  /* depth sensor */
   rc = src->depth->create (*src->device, openni::SENSOR_DEPTH);
   if (rc == openni::STATUS_OK) {
     rc = src->depth->start ();
@@ -567,7 +564,7 @@ openni2_initialise_devices (GstOpenni2Src * src)
         openni::OpenNI::getExtendedError ());
   }
 
-  /** color sensor **/
+  /* color sensor */
   rc = src->color->create (*src->device, openni::SENSOR_COLOR);
   if (rc == openni::STATUS_OK) {
     rc = src->color->start ();
@@ -582,12 +579,12 @@ openni2_initialise_devices (GstOpenni2Src * src)
   }
 
   if (!src->depth->isValid () && !src->color->isValid ()) {
-    GST_ERROR_OBJECT (src, "No valid streams. Exiting\n");
+    GST_ERROR_OBJECT (src, "No valid streams. Exiting");
     openni::OpenNI::shutdown ();
     return FALSE;
   }
 
-  /** Get resolution and make sure is valid **/
+  /* Get resolution and make sure is valid */
   if (src->depth->isValid () && src->color->isValid ()) {
     src->depthVideoMode = src->depth->getVideoMode ();
     src->colorVideoMode = src->color->getVideoMode ();

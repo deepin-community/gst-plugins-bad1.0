@@ -1658,10 +1658,12 @@ gst_mxf_demux_pad_set_component (GstMXFDemux * demux, GstMXFDemuxPad * pad,
   pad->current_essence_track_position = pad->current_component_start;
 
   pad_caps = gst_pad_get_current_caps (GST_PAD_CAST (pad));
-  if (!gst_caps_is_equal (pad_caps, pad->current_essence_track->caps)) {
+  if (!pad_caps
+      || !gst_caps_is_equal (pad_caps, pad->current_essence_track->caps)) {
     gst_pad_set_caps (GST_PAD_CAST (pad), pad->current_essence_track->caps);
   }
-  gst_caps_unref (pad_caps);
+  if (pad_caps)
+    gst_caps_unref (pad_caps);
 
   if (update) {
     if (pad->tags) {
@@ -2012,7 +2014,20 @@ gst_mxf_demux_handle_generic_container_essence_element (GstMXFDemux * demux,
       pad->discont = FALSE;
     }
 
-    ret = gst_pad_push (GST_PAD_CAST (pad), outbuf);
+    /* Handlers can provide empty GAP buffers to indicate that the parsed
+     * content was valid but that nothing meaningful needs to be outputted. In
+     * such cases we send out a GAP event instead */
+    if (GST_BUFFER_FLAG_IS_SET (outbuf, GST_BUFFER_FLAG_GAP) &&
+        gst_buffer_get_size (outbuf) == 0) {
+      GstEvent *gap = gst_event_new_gap (GST_BUFFER_DTS (outbuf),
+          GST_BUFFER_DURATION (outbuf));
+      gst_buffer_unref (outbuf);
+      GST_DEBUG_OBJECT (pad,
+          "Replacing empty gap buffer with gap event %" GST_PTR_FORMAT, gap);
+      gst_pad_push_event (GST_PAD_CAST (pad), gap);
+    } else {
+      ret = gst_pad_push (GST_PAD_CAST (pad), outbuf);
+    }
     outbuf = NULL;
     ret = gst_flow_combiner_update_flow (demux->flowcombiner, ret);
     GST_LOG_OBJECT (demux, "combined return %s", gst_flow_get_name (ret));

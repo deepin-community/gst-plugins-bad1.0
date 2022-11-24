@@ -149,7 +149,7 @@ gst_pnmdec_negotiate (GstVideoDecoder * decoder)
         const gchar *fmtstr;
 
         pnmdec->size = pnmdec->mngr.info.width * pnmdec->mngr.info.height * 2;
-        /* perform some basic negotiation to resolve which endianess,
+        /* perform some basic negotiation to resolve which endianness,
          * if any, is supported by the component downstream. Query
          * the peer caps, intersecting with our preferred caps
          */
@@ -243,6 +243,9 @@ gst_pnmdec_parse_ascii (GstPnmdec * s, const guint8 * b, guint bs)
   guint target, last_val = 0;
   GstMapInfo map;
   guint8 *outdata;
+
+  if (!s->buf)
+    return GST_FLOW_OK;
 
   target = s->size - s->current_size;
 
@@ -571,7 +574,7 @@ gst_pnmdec_finish (GstVideoDecoder * decoder)
   if (s->mngr.info.encoding == GST_PNM_ENCODING_ASCII) {
     /* One last go at outputting any final value */
     gst_pnmdec_parse_ascii (s, 0, 0);
-    if (s->size <= s->current_size) {
+    if (s->size && s->size <= s->current_size) {
       return gst_video_decoder_have_frame (decoder);
     }
   }

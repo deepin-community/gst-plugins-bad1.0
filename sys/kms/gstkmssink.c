@@ -31,9 +31,14 @@
  * kmssink is a simple video sink that renders video frames directly
  * in a plane of a DRM device.
  *
+ * In advance usage, the behaviour of kmssink can be change using the
+ * supported properties. Note that plane and connectors IDs and properties can
+ * be enumerated using the modetest command line tool.
+ *
  * ## Example launch line
  * |[
  * gst-launch-1.0 videotestsrc ! kmssink
+ * gst-launch-1.0 videotestsrc ! kmssink plane-properties=s,rotation=4
  * ]|
  *
  */
@@ -50,7 +55,6 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <drm_fourcc.h>
-
 #include <string.h>
 
 #include "gstkmssink.h"
@@ -85,10 +89,13 @@ enum
   PROP_CONNECTOR_ID,
   PROP_PLANE_ID,
   PROP_FORCE_MODESETTING,
+  PROP_RESTORE_CRTC,
   PROP_CAN_SCALE,
   PROP_DISPLAY_WIDTH,
   PROP_DISPLAY_HEIGHT,
-  PROP_N
+  PROP_CONNECTOR_PROPS,
+  PROP_PLANE_PROPS,
+  PROP_N,
 };
 
 static GParamSpec *g_properties[PROP_N] = { NULL, };
@@ -408,13 +415,20 @@ get_drm_caps (GstKMSSink * self)
   return TRUE;
 }
 
+static void
+ensure_kms_allocator (GstKMSSink * self)
+{
+  if (self->allocator)
+    return;
+  self->allocator = gst_kms_allocator_new (self->fd);
+}
+
 static gboolean
 configure_mode_setting (GstKMSSink * self, GstVideoInfo * vinfo)
 {
   gboolean ret;
   drmModeConnector *conn;
   int err;
-  drmModeFB *fb;
   gint i;
   drmModeModeInfo *mode;
   guint32 fb_id;
@@ -422,7 +436,6 @@ configure_mode_setting (GstKMSSink * self, GstVideoInfo * vinfo)
 
   ret = FALSE;
   conn = NULL;
-  fb = NULL;
   mode = NULL;
   kmsmem = NULL;
 
@@ -431,6 +444,7 @@ configure_mode_setting (GstKMSSink * self, GstVideoInfo * vinfo)
 
   GST_INFO_OBJECT (self, "configuring mode setting");
 
+  ensure_kms_allocator (self);
   kmsmem = (GstKMSMemory *) gst_kms_allocator_bo_alloc (self->allocator, vinfo);
   if (!kmsmem)
     goto bo_failed;
@@ -440,13 +454,9 @@ configure_mode_setting (GstKMSSink * self, GstVideoInfo * vinfo)
   if (!conn)
     goto connector_failed;
 
-  fb = drmModeGetFB (self->fd, fb_id);
-  if (!fb)
-    goto framebuffer_failed;
-
   for (i = 0; i < conn->count_modes; i++) {
-    if (conn->modes[i].vdisplay == fb->height &&
-        conn->modes[i].hdisplay == fb->width) {
+    if (conn->modes[i].vdisplay == GST_VIDEO_INFO_HEIGHT (vinfo) &&
+        conn->modes[i].hdisplay == GST_VIDEO_INFO_WIDTH (vinfo)) {
       mode = &conn->modes[i];
       break;
     }
@@ -459,13 +469,12 @@ configure_mode_setting (GstKMSSink * self, GstVideoInfo * vinfo)
   if (err)
     goto modesetting_failed;
 
+  g_clear_pointer (&self->tmp_kmsmem, gst_memory_unref);
   self->tmp_kmsmem = (GstMemory *) kmsmem;
 
   ret = TRUE;
 
 bail:
-  if (fb)
-    drmModeFreeFB (fb);
   if (conn)
     drmModeFreeConnector (conn);
 
@@ -483,12 +492,6 @@ connector_failed:
     GST_ERROR_OBJECT (self, "Could not find a valid monitor connector");
     goto bail;
   }
-framebuffer_failed:
-  {
-    GST_ERROR_OBJECT (self, "drmModeGetFB failed: %s (%d)",
-        strerror (errno), errno);
-    goto bail;
-  }
 mode_failed:
   {
     GST_ERROR_OBJECT (self, "cannot find appropriate mode");
@@ -496,7 +499,7 @@ mode_failed:
   }
 modesetting_failed:
   {
-    GST_ERROR_OBJECT (self, "Failed to set mode: %s", strerror (errno));
+    GST_ERROR_OBJECT (self, "Failed to set mode: %s", g_strerror (errno));
     goto bail;
   }
 }
@@ -565,12 +568,142 @@ ensure_allowed_caps (GstKMSSink * self, drmModeConnector * conn,
     out_caps = gst_caps_merge (out_caps, gst_caps_simplify (tmp_caps));
   }
 
+  if (gst_caps_is_empty (out_caps)) {
+    GST_DEBUG_OBJECT (self, "allowed caps is empty");
+    gst_caps_unref (out_caps);
+    return FALSE;
+  }
+
   self->allowed_caps = gst_caps_simplify (out_caps);
 
   GST_DEBUG_OBJECT (self, "allowed caps = %" GST_PTR_FORMAT,
       self->allowed_caps);
 
-  return (self->allowed_caps && !gst_caps_is_empty (self->allowed_caps));
+  return TRUE;
+}
+
+static gboolean
+set_drm_property (gint fd, guint32 object, guint32 object_type,
+    drmModeObjectPropertiesPtr properties, const gchar * prop_name,
+    guint64 value)
+{
+  guint i;
+  gboolean ret = FALSE;
+
+  for (i = 0; i < properties->count_props && !ret; i++) {
+    drmModePropertyPtr property;
+
+    property = drmModeGetProperty (fd, properties->props[i]);
+
+    /* GstStructure parser limits the set of supported character, so we
+     * replace the invalid characters with '-'. In DRM, this is generally
+     * replacing spaces into '-'. */
+    g_strcanon (property->name, G_CSET_a_2_z G_CSET_A_2_Z G_CSET_DIGITS "_",
+        '-');
+
+    GST_LOG ("found property %s (looking for %s)", property->name, prop_name);
+
+    if (!strcmp (property->name, prop_name)) {
+      drmModeObjectSetProperty (fd, object, object_type,
+          property->prop_id, value);
+      ret = TRUE;
+    }
+    drmModeFreeProperty (property);
+  }
+
+  return ret;
+}
+
+typedef struct
+{
+  GstKMSSink *self;
+  drmModeObjectPropertiesPtr properties;
+  guint obj_id;
+  guint obj_type;
+  const gchar *obj_type_str;
+} SetPropsIter;
+
+static gboolean
+set_obj_prop (GQuark field_id, const GValue * value, gpointer user_data)
+{
+  SetPropsIter *iter = user_data;
+  GstKMSSink *self = iter->self;
+  const gchar *name;
+  guint64 v;
+
+  name = g_quark_to_string (field_id);
+
+  if (G_VALUE_HOLDS (value, G_TYPE_INT))
+    v = g_value_get_int (value);
+  else if (G_VALUE_HOLDS (value, G_TYPE_UINT))
+    v = g_value_get_uint (value);
+  else if (G_VALUE_HOLDS (value, G_TYPE_INT64))
+    v = g_value_get_int64 (value);
+  else if (G_VALUE_HOLDS (value, G_TYPE_UINT64))
+    v = g_value_get_uint64 (value);
+  else {
+    GST_WARNING_OBJECT (self,
+        "'uint64' value expected for control '%s'.", name);
+    return TRUE;
+  }
+
+  if (set_drm_property (self->fd, iter->obj_id, iter->obj_type,
+          iter->properties, name, v)) {
+    GST_DEBUG_OBJECT (self,
+        "Set %s property '%s' to %" G_GUINT64_FORMAT,
+        iter->obj_type_str, name, v);
+  } else {
+    GST_WARNING_OBJECT (self,
+        "Failed to set %s property '%s' to %" G_GUINT64_FORMAT,
+        iter->obj_type_str, name, v);
+  }
+
+  return TRUE;
+}
+
+static void
+gst_kms_sink_update_properties (SetPropsIter * iter, GstStructure * props)
+{
+  GstKMSSink *self = iter->self;
+
+  iter->properties = drmModeObjectGetProperties (self->fd, iter->obj_id,
+      iter->obj_type);
+
+  gst_structure_foreach (props, set_obj_prop, iter);
+
+  drmModeFreeObjectProperties (iter->properties);
+}
+
+static void
+gst_kms_sink_update_connector_properties (GstKMSSink * self)
+{
+  SetPropsIter iter;
+
+  if (!self->connector_props)
+    return;
+
+  iter.self = self;
+  iter.obj_id = self->conn_id;
+  iter.obj_type = DRM_MODE_OBJECT_CONNECTOR;
+  iter.obj_type_str = "connector";
+
+  gst_kms_sink_update_properties (&iter, self->connector_props);
+}
+
+static void
+gst_kms_sink_update_plane_properties (GstKMSSink * self)
+{
+  SetPropsIter iter;
+
+  if (!self->plane_props)
+    return;
+
+  iter.self = self;
+  iter.obj_id = self->plane_id;
+  iter.obj_type = DRM_MODE_OBJECT_PLANE;
+  iter.obj_type_str = "plane";
+
+  gst_kms_sink_update_properties (&iter, self->plane_props);
 }
 
 static gboolean
@@ -624,6 +757,10 @@ gst_kms_sink_start (GstBaseSink * bsink)
     GST_DEBUG_OBJECT (self, "enabling modesetting");
     self->modesetting_enabled = TRUE;
     universal_planes = TRUE;
+  }
+
+  if (crtc->mode_valid && self->modesetting_enabled && self->restore_crtc) {
+    self->saved_crtc = (drmModeCrtc *) crtc;
   }
 
 retry_find_plane:
@@ -681,6 +818,9 @@ retry_find_plane:
   g_object_notify_by_pspec (G_OBJECT (self), g_properties[PROP_DISPLAY_WIDTH]);
   g_object_notify_by_pspec (G_OBJECT (self), g_properties[PROP_DISPLAY_HEIGHT]);
 
+  gst_kms_sink_update_connector_properties (self);
+  gst_kms_sink_update_plane_properties (self);
+
   ret = TRUE;
 
 bail:
@@ -688,7 +828,7 @@ bail:
     drmModeFreePlane (plane);
   if (pres)
     drmModeFreePlaneResources (pres);
-  if (crtc)
+  if (crtc != self->saved_crtc)
     drmModeFreeCrtc (crtc);
   if (conn)
     drmModeFreeConnector (conn);
@@ -707,7 +847,7 @@ open_failed:
   {
     GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ_WRITE,
         ("Could not open DRM module %s", GST_STR_NULL (self->devname)),
-        ("reason: %s (%d)", strerror (errno), errno));
+        ("reason: %s (%d)", g_strerror (errno), errno));
     return FALSE;
   }
 
@@ -715,7 +855,7 @@ resources_failed:
   {
     GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
         ("drmModeGetResources failed"),
-        ("reason: %s (%d)", strerror (errno), errno));
+        ("reason: %s (%d)", g_strerror (errno), errno));
     goto bail;
   }
 
@@ -744,7 +884,7 @@ plane_resources_failed:
   {
     GST_ELEMENT_ERROR (self, RESOURCE, SETTINGS,
         ("drmModeGetPlaneResources failed"),
-        ("reason: %s (%d)", strerror (errno), errno));
+        ("reason: %s (%d)", g_strerror (errno), errno));
     goto bail;
   }
 
@@ -773,6 +913,7 @@ static gboolean
 gst_kms_sink_stop (GstBaseSink * bsink)
 {
   GstKMSSink *self;
+  int err;
 
   self = GST_KMS_SINK (bsink);
 
@@ -787,6 +928,19 @@ gst_kms_sink_stop (GstBaseSink * bsink)
   gst_poll_remove_fd (self->poll, &self->pollfd);
   gst_poll_restart (self->poll);
   gst_poll_fd_init (&self->pollfd);
+
+  if (self->saved_crtc) {
+    drmModeCrtc *crtc = (drmModeCrtc *) self->saved_crtc;
+
+    err = drmModeSetCrtc (self->fd, crtc->crtc_id, crtc->buffer_id, crtc->x,
+        crtc->y, (uint32_t *) & self->conn_id, 1, &crtc->mode);
+    if (err)
+      GST_ERROR_OBJECT (self, "Failed to restore previous CRTC mode: %s",
+          g_strerror (errno));
+
+    drmModeFreeCrtc (crtc);
+    self->saved_crtc = NULL;
+  }
 
   if (self->fd >= 0) {
     drmClose (self->fd);
@@ -869,14 +1023,6 @@ gst_kms_sink_get_caps (GstBaseSink * bsink, GstCaps * filter)
   return out_caps;
 }
 
-static void
-ensure_kms_allocator (GstKMSSink * self)
-{
-  if (self->allocator)
-    return;
-  self->allocator = gst_kms_allocator_new (self->fd);
-}
-
 static GstBufferPool *
 gst_kms_sink_create_pool (GstKMSSink * self, GstCaps * caps, gsize size,
     gint min)
@@ -915,7 +1061,8 @@ config_failed:
 }
 
 static gboolean
-gst_kms_sink_calculate_display_ratio (GstKMSSink * self, GstVideoInfo * vinfo)
+gst_kms_sink_calculate_display_ratio (GstKMSSink * self, GstVideoInfo * vinfo,
+    gint * scaled_width, gint * scaled_height)
 {
   guint dar_n, dar_d;
   guint video_width, video_height;
@@ -931,8 +1078,8 @@ gst_kms_sink_calculate_display_ratio (GstKMSSink * self, GstVideoInfo * vinfo)
     gst_video_calculate_device_ratio (self->hdisplay, self->vdisplay,
         self->mm_width, self->mm_height, &dpy_par_n, &dpy_par_d);
   } else {
-    GST_VIDEO_SINK_WIDTH (self) = video_width;
-    GST_VIDEO_SINK_HEIGHT (self) = video_height;
+    *scaled_width = video_width;
+    *scaled_height = video_height;
     goto out;
   }
 
@@ -951,24 +1098,23 @@ gst_kms_sink_calculate_display_ratio (GstKMSSink * self, GstVideoInfo * vinfo)
   /* check hd / dar_d is an integer scale factor, and scale wd with the PAR */
   if (video_height % dar_d == 0) {
     GST_DEBUG_OBJECT (self, "keeping video height");
-    GST_VIDEO_SINK_WIDTH (self) = (guint)
+    *scaled_width = (guint)
         gst_util_uint64_scale_int (video_height, dar_n, dar_d);
-    GST_VIDEO_SINK_HEIGHT (self) = video_height;
+    *scaled_height = video_height;
   } else if (video_width % dar_n == 0) {
     GST_DEBUG_OBJECT (self, "keeping video width");
-    GST_VIDEO_SINK_WIDTH (self) = video_width;
-    GST_VIDEO_SINK_HEIGHT (self) = (guint)
+    *scaled_width = video_width;
+    *scaled_height = (guint)
         gst_util_uint64_scale_int (video_width, dar_d, dar_n);
   } else {
     GST_DEBUG_OBJECT (self, "approximating while keeping video height");
-    GST_VIDEO_SINK_WIDTH (self) = (guint)
+    *scaled_width = (guint)
         gst_util_uint64_scale_int (video_height, dar_n, dar_d);
-    GST_VIDEO_SINK_HEIGHT (self) = video_height;
+    *scaled_height = video_height;
   }
 
 out:
-  GST_DEBUG_OBJECT (self, "scaling to %dx%d", GST_VIDEO_SINK_WIDTH (self),
-      GST_VIDEO_SINK_HEIGHT (self));
+  GST_DEBUG_OBJECT (self, "scaling to %dx%d", *scaled_width, *scaled_height);
 
   return TRUE;
 }
@@ -978,43 +1124,29 @@ gst_kms_sink_set_caps (GstBaseSink * bsink, GstCaps * caps)
 {
   GstKMSSink *self;
   GstVideoInfo vinfo;
-  GstBufferPool *newpool, *oldpool;
 
   self = GST_KMS_SINK (bsink);
 
-  /* We are going to change the internal buffer pool, which means it will no
-   * longer be compatbile with the last_buffer size. Drain now, as we won't be
-   * able to do that later on. */
-  gst_kms_sink_drain (self);
-
   if (!gst_video_info_from_caps (&vinfo, caps))
     goto invalid_format;
+  self->vinfo = vinfo;
 
-  if (!gst_kms_sink_calculate_display_ratio (self, &vinfo))
+  if (!gst_kms_sink_calculate_display_ratio (self, &vinfo,
+          &GST_VIDEO_SINK_WIDTH (self), &GST_VIDEO_SINK_HEIGHT (self)))
     goto no_disp_ratio;
 
   if (GST_VIDEO_SINK_WIDTH (self) <= 0 || GST_VIDEO_SINK_HEIGHT (self) <= 0)
     goto invalid_size;
 
-  /* create a new pool for the new configuration */
-  newpool = gst_kms_sink_create_pool (self, caps, GST_VIDEO_INFO_SIZE (&vinfo),
-      2);
-  if (!newpool)
-    goto no_pool;
-
-  /* we don't activate the internal pool yet as it may not be needed */
-  oldpool = self->pool;
-  self->pool = newpool;
-
-  if (oldpool) {
-    gst_buffer_pool_set_active (oldpool, FALSE);
-    gst_object_unref (oldpool);
+  /* discard dumb buffer pool */
+  if (self->pool) {
+    gst_buffer_pool_set_active (self->pool, FALSE);
+    gst_object_unref (self->pool);
+    self->pool = NULL;
   }
 
   if (self->modesetting_enabled && !configure_mode_setting (self, &vinfo))
     goto modesetting_failed;
-
-  self->vinfo = vinfo;
 
   GST_OBJECT_LOCK (self);
   if (self->reconfigure) {
@@ -1047,11 +1179,6 @@ no_disp_ratio:
         ("Error calculating the output display ratio of the video."));
     return FALSE;
   }
-no_pool:
-  {
-    /* Already warned in create_pool */
-    return FALSE;
-  }
 
 modesetting_failed:
   {
@@ -1073,6 +1200,8 @@ gst_kms_sink_propose_allocation (GstBaseSink * bsink, GstQuery * query)
   gsize size;
 
   self = GST_KMS_SINK (bsink);
+
+  GST_DEBUG_OBJECT (self, "propose allocation");
 
   gst_query_parse_allocation (query, &caps, &need_pool);
   if (!caps)
@@ -1184,20 +1313,20 @@ gst_kms_sink_sync (GstKMSSink * self)
   /* ERRORS */
 vblank_failed:
   {
-    GST_WARNING_OBJECT (self, "drmWaitVBlank failed: %s (%d)", strerror (-ret),
-        ret);
+    GST_WARNING_OBJECT (self, "drmWaitVBlank failed: %s (%d)",
+        g_strerror (errno), errno);
     return FALSE;
   }
 pageflip_failed:
   {
     GST_WARNING_OBJECT (self, "drmModePageFlip failed: %s (%d)",
-        strerror (-ret), ret);
+        g_strerror (errno), errno);
     return FALSE;
   }
 event_failed:
   {
-    GST_ERROR_OBJECT (self, "drmHandleEvent failed: %s (%d)", strerror (-ret),
-        ret);
+    GST_ERROR_OBJECT (self, "drmHandleEvent failed: %s (%d)",
+        g_strerror (errno), errno);
     return FALSE;
   }
 }
@@ -1264,6 +1393,8 @@ gst_kms_sink_import_dmabuf (GstKMSSink * self, GstBuffer * inbuf,
       return FALSE;
   }
 
+  ensure_kms_allocator (self);
+
   kmsmem = (GstKMSMemory *) gst_kms_allocator_get_cached (mems[0]);
   if (kmsmem) {
     GST_LOG_OBJECT (self, "found KMS mem %p in DMABuf mem %p with fb id = %d",
@@ -1296,25 +1427,69 @@ wrap_mem:
   return TRUE;
 }
 
+static gboolean
+ensure_internal_pool (GstKMSSink * self, GstVideoInfo * in_vinfo,
+    GstBuffer * inbuf)
+{
+  GstBufferPool *pool;
+  GstVideoInfo vinfo = *in_vinfo;
+  GstVideoMeta *vmeta;
+  GstCaps *caps;
+
+  if (self->pool)
+    return TRUE;
+
+  /* When cropping, the caps matches the cropped rectangle width/height, but
+   * we can retrieve the padded width/height from the VideoMeta (which is kept
+   * intact when adding crop meta */
+  if ((vmeta = gst_buffer_get_video_meta (inbuf))) {
+    vinfo.width = vmeta->width;
+    vinfo.height = vmeta->height;
+  }
+
+  caps = gst_video_info_to_caps (&vinfo);
+  pool = gst_kms_sink_create_pool (self, caps, gst_buffer_get_size (inbuf), 2);
+  gst_caps_unref (caps);
+
+  if (!pool)
+    return FALSE;
+
+  if (!gst_buffer_pool_set_active (pool, TRUE))
+    goto activate_pool_failed;
+
+  self->pool = pool;
+  return TRUE;
+
+activate_pool_failed:
+  {
+    GST_ELEMENT_ERROR (self, STREAM, FAILED, ("failed to activate buffer pool"),
+        ("failed to activate buffer pool"));
+    gst_object_unref (pool);
+    return FALSE;
+  }
+
+}
+
 static GstBuffer *
-gst_kms_sink_copy_to_dumb_buffer (GstKMSSink * self, GstBuffer * inbuf)
+gst_kms_sink_copy_to_dumb_buffer (GstKMSSink * self, GstVideoInfo * vinfo,
+    GstBuffer * inbuf)
 {
   GstFlowReturn ret;
   GstVideoFrame inframe, outframe;
   gboolean success;
   GstBuffer *buf = NULL;
 
-  if (!gst_buffer_pool_set_active (self->pool, TRUE))
-    goto activate_pool_failed;
+  if (!ensure_internal_pool (self, vinfo, inbuf))
+    goto bail;
 
   ret = gst_buffer_pool_acquire_buffer (self->pool, &buf, NULL);
   if (ret != GST_FLOW_OK)
     goto create_buffer_failed;
 
-  if (!gst_video_frame_map (&inframe, &self->vinfo, inbuf, GST_MAP_READ))
+  if (!gst_video_frame_map (&inframe, vinfo, inbuf, GST_MAP_READ))
     goto error_map_src_buffer;
 
-  if (!gst_video_frame_map (&outframe, &self->vinfo, buf, GST_MAP_WRITE))
+  if (!gst_video_frame_map (&outframe, vinfo, buf, GST_MAP_WRITE))
     goto error_map_dst_buffer;
 
   success = gst_video_frame_copy (&outframe, &inframe);
@@ -1333,12 +1508,6 @@ bail:
   }
 
   /* ERRORS */
-activate_pool_failed:
-  {
-    GST_ELEMENT_ERROR (self, STREAM, FAILED, ("failed to activate buffer pool"),
-        ("failed to activate buffer pool"));
-    return NULL;
-  }
 create_buffer_failed:
   {
     GST_ELEMENT_ERROR (self, STREAM, FAILED, ("allocation failed"),
@@ -1379,7 +1548,7 @@ gst_kms_sink_get_input_buffer (GstKMSSink * self, GstBuffer * inbuf)
     goto done;
 
   GST_CAT_INFO_OBJECT (CAT_PERFORMANCE, self, "frame copy");
-  buf = gst_kms_sink_copy_to_dumb_buffer (self, inbuf);
+  buf = gst_kms_sink_copy_to_dumb_buffer (self, &self->vinfo, inbuf);
 
 done:
   /* Copy all the non-memory related metas, this way CropMeta will be
@@ -1397,8 +1566,10 @@ gst_kms_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
   GstBuffer *buffer = NULL;
   guint32 fb_id;
   GstKMSSink *self;
+  GstVideoInfo *vinfo;
   GstVideoCropMeta *crop;
   GstVideoRectangle src = { 0, };
+  gint video_width, video_height;
   GstVideoRectangle dst = { 0, };
   GstVideoRectangle result;
   GstFlowReturn res;
@@ -1407,10 +1578,17 @@ gst_kms_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
 
   res = GST_FLOW_ERROR;
 
-  if (buf)
+  if (buf) {
     buffer = gst_kms_sink_get_input_buffer (self, buf);
-  else if (self->last_buffer)
+    vinfo = &self->vinfo;
+    video_width = src.w = GST_VIDEO_SINK_WIDTH (self);
+    video_height = src.h = GST_VIDEO_SINK_HEIGHT (self);
+  } else if (self->last_buffer) {
     buffer = gst_buffer_ref (self->last_buffer);
+    vinfo = &self->last_vinfo;
+    video_width = src.w = self->last_width;
+    video_height = src.h = self->last_height;
+  }
 
   /* Make sure buf is not used accidentally */
   buf = NULL;
@@ -1430,19 +1608,18 @@ gst_kms_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
   }
 
   if ((crop = gst_buffer_get_video_crop_meta (buffer))) {
-    GstVideoInfo vinfo = self->vinfo;
-    vinfo.width = crop->width;
-    vinfo.height = crop->height;
+    GstVideoInfo cropped_vinfo = *vinfo;
 
-    if (!gst_kms_sink_calculate_display_ratio (self, &vinfo))
+    cropped_vinfo.width = crop->width;
+    cropped_vinfo.height = crop->height;
+
+    if (!gst_kms_sink_calculate_display_ratio (self, &cropped_vinfo, &src.w,
+            &src.h))
       goto no_disp_ratio;
 
     src.x = crop->x;
     src.y = crop->y;
   }
-
-  src.w = GST_VIDEO_SINK_WIDTH (self);
-  src.h = GST_VIDEO_SINK_HEIGHT (self);
 
   dst.w = self->render_rect.w;
   dst.h = self->render_rect.h;
@@ -1457,8 +1634,8 @@ retry_set_plane:
     src.w = crop->width;
     src.h = crop->height;
   } else {
-    src.w = GST_VIDEO_INFO_WIDTH (&self->vinfo);
-    src.h = GST_VIDEO_INFO_HEIGHT (&self->vinfo);
+    src.w = video_width;
+    src.h = video_height;
   }
 
   /* handle out of screen case */
@@ -1502,8 +1679,13 @@ sync_frame:
     goto bail;
   }
 
-  if (buffer != self->last_buffer)
+  /* Save the rendered buffer and its metadata in case a redraw is needed */
+  if (buffer != self->last_buffer) {
     gst_buffer_replace (&self->last_buffer, buffer);
+    self->last_width = GST_VIDEO_SINK_WIDTH (self);
+    self->last_height = GST_VIDEO_SINK_HEIGHT (self);
+    self->last_vinfo = self->vinfo;
+  }
   g_clear_pointer (&self->tmp_kmsmem, gst_memory_unref);
 
   GST_OBJECT_UNLOCK (self);
@@ -1527,7 +1709,7 @@ set_plane_failed:
         result.w, result.h, src.x, src.y, src.w, src.h, dst.x, dst.y, dst.w,
         dst.h);
     GST_ELEMENT_ERROR (self, RESOURCE, FAILED,
-        (NULL), ("drmModeSetPlane failed: %s (%d)", strerror (-ret), ret));
+        (NULL), ("drmModeSetPlane failed: %s (%d)", g_strerror (errno), errno));
     goto bail;
   }
 no_disp_ratio:
@@ -1544,8 +1726,6 @@ gst_kms_sink_drain (GstKMSSink * self)
 {
   GstParentBufferMeta *parent_meta;
 
-  GST_DEBUG_OBJECT (self, "draining");
-
   if (!self->last_buffer)
     return;
 
@@ -1553,11 +1733,24 @@ gst_kms_sink_drain (GstKMSSink * self)
    * In this case, the last_buffer will have a GstParentBufferMeta set. */
   parent_meta = gst_buffer_get_parent_buffer_meta (self->last_buffer);
   if (parent_meta) {
-    GstBuffer *dumb_buf;
-    dumb_buf = gst_kms_sink_copy_to_dumb_buffer (self, parent_meta->buffer);
+    GstBuffer *dumb_buf, *last_buf;
+
+    /* If this was imported from our dumb buffer pool we can safely skip the
+     * drain */
+    if (parent_meta->buffer->pool &&
+        GST_IS_KMS_BUFFER_POOL (parent_meta->buffer->pool))
+      return;
+
+    GST_DEBUG_OBJECT (self, "draining");
+
+    dumb_buf = gst_kms_sink_copy_to_dumb_buffer (self, &self->last_vinfo,
+        parent_meta->buffer);
+    last_buf = self->last_buffer;
+    self->last_buffer = dumb_buf;
+
     gst_kms_allocator_clear_cache (self->allocator);
-    gst_kms_sink_show_frame (GST_VIDEO_SINK (self), dumb_buf);
-    gst_buffer_unref (dumb_buf);
+    gst_kms_sink_show_frame (GST_VIDEO_SINK (self), NULL);
+    gst_buffer_unref (last_buf);
   }
 }
 
@@ -1606,9 +1799,32 @@ gst_kms_sink_set_property (GObject * object, guint prop_id,
     case PROP_FORCE_MODESETTING:
       sink->modesetting_enabled = g_value_get_boolean (value);
       break;
+    case PROP_RESTORE_CRTC:
+      sink->restore_crtc = g_value_get_boolean (value);
+      break;
     case PROP_CAN_SCALE:
       sink->can_scale = g_value_get_boolean (value);
       break;
+    case PROP_CONNECTOR_PROPS:{
+      const GstStructure *s = gst_value_get_structure (value);
+
+      g_clear_pointer (&sink->connector_props, gst_structure_free);
+
+      if (s)
+        sink->connector_props = gst_structure_copy (s);
+
+      break;
+    }
+    case PROP_PLANE_PROPS:{
+      const GstStructure *s = gst_value_get_structure (value);
+
+      g_clear_pointer (&sink->plane_props, gst_structure_free);
+
+      if (s)
+        sink->plane_props = gst_structure_copy (s);
+
+      break;
+    }
     default:
       if (!gst_video_overlay_set_property (object, PROP_N, prop_id, value))
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1626,10 +1842,10 @@ gst_kms_sink_get_property (GObject * object, guint prop_id,
 
   switch (prop_id) {
     case PROP_DRIVER_NAME:
-      g_value_take_string (value, sink->devname);
+      g_value_set_string (value, sink->devname);
       break;
     case PROP_BUS_ID:
-      g_value_take_string (value, sink->bus_id);
+      g_value_set_string (value, sink->bus_id);
       break;
     case PROP_CONNECTOR_ID:
       g_value_set_int (value, sink->conn_id);
@@ -1639,6 +1855,9 @@ gst_kms_sink_get_property (GObject * object, guint prop_id,
       break;
     case PROP_FORCE_MODESETTING:
       g_value_set_boolean (value, sink->modesetting_enabled);
+      break;
+    case PROP_RESTORE_CRTC:
+      g_value_set_boolean (value, sink->restore_crtc);
       break;
     case PROP_CAN_SCALE:
       g_value_set_boolean (value, sink->can_scale);
@@ -1652,6 +1871,12 @@ gst_kms_sink_get_property (GObject * object, guint prop_id,
       GST_OBJECT_LOCK (sink);
       g_value_set_int (value, sink->vdisplay);
       GST_OBJECT_UNLOCK (sink);
+      break;
+    case PROP_CONNECTOR_PROPS:
+      gst_value_set_structure (value, sink->connector_props);
+      break;
+    case PROP_PLANE_PROPS:
+      gst_value_set_structure (value, sink->plane_props);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1668,6 +1893,9 @@ gst_kms_sink_finalize (GObject * object)
   g_clear_pointer (&sink->devname, g_free);
   g_clear_pointer (&sink->bus_id, g_free);
   gst_poll_free (sink->poll);
+  g_clear_pointer (&sink->connector_props, gst_structure_free);
+  g_clear_pointer (&sink->plane_props, gst_structure_free);
+  g_clear_pointer (&sink->tmp_kmsmem, gst_memory_unref);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -1776,6 +2004,19 @@ gst_kms_sink_class_init (GstKMSSinkClass * klass)
       G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
 
   /**
+   * kmssink:restore-crtc:
+   *
+   * Restore previous CRTC setting if new CRTC mode was set forcefully.
+   * By default this is enabled if user set CRTC with a new mode on an already
+   * active CRTC wich was having a valid mode.
+   */
+  g_properties[PROP_RESTORE_CRTC] =
+      g_param_spec_boolean ("restore-crtc", "Restore CRTC mode",
+      "When enabled and CRTC was set with a new mode, previous CRTC mode will"
+      "be restored when going to NULL state.", TRUE,
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+
+  /**
    * kmssink:can-scale:
    *
    * User can tell kmssink if the driver can support scale.
@@ -1808,6 +2049,32 @@ gst_kms_sink_class_init (GstKMSSinkClass * klass)
       g_param_spec_int ("display-height", "Display Height",
       "Height of the display surface in pixels", 0, G_MAXINT, 0,
       G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+
+  /**
+   * kmssink:connector-properties:
+   *
+   * Additional properties for the connector. Keys are strings and values
+   * unsigned 64 bits integers.
+   *
+   * Since: 1.16
+   */
+  g_properties[PROP_CONNECTOR_PROPS] =
+      g_param_spec_boxed ("connector-properties", "Connector Properties",
+      "Additional properties for the connector",
+      GST_TYPE_STRUCTURE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+  /**
+   * kmssink:plane-properties:
+   *
+   * Additional properties for the plane. Keys are strings and values
+   * unsigned 64 bits integers.
+   *
+   * Since: 1.16
+   */
+  g_properties[PROP_PLANE_PROPS] =
+      g_param_spec_boxed ("plane-properties", "Connector Plane",
+      "Additional properties for the plane",
+      GST_TYPE_STRUCTURE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (gobject_class, PROP_N, g_properties);
 

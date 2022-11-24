@@ -33,8 +33,8 @@ GType transport_receive_bin_get_type(void);
 
 typedef enum
 {
+  RECEIVE_STATE_UNSET = 0,
   RECEIVE_STATE_BLOCK = 1,
-  RECEIVE_STATE_DROP,
   RECEIVE_STATE_PASS,
 } ReceiveState;
 
@@ -43,12 +43,14 @@ struct _TransportReceiveBin
   GstBin                     parent;
 
   TransportStream           *stream;        /* parent transport stream */
-  gboolean                   rtcp_mux;
 
   GstPad                    *rtp_src;
+  gulong                     rtp_src_probe_id;
+  GstPad                    *rtcp_src;
+  gulong                     rtcp_src_probe_id;
   struct pad_block          *rtp_block;
+  struct pad_block          *rtcp_block;
   GMutex                     pad_block_lock;
-  GCond                      pad_block_cond;
   ReceiveState               receive_state;
 };
 

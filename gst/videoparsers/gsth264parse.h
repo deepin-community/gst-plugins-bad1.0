@@ -29,6 +29,7 @@
 #include <gst/base/gstbaseparse.h>
 #include <gst/codecparsers/gsth264parser.h>
 #include <gst/video/video.h>
+#include "gstvideoparseutils.h"
 
 G_BEGIN_DECLS
 
@@ -59,6 +60,8 @@ struct _GstH264Parse
   gint fps_num, fps_den;
   gint upstream_par_n, upstream_par_d;
   gint parsed_par_n, parsed_par_d;
+  gint parsed_fps_n, parsed_fps_d;
+  GstVideoColorimetry parsed_colorimetry;
   /* current codec_data in output caps, if any */
   GstBuffer *codec_data;
   /* input codec_data, if any */
@@ -85,11 +88,19 @@ struct _GstH264Parse
   gboolean have_sps;
   gboolean have_pps;
 
-  gboolean sent_codec_tag;
+  /* per frame sps/pps check for periodic push codec decision */
+  gboolean have_sps_in_frame;
+  gboolean have_pps_in_frame;
+
+  gboolean first_frame;
 
   /* collected SPS and PPS NALUs */
   GstBuffer *sps_nals[GST_H264_MAX_SPS_COUNT];
   GstBuffer *pps_nals[GST_H264_MAX_PPS_COUNT];
+
+  /* collected SEI timestamps */
+  guint num_clock_timestamp;
+  GstH264PicTiming pic_timing_sei;
 
   /* Infos we need to keep track of */
   guint32 sei_cpb_removal_delay;
@@ -105,14 +116,19 @@ struct _GstH264Parse
   gboolean do_ts;
 
   gboolean discont;
+  gboolean marker;
 
   /* frame parsing */
   /*guint last_nal_pos;*/
   /*guint next_sc_pos;*/
   gint idr_pos, sei_pos;
+  gint pic_timing_sei_pos;
+  gint pic_timing_sei_size;
   gboolean update_caps;
   GstAdapter *frame_out;
   gboolean keyframe;
+  gboolean predicted;
+  gboolean bidirectional;
   gboolean header;
   gboolean frame_start;
   /* AU state */
@@ -120,6 +136,7 @@ struct _GstH264Parse
 
   /* props */
   gint interval;
+  gboolean update_timecode;
 
   GstClockTime pending_key_unit_ts;
   GstEvent *force_key_unit_event;
@@ -132,6 +149,17 @@ struct _GstH264Parse
   /* For insertion of AU Delimiter */
   gboolean aud_needed;
   gboolean aud_insert;
+
+  GstVideoParseUserData user_data;
+
+  GstVideoMasteringDisplayInfo mastering_display_info;
+  guint mastering_display_info_state;
+
+  GstVideoContentLightLevel content_light_level;
+  guint content_light_level_state;
+
+  /* For forward predicted trickmode */
+  gboolean discard_bidirectional;
 };
 
 struct _GstH264ParseClass

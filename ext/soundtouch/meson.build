@@ -5,6 +5,13 @@ soundtouch_sources = [
 ]
 
 soundtouch_cargs = ['-DHAVE_SOUNDTOUCH']
+if get_option('soundtouch').disabled()
+  subdir_done()
+endif
+
+if not gnustl_dep.found() and get_option('soundtouch').enabled()
+  error('soundtouch plugin enabled but could not find gnustl dep for Android c++ support')
+endif
 
 soundtouch_dep = dependency('soundtouch', required : false)
 if soundtouch_dep.found()
@@ -19,6 +26,9 @@ else
     # Add them back once we know which distros use them.
   endif
 endif
+if not soundtouch_dep.found() and get_option('soundtouch').enabled()
+  error('soundtouch plugin enabled but soundtouch library not found')
+endif
 
 if soundtouch_dep.found()
   gstsoundtouch = library('gstsoundtouch',
@@ -26,7 +36,9 @@ if soundtouch_dep.found()
     c_args : gst_plugins_bad_args + soundtouch_cargs,
     cpp_args : gst_plugins_bad_args + soundtouch_cargs,
     include_directories : [configinc],
-    dependencies : [gstaudio_dep, soundtouch_dep],
+    dependencies : [gstaudio_dep, soundtouch_dep, gnustl_dep],
     install : true,
     install_dir : plugins_install_dir)
+  pkgconfig.generate(gstsoundtouch, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstsoundtouch]
 endif

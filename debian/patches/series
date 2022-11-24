@@ -1,2 +1,1 @@
-01_fix-modplug-linking.patch
-deepin-CVE-2021-3185.patch
+02_opencv-data-path.patch

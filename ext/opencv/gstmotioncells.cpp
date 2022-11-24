@@ -1,7 +1,7 @@
 /*
  * GStreamer MotionCells detect areas of motion
  * Copyright (C) 2011 Robert Jobbagy <jobbagy.robert@gmail.com>
- * Copyright (C) 2011 Nicola Murino <nicola.murino@gmail.com>
+ * Copyright (C) 2011 -2018 Nicola Murino <nicola.murino@gmail.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -47,12 +47,11 @@
  *
  * Performs motion detection on videos.
  *
- * <refsect2>
- * <title>Example launch line</title>
+ * ## Example launch line
+ *
  * |[
  * gst-launch-1.0 videotestsrc pattern=18 ! videorate ! videoscale ! video/x-raw,width=320,height=240,framerate=5/1 ! videoconvert ! motioncells ! videoconvert ! xvimagesink
  * ]|
- * </refsect2>
  */
 
 #ifdef HAVE_CONFIG_H
@@ -151,7 +150,7 @@ static void gst_motion_cells_get_property (GObject * object, guint prop_id,
 static gboolean gst_motion_cells_handle_sink_event (GstPad * pad,
     GstObject * parent, GstEvent * event);
 static GstFlowReturn gst_motion_cells_transform_ip (GstOpencvVideoFilter *
-    filter, GstBuffer * buf, IplImage * img);
+    filter, GstBuffer * buf, cv::Mat img);
 
 static void gst_motioncells_update_motion_cells (GstMotioncells * filter);
 static void gst_motioncells_update_motion_masks (GstMotioncells * filter);
@@ -360,8 +359,7 @@ gst_motion_cells_init (GstMotioncells * filter)
   filter->prev_buff_timestamp = 0;
   filter->cur_buff_timestamp = 0;
   filter->diff_timestamp = -1;
-  g_get_current_time (&filter->tv);
-  filter->starttime = 1000 * filter->tv.tv_sec;
+  filter->starttime = 1000 * g_get_real_time();
   filter->previous_motion = FALSE;
   filter->changed_datafile = FALSE;
   filter->postallmotion = FALSE;
@@ -384,7 +382,8 @@ gst_motion_cells_init (GstMotioncells * filter)
       TRUE);
 }
 
-static void fix_coords(motionmaskcoordrect& coords, int width, int height)
+static void
+fix_coords (motionmaskcoordrect & coords, int width, int height)
 {
   --width;
   --height;
@@ -518,7 +517,8 @@ gst_motion_cells_set_property (GObject * object, guint prop_id,
             filter->motionmaskcoords[i].lower_right_y = ly < 0 ? 0 : ly;
 
             if (0 < filter->width && 0 < filter->height) {
-              fix_coords(filter->motionmaskcoords[i], filter->width, filter->height);
+              fix_coords (filter->motionmaskcoords[i], filter->width,
+                  filter->height);
             }
           }
         } else {
@@ -840,12 +840,13 @@ gst_motion_cells_handle_sink_event (GstPad * pad, GstObject * parent,
       filter->height = info.height;
 
       if (0 != filter->has_delayed_mask
-        && 0 < filter->motionmaskcoord_count && NULL != filter->motionmaskcoords
-        && 0 < filter->width && 0 < filter->height)
-      {
+          && 0 < filter->motionmaskcoord_count
+          && NULL != filter->motionmaskcoords && 0 < filter->width
+          && 0 < filter->height) {
         filter->has_delayed_mask = 0;
         for (i = 0; i < filter->motionmaskcoord_count; ++i) {
-          fix_coords(filter->motionmaskcoords[i], filter->width, filter->height);
+          fix_coords (filter->motionmaskcoords[i], filter->width,
+              filter->height);
         }
       }
 
@@ -866,7 +867,7 @@ gst_motion_cells_handle_sink_event (GstPad * pad, GstObject * parent,
  */
 static GstFlowReturn
 gst_motion_cells_transform_ip (GstOpencvVideoFilter * base, GstBuffer * buf,
-    IplImage * img)
+    cv::Mat img)
 {
   GstMotioncells *filter = gst_motion_cells (base);
 

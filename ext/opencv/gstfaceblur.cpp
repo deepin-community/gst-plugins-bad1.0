@@ -49,12 +49,11 @@
  *
  * Blurs faces in images and videos.
  *
- * <refsect2>
- * <title>Example launch line</title>
+ * ## Example launch line
+ *
  * |[
  * gst-launch-1.0 autovideosrc ! videoconvert ! faceblur ! videoconvert ! autovideosink
  * ]|
- * </refsect2>
  */
 
 #ifdef HAVE_CONFIG_H
@@ -64,8 +63,7 @@
 #include <vector>
 
 #include "gstfaceblur.h"
-#include <opencv2/imgproc/imgproc_c.h>
-#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/imgproc.hpp>
 
 GST_DEBUG_CATEGORY_STATIC (gst_face_blur_debug);
 #define GST_CAT_DEFAULT gst_face_blur_debug
@@ -74,7 +72,11 @@ GST_DEBUG_CATEGORY_STATIC (gst_face_blur_debug);
     G_DIR_SEPARATOR_S OPENCV_PATH_NAME G_DIR_SEPARATOR_S "haarcascades" \
     G_DIR_SEPARATOR_S "haarcascade_frontalface_default.xml"
 #define DEFAULT_SCALE_FACTOR 1.25
+#if (CV_MAJOR_VERSION >= 4)
+#define DEFAULT_FLAGS CASCADE_DO_CANNY_PRUNING
+#else
 #define DEFAULT_FLAGS CV_HAAR_DO_CANNY_PRUNING
+#endif
 #define DEFAULT_MIN_NEIGHBORS 3
 #define DEFAULT_MIN_SIZE_WIDTH 30
 #define DEFAULT_MIN_SIZE_HEIGHT 30
@@ -150,10 +152,10 @@ static void gst_face_blur_get_property (GObject * object, guint prop_id,
 
 
 static gboolean gst_face_blur_set_caps (GstOpencvVideoFilter * transform,
-    gint in_width, gint in_height, gint in_depth, gint in_channels,
-    gint out_width, gint out_height, gint out_depth, gint out_channels);
+    gint in_width, gint in_height, int in_cv_type,
+    gint out_width, gint out_height, int out_cv_type);
 static GstFlowReturn gst_face_blur_transform_ip (GstOpencvVideoFilter *
-    transform, GstBuffer * buffer, IplImage * img);
+    transform, GstBuffer * buffer, Mat img);
 
 static CascadeClassifier *gst_face_blur_load_profile (GstFaceBlur *
     filter, gchar * profile);
@@ -164,8 +166,7 @@ gst_face_blur_finalize (GObject * obj)
 {
   GstFaceBlur *filter = GST_FACE_BLUR (obj);
 
-  if (filter->cvGray)
-    cvReleaseImage (&filter->cvGray);
+  filter->cvGray.release ();
 
   if (filter->cvCascade)
     delete filter->cvCascade;
@@ -209,7 +210,7 @@ gst_face_blur_class_init (GstFaceBlurClass * klass)
           DEFAULT_SCALE_FACTOR,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
   g_object_class_install_property (gobject_class, PROP_MIN_NEIGHBORS,
-      g_param_spec_int ("min-neighbors", "Mininum neighbors",
+      g_param_spec_int ("min-neighbors", "Minimum neighbors",
           "Minimum number (minus 1) of neighbor rectangles that makes up "
           "an object", 0, G_MAXINT, DEFAULT_MIN_NEIGHBORS,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
@@ -230,11 +231,13 @@ gst_face_blur_class_init (GstFaceBlurClass * klass)
 
   gst_element_class_add_static_pad_template (element_class, &src_factory);
   gst_element_class_add_static_pad_template (element_class, &sink_factory);
+
+  gst_type_mark_as_plugin_api (GST_TYPE_OPENCV_FACE_BLUR_FLAGS, (GstPluginAPIFlags) 0);
 }
 
 /* initialize the new element
  * instantiate pads and add them to element
- * set pad calback functions
+ * set pad callback functions
  * initialize instance structure
  */
 static void
@@ -322,22 +325,19 @@ gst_face_blur_get_property (GObject * object, guint prop_id,
 
 static gboolean
 gst_face_blur_set_caps (GstOpencvVideoFilter * transform,
-    gint in_width, gint in_height, gint in_depth, gint in_channels,
-    gint out_width, gint out_height, gint out_depth, gint out_channels)
+    gint in_width, gint in_height, int in_cv_type,
+    gint out_width, gint out_height, int out_cv_type)
 {
   GstFaceBlur *filter = GST_FACE_BLUR (transform);
 
-  if (filter->cvGray)
-    cvReleaseImage (&filter->cvGray);
-  filter->cvGray =
-      cvCreateImage (cvSize (in_width, in_height), IPL_DEPTH_8U, 1);
+  filter->cvGray.create (Size (in_width, in_height), CV_8UC1);
 
   return TRUE;
 }
 
 static GstFlowReturn
 gst_face_blur_transform_ip (GstOpencvVideoFilter * transform,
-    GstBuffer * buffer, IplImage * img)
+    GstBuffer * buffer, Mat img)
 {
   GstFaceBlur *filter = GST_FACE_BLUR (transform);
   vector < Rect > faces;
@@ -354,19 +354,17 @@ gst_face_blur_transform_ip (GstOpencvVideoFilter * transform,
     return GST_FLOW_OK;
   }
 
-  cvCvtColor (img, filter->cvGray, CV_RGB2GRAY);
+  cvtColor (img, filter->cvGray, COLOR_RGB2GRAY);
 
-  Mat image = cvarrToMat(filter->cvGray);
-  filter->cvCascade->detectMultiScale (image, faces, filter->scale_factor,
-      filter->min_neighbors, filter->flags,
-      cvSize (filter->min_size_width, filter->min_size_height), cvSize (0, 0));
+  filter->cvCascade->detectMultiScale (filter->cvGray, faces,
+      filter->scale_factor, filter->min_neighbors, filter->flags,
+      Size (filter->min_size_width, filter->min_size_height), Size (0, 0));
 
   if (!faces.empty ()) {
 
     for (i = 0; i < faces.size (); ++i) {
       Rect *r = &faces[i];
-      Mat imag = cvarrToMat(img);
-      Mat roi (imag, Rect (r->x, r->y, r->width, r->height));
+      Mat roi (img, Rect (r->x, r->y, r->width, r->height));
       blur (roi, roi, Size (11, 11));
       GaussianBlur (roi, roi, Size (11, 11), 0, 0);
     }

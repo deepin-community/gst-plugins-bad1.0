@@ -4,9 +4,10 @@ openh264_sources = [
   'gstopenh264plugin.c',
 ]
 
-openh264_dep = dependency('openh264', version : '>= 1.3.0', required : false)
+openh264_dep = dependency('openh264', version : '>= 1.3.0',
+                          required : get_option('openh264'),
+                          fallback: ['openh264', 'openh264_dep'])
 
-# FIXME: check if C++ compiler is available via new add_languages() semantics in meson git (~v30)
 if openh264_dep.found()
   gstopenh264 = library('gstopenh264',
     openh264_sources,
@@ -17,4 +18,6 @@ if openh264_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
+  pkgconfig.generate(gstopenh264, install_dir : plugins_pkgconfig_install_dir)
+  plugins += [gstopenh264]
 endif

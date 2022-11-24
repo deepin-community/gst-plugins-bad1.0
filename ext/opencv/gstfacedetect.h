@@ -5,6 +5,7 @@
  * Copyright (C) 2008 Michael Sheldon <mike@mikeasoft.com>
  * Copyright (C) 2011 Stefan Sauer <ensonic@users.sf.net>
  * Copyright (C) 2011 Robert Jobbagy <jobbagy.robert@gmail.com>
+ * Copyright (C) 2018 Nicola Murino <nicola.murino@gmail.com>
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -49,10 +50,8 @@
 #define __GST_FACE_DETECT_H__
 
 #include <gst/gst.h>
-#include <opencv2/core/version.hpp>
-#include <cv.h>
 #include <gst/opencv/gstopencvvideofilter.h>
-#include <opencv2/objdetect/objdetect.hpp>
+#include <opencv2/objdetect.hpp>
 
 G_BEGIN_DECLS
 /* #defines don't like whitespacey bits */
@@ -104,7 +103,7 @@ struct _GstFaceDetect
   gint min_stddev;
   gint updates;
 
-  IplImage *cvGray;
+  cv::Mat cvGray;
   cv::CascadeClassifier *cvFaceDetect;
   cv::CascadeClassifier *cvNoseDetect;
   cv::CascadeClassifier *cvMouthDetect;

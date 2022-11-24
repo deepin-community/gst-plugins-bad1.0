@@ -21,12 +21,11 @@
  *
  * AV1 Decoder.
  *
- * <refsect2>
- * <title>Example launch line</title>
+ * ## Example launch line
+ *
  * |[
  * gst-launch-1.0 -v filesrc location=videotestsrc.webm ! matroskademux ! av1dec ! videoconvert ! videoscale ! autovideosink
  * ]|
- * </refsect2>
  */
 
 #ifdef HAVE_CONFIG_H
@@ -52,14 +51,25 @@ static GstStaticPadTemplate gst_av1_dec_src_pad_template =
 GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS ("video/x-raw, "
-        "format = (string) \"I420\", "
-        "framerate = (fraction) [0, MAX], "
-        "width = (int) [ 4, MAX ], " "height = (int) [ 4, MAX ]")
+    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE ("{ I420, YV12, Y42B, Y444"
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+            ", I420_10LE, I420_12LE, I422_10LE, I422_12LE, Y444_10LE, Y444_12LE"
+#else
+            ", I420_10BE, I420_12BE, I422_10BE, I422_12BE, Y444_10BE, Y444_12BE"
+#endif
+            " }"))
     );
 
 GST_DEBUG_CATEGORY_STATIC (av1_dec_debug);
 #define GST_CAT_DEFAULT av1_dec_debug
+
+#define GST_VIDEO_FORMAT_WITH_ENDIAN(fmt,endian) GST_VIDEO_FORMAT_##fmt##endian
+
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+#define AOM_FMT_TO_GST(fmt) GST_VIDEO_FORMAT_WITH_ENDIAN(fmt,LE)
+#else
+#define AOM_FMT_TO_GST(fmt) GST_VIDEO_FORMAT_WITH_ENDIAN(fmt,BE)
+#endif
 
 static void gst_av1_dec_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);
@@ -79,6 +89,8 @@ static void gst_av1_dec_image_to_buffer (GstAV1Dec * dec,
     const aom_image_t * img, GstBuffer * buffer);
 static GstFlowReturn gst_av1_dec_open_codec (GstAV1Dec * av1dec,
     GstVideoCodecFrame * frame);
+static gboolean gst_av1_dec_get_valid_format (GstAV1Dec * dec,
+    const aom_image_t * img, GstVideoFormat * fmt);
 
 #define gst_av1_dec_parent_class parent_class
 G_DEFINE_TYPE (GstAV1Dec, gst_av1_dec, GST_TYPE_VIDEO_DECODER);
@@ -272,7 +284,7 @@ static void
 gst_av1_dec_image_to_buffer (GstAV1Dec * dec, const aom_image_t * img,
     GstBuffer * buffer)
 {
-  int deststride, srcstride, height, width, line, comp;
+  int deststride, srcstride, height, width, line, comp, y;
   guint8 *dest, *src;
   GstVideoFrame frame;
   GstVideoInfo *info = &dec->output_state->info;
@@ -285,13 +297,25 @@ gst_av1_dec_image_to_buffer (GstAV1Dec * dec, const aom_image_t * img,
   for (comp = 0; comp < 3; comp++) {
     dest = GST_VIDEO_FRAME_COMP_DATA (&frame, comp);
     src = img->planes[comp];
-    width = GST_VIDEO_FRAME_COMP_WIDTH (&frame, comp)
-        * GST_VIDEO_FRAME_COMP_PSTRIDE (&frame, comp);
+    width =
+        GST_VIDEO_FRAME_COMP_WIDTH (&frame,
+        comp) * GST_VIDEO_FRAME_COMP_PSTRIDE (&frame, comp);
     height = GST_VIDEO_FRAME_COMP_HEIGHT (&frame, comp);
     deststride = GST_VIDEO_FRAME_COMP_STRIDE (&frame, comp);
     srcstride = img->stride[comp];
 
-    if (srcstride == deststride) {
+    if ((img->fmt & AOM_IMG_FMT_HIGHBITDEPTH) && img->bit_depth == 8) {
+      GST_TRACE_OBJECT (dec,
+          "HIGHBITDEPTH image with 8 bit_depth. Comp %d: %d != %d, copying "
+          "line by line.", comp, srcstride, deststride);
+      for (line = 0; line < height; line++) {
+        for (y = 0; y < width; y++) {
+          dest[y] = src[y * 2];
+        }
+        dest += deststride;
+        src += srcstride;
+      }
+    } else if (srcstride == deststride) {
       GST_TRACE_OBJECT (dec, "Stride matches. Comp %d: %d, copying full plane",
           comp, srcstride);
       memcpy (dest, src, srcstride * height);
@@ -309,6 +333,81 @@ gst_av1_dec_image_to_buffer (GstAV1Dec * dec, const aom_image_t * img,
   gst_video_frame_unmap (&frame);
 }
 
+gboolean
+gst_av1_dec_get_valid_format (GstAV1Dec * dec, const aom_image_t * img,
+    GstVideoFormat * fmt)
+{
+  switch (img->fmt) {
+    case AOM_IMG_FMT_I420:
+    case AOM_IMG_FMT_I42016:
+      if (img->bit_depth == 8) {
+        *fmt = img->monochrome ? GST_VIDEO_FORMAT_GRAY8 : GST_VIDEO_FORMAT_I420;
+        return TRUE;
+      } else if (img->bit_depth == 10) {
+        *fmt = AOM_FMT_TO_GST (I420_10);
+        return TRUE;
+      } else if (img->bit_depth == 12) {
+        *fmt = AOM_FMT_TO_GST (I420_12);
+        return TRUE;
+      }
+
+      GST_FIXME_OBJECT (dec,
+          "Please add a 4:2:0 planar %u bit depth frame format",
+          img->bit_depth);
+      GST_ELEMENT_WARNING (dec, STREAM, NOT_IMPLEMENTED, (NULL),
+          ("Unsupported frame format - 4:2:0 planar %u bit depth",
+              img->bit_depth));
+      return FALSE;
+
+    case AOM_IMG_FMT_I422:
+    case AOM_IMG_FMT_I42216:
+      if (img->bit_depth == 8) {
+        *fmt = GST_VIDEO_FORMAT_Y42B;
+        return TRUE;
+      } else if (img->bit_depth == 10) {
+        *fmt = AOM_FMT_TO_GST (I422_10);
+        return TRUE;
+      } else if (img->bit_depth == 12) {
+        *fmt = AOM_FMT_TO_GST (I422_12);
+        return TRUE;
+      }
+      GST_FIXME_OBJECT (dec,
+          "Please add a 4:2:2 planar %u bit depth frame format",
+          img->bit_depth);
+      GST_ELEMENT_WARNING (dec, STREAM, NOT_IMPLEMENTED, (NULL),
+          ("Unsupported frame format - 4:2:2 planar %u bit depth",
+              img->bit_depth));
+      return FALSE;
+
+    case AOM_IMG_FMT_I444:
+    case AOM_IMG_FMT_I44416:
+      if (img->bit_depth == 8) {
+        *fmt = GST_VIDEO_FORMAT_Y444;
+        return TRUE;
+      } else if (img->bit_depth == 10) {
+        *fmt = AOM_FMT_TO_GST (Y444_10);
+        return TRUE;
+      } else if (img->bit_depth == 12) {
+        *fmt = AOM_FMT_TO_GST (Y444_12);
+        return TRUE;
+      }
+      GST_FIXME_OBJECT (dec,
+          "Please add a 4:4:4 planar %u bit depth frame format",
+          img->bit_depth);
+      GST_ELEMENT_WARNING (dec, STREAM, NOT_IMPLEMENTED, (NULL),
+          ("Unsupported frame format - 4:4:4 planar %u bit depth",
+              img->bit_depth));
+      return FALSE;
+
+    case AOM_IMG_FMT_YV12:
+      *fmt = GST_VIDEO_FORMAT_YV12;
+      return TRUE;
+
+    default:
+      return FALSE;
+  }
+}
+
 static GstFlowReturn
 gst_av1_dec_handle_frame (GstVideoDecoder * dec, GstVideoCodecFrame * frame)
 {
@@ -318,6 +417,7 @@ gst_av1_dec_handle_frame (GstVideoDecoder * dec, GstVideoCodecFrame * frame)
   aom_codec_err_t status;
   aom_image_t *img;
   aom_codec_iter_t iter = NULL;
+  GstVideoFormat fmt;
 
   if (!av1dec->decoder_inited) {
     ret = gst_av1_dec_open_codec (av1dec, frame);
@@ -349,7 +449,16 @@ gst_av1_dec_handle_frame (GstVideoDecoder * dec, GstVideoCodecFrame * frame)
 
   img = aom_codec_get_frame (&av1dec->decoder, &iter);
   if (img) {
-    gst_av1_dec_handle_resolution_change (av1dec, img, GST_VIDEO_FORMAT_I420);
+    if (gst_av1_dec_get_valid_format (av1dec, img, &fmt) == FALSE) {
+      aom_img_free (img);
+      GST_ELEMENT_ERROR (dec, LIBRARY, ENCODE,
+          ("Failed to decode frame"), ("Unsupported color format %d",
+              img->fmt));
+      gst_video_codec_frame_unref (frame);
+      return GST_FLOW_ERROR;
+    }
+
+    gst_av1_dec_handle_resolution_change (av1dec, img, fmt);
 
     ret = gst_video_decoder_allocate_output_frame (dec, frame);
     if (ret == GST_FLOW_OK) {

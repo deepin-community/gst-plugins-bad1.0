@@ -32,6 +32,17 @@
 #include <gst/gst.h>
 #include <gst/video/video.h>
 
+typedef struct _DshowDeviceEntry DshowDeviceEntry;
+
+struct _DshowDeviceEntry
+{
+  gchar *device;
+  gchar *device_name;
+  gint device_index;
+  GstCaps *caps;
+  IMoniker *moniker;
+};
+
 typedef struct _GstCapturePinMediaType
 {
   AM_MEDIA_TYPE *mediatype;
@@ -84,7 +95,7 @@ gboolean gst_dshow_find_filter (CLSID input_majortype, CLSID input_subtype,
 /* get the dshow device path from device friendly name. 
 If friendly name is not set, it will return the first available device */
 gchar *gst_dshow_getdevice_from_devicename (const GUID * device_category,
-    gchar ** device_name);
+    gchar ** device_name, gint * device_index);
 
 /* show the capture filter property page (generally used to setup the device). the page is modal*/
 gboolean gst_dshow_show_propertypage (IBaseFilter * base_filter);
@@ -101,5 +112,16 @@ GstCaps *gst_dshow_new_video_caps (GstVideoFormat video_format,
 
 /* configure the latency of the capture source */
 bool gst_dshow_configure_latency (IPin *pCapturePin, guint bufSizeMS);
+
+/* enumerate devices of a given category (i.e., audio or video) */
+void gst_dshow_device_entry_free (DshowDeviceEntry *entry);
+void gst_dshow_device_list_free (GList * devices);
+GList * gst_dshow_enumerate_devices (const GUID * device_category, gboolean getcaps);
+
+DshowDeviceEntry * gst_dshow_select_device (const GUID * device_category,
+    const gchar *device, const gchar *device_name, const gint device_index);
+
+/* create capture filter from moniker */
+IBaseFilter *gst_dshow_create_capture_filter (IMoniker *moniker);
 
 #endif /* _GSTDSHOW_ */

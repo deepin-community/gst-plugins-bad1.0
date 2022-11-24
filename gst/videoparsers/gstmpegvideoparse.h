@@ -27,7 +27,7 @@
 
 #include <gst/gst.h>
 #include <gst/base/gstbaseparse.h>
-
+#include "gstvideoparseutils.h"
 #include <gst/codecparsers/gstmpegvideoparser.h>
 
 G_BEGIN_DECLS
@@ -86,6 +86,8 @@ struct _GstMpegvParse {
   gboolean seqdispext_updated;
   gboolean picext_updated;
   gboolean quantmatrext_updated;
+
+  GstVideoParseUserData user_data;
 
   /* properties */
   gboolean drop;
