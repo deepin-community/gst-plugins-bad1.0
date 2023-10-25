@@ -1,4 +1,4 @@
-neon_dep = dependency('neon', version: ['>= 0.27', '<= 0.31.99'],
+neon_dep = dependency('neon', version: ['>= 0.27', '<= 0.32.99'],
                       required : get_option('neon'))
 
 if neon_dep.found()
@@ -9,6 +9,5 @@ if neon_dep.found()
     dependencies : [gstbase_dep, neon_dep],
     install : true,
     install_dir : plugins_install_dir)
-  pkgconfig.generate(gstneon, install_dir : plugins_pkgconfig_install_dir)
   plugins += [gstneon]
 endif

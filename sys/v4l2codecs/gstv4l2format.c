@@ -35,6 +35,10 @@ static struct FormatEntry format_map[] = {
   {V4L2_PIX_FMT_NV12, 1, GST_VIDEO_FORMAT_NV12, 8, 420},
   {V4L2_PIX_FMT_YUYV, 1, GST_VIDEO_FORMAT_YUY2, 8, 422},
   {V4L2_PIX_FMT_SUNXI_TILED_NV12, 1, GST_VIDEO_FORMAT_NV12_32L32, 8, 422},
+  {V4L2_PIX_FMT_NV12_4L4, 1, GST_VIDEO_FORMAT_NV12_4L4, 8, 420},
+  {V4L2_PIX_FMT_MM21, 2, GST_VIDEO_FORMAT_NV12_16L32S, 8, 420},
+  {V4L2_PIX_FMT_YUV420M, 3, GST_VIDEO_FORMAT_I420, 8, 420},
+  {V4L2_PIX_FMT_P010, 1, GST_VIDEO_FORMAT_P010_10LE, 16, 420},
   {0,}
 };
 
@@ -70,47 +74,22 @@ lookup_gst_fmt (GstVideoFormat gst_fmt)
   return ret;
 }
 
-static gint
-extrapolate_stride (const GstVideoFormatInfo * finfo, gint plane, gint stride)
-{
-  gint estride;
-
-  switch (finfo->format) {
-    case GST_VIDEO_FORMAT_NV12:
-    case GST_VIDEO_FORMAT_NV12_32L32:
-    case GST_VIDEO_FORMAT_NV12_64Z32:
-    case GST_VIDEO_FORMAT_NV16:
-    case GST_VIDEO_FORMAT_NV21:
-    case GST_VIDEO_FORMAT_NV24:
-    case GST_VIDEO_FORMAT_NV61:
-      estride = (plane == 0 ? 1 : 2) *
-          GST_VIDEO_FORMAT_INFO_SCALE_WIDTH (finfo, plane, stride);
-      break;
-    default:
-      estride = GST_VIDEO_FORMAT_INFO_SCALE_WIDTH (finfo, plane, stride);
-      break;
-  }
-
-  return estride;
-}
-
 static void
 set_stride (GstVideoInfo * info, gint plane, gint stride)
 {
   const GstVideoFormatInfo *finfo = info->finfo;
 
   if (GST_VIDEO_FORMAT_INFO_IS_TILED (finfo)) {
-    gint x_tiles, y_tiles, ws, hs, padded_height;
+    guint x_tiles, y_tiles, tile_height, padded_height;
 
-    ws = GST_VIDEO_FORMAT_INFO_TILE_WS (finfo);
-    hs = GST_VIDEO_FORMAT_INFO_TILE_HS (finfo);
+    tile_height = GST_VIDEO_FORMAT_INFO_TILE_HEIGHT (finfo, plane);
 
     padded_height = GST_VIDEO_FORMAT_INFO_SCALE_HEIGHT (finfo, plane,
         info->height);
-    padded_height = GST_ROUND_UP_N (padded_height, 1 << hs);
+    padded_height = (padded_height + tile_height - 1) / tile_height;
 
-    x_tiles = stride >> ws;
-    y_tiles = padded_height >> hs;
+    x_tiles = stride / GST_VIDEO_FORMAT_INFO_TILE_STRIDE (finfo, plane);
+    y_tiles = padded_height / tile_height;
     info->stride[plane] = GST_VIDEO_TILE_MAKE_STRIDE (x_tiles, y_tiles);
   } else {
     info->stride[plane] = stride;
@@ -125,12 +104,21 @@ gst_v4l2_format_to_video_info (struct v4l2_format *fmt, GstVideoInfo * out_info)
   struct v4l2_pix_format *pix = &fmt->fmt.pix;
   gint plane;
   gsize offset = 0;
+  gboolean extrapolate = FALSE;
 
   if (!entry)
     return FALSE;
 
-  if (entry->num_planes != 1) {
-    GST_FIXME ("Multi allocation formats are not supported yet");
+  /* validate the entry against the format */
+  if (V4L2_TYPE_IS_MULTIPLANAR (fmt->type)) {
+    if (entry->num_planes != pix_mp->num_planes) {
+      GST_ERROR ("Miss-matched number of planes in internal entry "
+          "(%i != %i)", entry->num_planes, pix_mp->num_planes);
+      return FALSE;
+    }
+  } else if (entry->num_planes != 1) {
+    GST_ERROR ("Miss-matched number of planes in internal entry "
+        "(must be 1 for non-multiplanar, got %i)", entry->num_planes);
     return FALSE;
   }
 
@@ -139,27 +127,52 @@ gst_v4l2_format_to_video_info (struct v4l2_format *fmt, GstVideoInfo * out_info)
     return FALSE;
 
   if (V4L2_TYPE_IS_MULTIPLANAR (fmt->type)) {
-    /* TODO: We don't support multi-allocation yet */
-    g_return_val_if_fail (pix_mp->num_planes == 1, FALSE);
-    out_info->size = pix_mp->plane_fmt[0].sizeimage;
+    out_info->size = 0;
+    for (plane = 0; plane < pix_mp->num_planes; plane++)
+      out_info->size += pix_mp->plane_fmt[plane].sizeimage;
   } else {
     out_info->size = pix->sizeimage;
   }
 
+  /*
+   * When single allocation formats are used for planar formats we need to
+   * extrapolate the per-plane stride. Do this check once to prevent
+   * complex inner loop.
+   */
+  if (entry->num_planes == 1 && out_info->finfo->n_planes != entry->num_planes)
+    extrapolate = TRUE;
+
   for (plane = 0; plane < GST_VIDEO_INFO_N_PLANES (out_info); plane++) {
     gint stride;
 
-    if (V4L2_TYPE_IS_MULTIPLANAR (fmt->type))
-      stride = extrapolate_stride (out_info->finfo, plane,
-          pix_mp->plane_fmt[0].bytesperline);
-    else
-      stride = extrapolate_stride (out_info->finfo, plane, pix->bytesperline);
+    if (V4L2_TYPE_IS_MULTIPLANAR (fmt->type)) {
+      if (extrapolate)
+        stride = gst_video_format_info_extrapolate_stride (out_info->finfo,
+            plane, pix_mp->plane_fmt[0].bytesperline);
+      else
+        stride = pix_mp->plane_fmt[plane].bytesperline;
+    } else {
+      if (extrapolate)
+        stride = gst_video_format_info_extrapolate_stride (out_info->finfo,
+            plane, pix->bytesperline);
+      else
+        stride = pix->bytesperline;
+    }
 
     set_stride (out_info, plane, stride);
     out_info->offset[plane] = offset;
 
-    offset += stride * GST_VIDEO_FORMAT_INFO_SCALE_HEIGHT (out_info->finfo,
-        plane, pix_mp->height);
+    if ((V4L2_TYPE_IS_MULTIPLANAR (fmt->type) && !extrapolate))
+      offset += pix_mp->plane_fmt[plane].sizeimage;
+    else
+      offset += stride * GST_VIDEO_FORMAT_INFO_SCALE_HEIGHT (out_info->finfo,
+          plane, pix_mp->height);
+  }
+
+  /* Check that the extrapolation didn't overflow the reported sizeimage */
+  if (extrapolate && offset > out_info->size) {
+    GST_ERROR ("Extrapolated plane offset overflow the image size.");
+    return FALSE;
   }
 
   return TRUE;

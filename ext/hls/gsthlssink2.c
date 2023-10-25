@@ -19,14 +19,24 @@
  */
 
 /**
- * SECTION:element-hlssink
- * @title: hlssink
+ * SECTION:element-hlssink2
+ * @title: hlssink2
  *
- * HTTP Live Streaming sink/server
+ * HTTP Live Streaming sink/server. Unlike the old hlssink which took a muxed
+ * MPEG-TS stream as input, this element takes elementary audio and video
+ * streams as input and handles the muxing internally. This allows hlssink2
+ * to make better decisions as to when to start a new fragment and also works
+ * better with input streams where there isn't an encoder element upstream
+ * that can generate keyframes on demand as needed.
+ *
+ * This element only writes fragments and a playlist file into a specified
+ * directory, it does not contain an actual HTTP server to serve these files.
+ * Just point an external webserver to the directory with the playlist and
+ * fragment files.
  *
  * ## Example launch line
  * |[
- * gst-launch-1.0 videotestsrc is-live=true ! x264enc ! hlssink max-files=5
+ * gst-launch-1.0 videotestsrc is-live=true ! x264enc ! h264parse ! hlssink2 max-files=5
  * ]|
  *
  */
@@ -34,6 +44,7 @@
 #include "config.h"
 #endif
 
+#include "gsthlselements.h"
 #include "gsthlssink2.h"
 #include <gst/pbutils/pbutils.h>
 #include <gst/video/video.h>
@@ -87,6 +98,11 @@ static GstStaticPadTemplate audio_template = GST_STATIC_PAD_TEMPLATE ("audio",
 
 #define gst_hls_sink2_parent_class parent_class
 G_DEFINE_TYPE (GstHlsSink2, gst_hls_sink2, GST_TYPE_BIN);
+#define _do_init \
+  hls_element_init (plugin); \
+  GST_DEBUG_CATEGORY_INIT (gst_hls_sink2_debug, "hlssink2", 0, "HlsSink2");
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (hlssink2, "hlssink2", GST_RANK_NONE,
+    GST_TYPE_HLS_SINK2, _do_init);
 
 static void gst_hls_sink2_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * spec);
@@ -186,7 +202,7 @@ gst_hls_sink2_class_init (GstHlsSink2Class * klass)
   gst_element_class_add_static_pad_template (element_class, &audio_template);
 
   gst_element_class_set_static_metadata (element_class,
-      "HTTP Live Streaming sink", "Sink", "HTTP Live Streaming sink",
+      "HTTP Live Streaming sink", "Sink/Muxer", "HTTP Live Streaming sink",
       "Alessandro Decina <alessandro.d@gmail.com>, "
       "Sebastian Dröge <sebastian@centricular.com>");
 
@@ -361,8 +377,7 @@ gst_hls_sink2_reset (GstHlsSink2 * sink)
   if (sink->playlist)
     gst_m3u8_playlist_free (sink->playlist);
   sink->playlist =
-      gst_m3u8_playlist_new (GST_M3U8_PLAYLIST_VERSION, sink->playlist_length,
-      FALSE);
+      gst_m3u8_playlist_new (GST_M3U8_PLAYLIST_VERSION, sink->playlist_length);
 
   g_queue_foreach (&sink->old_locations, (GFunc) g_free, NULL);
   g_queue_clear (&sink->old_locations);
@@ -510,7 +525,7 @@ gst_hls_sink2_request_new_pad (GstElement * element, GstPadTemplate * templ,
   is_audio = strcmp (templ->name_template, "audio") == 0;
 
   peer =
-      gst_element_get_request_pad (sink->splitmuxsink,
+      gst_element_request_pad_simple (sink->splitmuxsink,
       is_audio ? "audio_0" : "video");
   if (!peer)
     return NULL;
@@ -672,12 +687,4 @@ gst_hls_sink2_get_property (GObject * object, guint prop_id,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
-}
-
-gboolean
-gst_hls_sink2_plugin_init (GstPlugin * plugin)
-{
-  GST_DEBUG_CATEGORY_INIT (gst_hls_sink2_debug, "hlssink2", 0, "HlsSink2");
-  return gst_element_register (plugin, "hlssink2", GST_RANK_NONE,
-      gst_hls_sink2_get_type ());
 }

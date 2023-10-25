@@ -48,6 +48,8 @@ struct _GstProxySink {
 
   /* Whether there are sticky events pending */
   gboolean pending_sticky_events;
+  gboolean sent_stream_start;
+  gboolean sent_caps;
 };
 
 struct _GstProxySinkClass {
@@ -55,6 +57,7 @@ struct _GstProxySinkClass {
 };
 
 GType gst_proxy_sink_get_type (void);
+GST_ELEMENT_REGISTER_DECLARE (proxysink);
 
 G_END_DECLS
 

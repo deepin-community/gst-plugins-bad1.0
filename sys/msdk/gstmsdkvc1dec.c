@@ -31,7 +31,21 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/* sample pipeline: gst-launch-1.0 filesrc location=video.wmv ! asfdemux ! vc1parse !  msdkvc1dec ! videoconvert ! xvimagesink */
+/**
+ * SECTION: element-msdkvc1dec
+ * @title: msdkvc1dec
+ * @short_description: Intel MSDK VC1 decoder
+ *
+ * VC1/WMV video decoder based on Intel MFX
+ *
+ * ## Example launch line
+ * ```
+ * gst-launch-1.0 filesrc location=video.wmv ! asfdemux ! vc1parse ! msdkvc1dec ! videoconvert ! xvimagesink
+ * ```
+ *
+ * Since: 1.14
+ *
+ */
 
 #ifdef HAVE_CONFIG_H
 #  include <config.h>
@@ -189,7 +203,7 @@ gst_msdkvc1dec_class_init (GstMsdkVC1DecClass * klass)
   gst_element_class_set_static_metadata (element_class,
       "Intel MSDK VC1 decoder",
       "Codec/Decoder/Video/Hardware",
-      "VC1/WMV video decoder based on Intel Media SDK",
+      "VC1/WMV video decoder based on " MFX_API_SDK,
       "Sreerenj Balachandran <sreerenj.balachandran@intel.com>");
 
   gst_msdkdec_prop_install_output_oder_property (gobject_class);

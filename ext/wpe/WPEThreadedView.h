@@ -22,39 +22,37 @@
 #include <EGL/egl.h>
 #include <glib.h>
 #include <gst/gl/gstglfuncs.h>
+#include <gst/gl/egl/gstgldisplay_egl.h>
 #include <wpe/fdo.h>
 #include <wpe/fdo-egl.h>
 #include <wpe/webkit.h>
-#include "gstwpesrc.h"
+#include "gstwpevideosrc.h"
 
 typedef struct _GstGLContext GstGLContext;
 typedef struct _GstGLDisplay GstGLDisplay;
 typedef struct _GstEGLImage GstEGLImage;
 
-#if defined(WPE_FDO_CHECK_VERSION) && WPE_FDO_CHECK_VERSION(1, 7, 0)
-#define ENABLE_SHM_BUFFER_SUPPORT 1
-#else
-#define ENABLE_SHM_BUFFER_SUPPORT 0
-#endif
-
 class WPEView {
 public:
-    WPEView(WebKitWebContext*, GstWpeSrc*, GstGLContext*, GstGLDisplay*, int width, int height);
+    WPEView(WebKitWebContext*, GstWpeVideoSrc*, GstGLContext*, GstGLDisplay*, int width, int height);
     ~WPEView();
 
     bool operator!() const { return m_isValid; }
 
-    /*  Used by wpesrc */
+    /*  Used by wpevideosrc */
     void resize(int width, int height);
     void loadUri(const gchar*);
     void loadData(GBytes*);
+    void runJavascript(const gchar*);
     void setDrawBackground(gboolean);
+
     GstEGLImage* image();
     GstBuffer* buffer();
 
     void dispatchKeyboardEvent(struct wpe_input_keyboard_event&);
     void dispatchPointerEvent(struct wpe_input_pointer_event&);
     void dispatchAxisEvent(struct wpe_input_axis_event&);
+    void dispatchTouchEvent(struct wpe_input_touch_event&);
 
     /*  Used by WPEContextThread */
     bool hasUri() const { return webkit.uri; }
@@ -63,9 +61,7 @@ public:
 
 protected:
     void handleExportedImage(gpointer);
-#if ENABLE_SHM_BUFFER_SUPPORT
     void handleExportedBuffer(struct wpe_fdo_shm_exported_buffer*);
-#endif
 
 private:
     struct wpe_view_backend* backend() const;
@@ -74,27 +70,24 @@ private:
     void notifyLoadFinished();
 
     void releaseImage(gpointer);
-#if ENABLE_SHM_BUFFER_SUPPORT
     void releaseSHMBuffer(gpointer);
     static void s_releaseSHMBuffer(gpointer);
-#endif
 
     struct {
         GstGLContext* context;
         GstGLDisplay* display;
-    } gst { nullptr, nullptr };
+        GstGLDisplayEGL* display_egl;
+    } gst { nullptr, nullptr, nullptr };
 
     static struct wpe_view_backend_exportable_fdo_egl_client s_exportableEGLClient;
-#if ENABLE_SHM_BUFFER_SUPPORT
     static struct wpe_view_backend_exportable_fdo_client s_exportableClient;
-#endif
 
     static void s_releaseImage(GstEGLImage*, gpointer);
     struct {
         struct wpe_view_backend_exportable_fdo* exportable;
         int width;
         int height;
-    } wpe { nullptr, 0, 0 };
+    } wpe { nullptr, 0, 0, };
 
     struct {
         gchar* uri;
@@ -123,6 +116,11 @@ private:
         GstBuffer* committed;
     } shm { nullptr, nullptr };
 
+    struct {
+        gulong init_ext_sigid;
+        gulong extension_msg_sigid;
+    } audio {0, 0};
+
 };
 
 class WPEContextThread {
@@ -132,7 +130,7 @@ public:
     WPEContextThread();
     ~WPEContextThread();
 
-    WPEView* createWPEView(GstWpeSrc*, GstGLContext*, GstGLDisplay*, int width, int height);
+    WPEView* createWPEView(GstWpeVideoSrc*, GstGLContext*, GstGLDisplay*, int width, int height);
 
     template<typename Function>
     void dispatch(Function);
@@ -142,6 +140,7 @@ private:
     struct {
         GMutex mutex;
         GCond cond;
+        gboolean ready;
         GThread* thread { nullptr };
     } threading;
 

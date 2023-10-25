@@ -72,6 +72,8 @@ static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
 
 #define gst_ivf_parse_parent_class parent_class
 G_DEFINE_TYPE (GstIvfParse, gst_ivf_parse, GST_TYPE_BASE_PARSE);
+GST_ELEMENT_REGISTER_DEFINE (ivfparse, "ivfparse", GST_RANK_PRIMARY,
+    GST_TYPE_IVF_PARSE);
 
 static void gst_ivf_parse_finalize (GObject * object);
 static gboolean gst_ivf_parse_start (GstBaseParse * parse);
@@ -223,8 +225,11 @@ gst_ivf_parse_update_src_caps (GstIvfParse * ivf)
   media_type = fourcc_to_media_type (ivf->fourcc);
 
   /* Create src pad caps */
-  caps = gst_caps_new_simple (media_type, "width", G_TYPE_INT, ivf->width,
-      "height", G_TYPE_INT, ivf->height, NULL);
+  caps = gst_caps_new_empty_simple (media_type);
+  if (ivf->width > 0 && ivf->height > 0) {
+    gst_caps_set_simple (caps, "width", G_TYPE_INT, ivf->width,
+        "height", G_TYPE_INT, ivf->height, NULL);
+  }
 
   if (ivf->fps_n > 0 && ivf->fps_d > 0) {
     gst_base_parse_set_frame_rate (GST_BASE_PARSE_CAST (ivf),
@@ -232,6 +237,9 @@ gst_ivf_parse_update_src_caps (GstIvfParse * ivf)
     gst_caps_set_simple (caps, "framerate", GST_TYPE_FRACTION, ivf->fps_n,
         ivf->fps_d, NULL);
   }
+
+  if (ivf->fourcc == GST_MAKE_FOURCC ('A', 'V', '0', '1'))
+    gst_caps_set_simple (caps, "alignment", G_TYPE_STRING, "tu", NULL);
 
   gst_pad_set_caps (GST_BASE_PARSE_SRC_PAD (ivf), caps);
   gst_caps_unref (caps);
@@ -397,14 +405,9 @@ gst_ivf_parse_handle_frame (GstBaseParse * parse,
 
 /* entry point to initialize the plug-in */
 static gboolean
-ivfparse_init (GstPlugin * ivfparse)
+ivfparse_init (GstPlugin * plugin)
 {
-  /* register parser element */
-  if (!gst_element_register (ivfparse, "ivfparse", GST_RANK_PRIMARY,
-          GST_TYPE_IVF_PARSE))
-    return FALSE;
-
-  return TRUE;
+  return GST_ELEMENT_REGISTER (ivfparse, plugin);
 }
 
 /* gstreamer looks for this structure to register plugins */

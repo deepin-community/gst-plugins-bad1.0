@@ -31,7 +31,6 @@ else
         '-Wno-missing-declarations',
         '-Wno-old-style-definition',
         '-Wno-redundant-decls',
-        '-Wno-error',
     ])
 endif
 
@@ -77,7 +76,6 @@ elif system == 'windows'
     if compiler.get_id() == 'gcc'
         compile_args += [compiler.get_supported_arguments([
             '-Wno-format',
-            '-D_WIN32_WINNT=0x601',  # Enables inet_ntop and friends
         ])]
     endif
 else
@@ -170,6 +168,7 @@ usrsctp_static = static_library('usrsctp-static', sources,
     c_args: compile_args,
     dependencies: dependencies,
     include_directories: include_dirs,
+    override_options: ['werror=false'],
     install: false)
 
 # Declare dependency

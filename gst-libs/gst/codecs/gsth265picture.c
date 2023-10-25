@@ -34,6 +34,9 @@ _gst_h265_picture_free (GstH265Picture * picture)
   if (picture->notify)
     picture->notify (picture->user_data);
 
+  if (picture->discont_state)
+    gst_video_codec_state_unref (picture->discont_state);
+
   g_free (picture);
 }
 
@@ -51,8 +54,11 @@ gst_h265_picture_new (void)
 
   pic = g_new0 (GstH265Picture, 1);
 
-  pic->pts = GST_CLOCK_TIME_NONE;
-  pic->field = GST_H265_PICTURE_FIELD_FRAME;
+  pic->pic_struct = GST_H265_SEI_PIC_STRUCT_FRAME;
+  /* 0: interlaced, 1: progressive, 2: unspecified, 3: reserved, can be
+   * interpreted as 2 */
+  pic->source_scan_type = 2;
+  pic->duplicate_flag = 0;
 
   gst_mini_object_init (GST_MINI_OBJECT_CAST (pic), 0,
       GST_TYPE_H265_PICTURE, NULL, NULL,
@@ -64,7 +70,7 @@ gst_h265_picture_new (void)
 /**
  * gst_h265_picture_set_user_data:
  * @picture: a #GstH265Picture
- * @user_data: private data
+ * @user_data: (nullable): private data
  * @notify: (closure user_data): a #GDestroyNotify
  *
  * Sets @user_data on the picture and the #GDestroyNotify that will be called when
@@ -93,7 +99,7 @@ gst_h265_picture_set_user_data (GstH265Picture * picture, gpointer user_data,
  * Gets private data set on the picture via
  * gst_h265_picture_set_user_data() previously.
  *
- * Returns: (transfer none): The previously set user_data
+ * Returns: (transfer none) (nullable): The previously set user_data
  */
 gpointer
 gst_h265_picture_get_user_data (GstH265Picture * picture)
@@ -105,6 +111,7 @@ struct _GstH265Dpb
 {
   GArray *pic_list;
   gint max_num_pics;
+  gint num_output_needed;
 };
 
 /**
@@ -125,7 +132,7 @@ gst_h265_dpb_new (void)
       g_array_sized_new (FALSE, TRUE, sizeof (GstH265Picture *),
       GST_H265_DPB_MAX_SIZE);
   g_array_set_clear_func (dpb->pic_list,
-      (GDestroyNotify) gst_h265_picture_clear);
+      (GDestroyNotify) gst_clear_h265_picture);
 
   return dpb;
 }
@@ -187,6 +194,7 @@ gst_h265_dpb_clear (GstH265Dpb * dpb)
   g_return_if_fail (dpb != NULL);
 
   g_array_set_size (dpb->pic_list, 0);
+  dpb->num_output_needed = 0;
 }
 
 /**
@@ -194,13 +202,35 @@ gst_h265_dpb_clear (GstH265Dpb * dpb)
  * @dpb: a #GstH265Dpb
  * @picture: (transfer full): a #GstH265Picture
  *
- * Store the @picture
+ * Store the @picture and perform increase pic_latency_cnt as defined in
+ * "C.5.2.3 Additional bumping" process
  */
 void
 gst_h265_dpb_add (GstH265Dpb * dpb, GstH265Picture * picture)
 {
   g_return_if_fail (dpb != NULL);
   g_return_if_fail (GST_IS_H265_PICTURE (picture));
+
+  if (picture->output_flag) {
+    gint i;
+
+    for (i = 0; i < dpb->pic_list->len; i++) {
+      GstH265Picture *other =
+          g_array_index (dpb->pic_list, GstH265Picture *, i);
+
+      if (other->needed_for_output)
+        other->pic_latency_cnt++;
+    }
+
+    dpb->num_output_needed++;
+    picture->needed_for_output = TRUE;
+  } else {
+    picture->needed_for_output = FALSE;
+  }
+
+  /* C.3.4 */
+  picture->ref = TRUE;
+  picture->long_term = FALSE;
 
   g_array_append_val (dpb->pic_list, picture);
 }
@@ -209,7 +239,7 @@ gst_h265_dpb_add (GstH265Dpb * dpb, GstH265Picture * picture)
  * gst_h265_dpb_delete_unused:
  * @dpb: a #GstH265Dpb
  *
- * Delete already outputted and not referenced all pictures from dpb
+ * Delete not needed for output and not referenced all pictures from dpb
  */
 void
 gst_h265_dpb_delete_unused (GstH265Dpb * dpb)
@@ -222,40 +252,13 @@ gst_h265_dpb_delete_unused (GstH265Dpb * dpb)
     GstH265Picture *picture =
         g_array_index (dpb->pic_list, GstH265Picture *, i);
 
-    if (picture->outputted && !picture->ref) {
+    if (!picture->needed_for_output && !picture->ref) {
       GST_TRACE ("remove picture %p (poc %d) from dpb",
           picture, picture->pic_order_cnt);
       g_array_remove_index (dpb->pic_list, i);
       i--;
     }
   }
-}
-
-/**
- * gst_h265_dpb_delete_by_poc:
- * @dpb: a #GstH265Dpb
- * @poc: a poc of #GstH265Picture to remove
- *
- * Delete a #GstH265Dpb by @poc
- */
-void
-gst_h265_dpb_delete_by_poc (GstH265Dpb * dpb, gint poc)
-{
-  gint i;
-
-  g_return_if_fail (dpb != NULL);
-
-  for (i = 0; i < dpb->pic_list->len; i++) {
-    GstH265Picture *picture =
-        g_array_index (dpb->pic_list, GstH265Picture *, i);
-
-    if (picture->pic_order_cnt == poc) {
-      g_array_remove_index (dpb->pic_list, i);
-      return;
-    }
-  }
-
-  GST_WARNING ("Couldn't find picture with poc %d", poc);
 }
 
 /**
@@ -421,31 +424,6 @@ gst_h265_dpb_get_long_ref_by_poc (GstH265Dpb * dpb, gint poc)
 }
 
 /**
- * gst_h265_dpb_get_pictures_not_outputted:
- * @dpb: a #GstH265Dpb
- * @out: (out) (element-type GstH265Picture) (transfer full): a list
- *   of #GstH265Dpb
- *
- * Retrieve all not-outputted pictures from @dpb
- */
-void
-gst_h265_dpb_get_pictures_not_outputted (GstH265Dpb * dpb, GList ** out)
-{
-  gint i;
-
-  g_return_if_fail (dpb != NULL);
-  g_return_if_fail (out != NULL);
-
-  for (i = 0; i < dpb->pic_list->len; i++) {
-    GstH265Picture *picture =
-        g_array_index (dpb->pic_list, GstH265Picture *, i);
-
-    if (!picture->outputted)
-      *out = g_list_append (*out, gst_h265_picture_ref (picture));
-  }
-}
-
-/**
  * gst_h265_dpb_get_pictures_all:
  * @dpb: a #GstH265Dpb
  *
@@ -475,15 +453,178 @@ gst_h265_dpb_get_size (GstH265Dpb * dpb)
 }
 
 /**
- * gst_h265_dpb_is_full:
+ * gst_h265_dpb_get_picture:
  * @dpb: a #GstH265Dpb
+ * @system_frame_number The system frame number
  *
- * Return: %TRUE if @dpb is full
+ * Returns: (transfer full) (nullable): the picture identified with the specified
+ * @system_frame_number, or %NULL if DPB does not contain a #GstH265Picture
+ * corresponding to the @system_frame_number
+ *
+ * Since: 1.20
+ */
+GstH265Picture *
+gst_h265_dpb_get_picture (GstH265Dpb * dpb, guint32 system_frame_number)
+{
+  gint i;
+
+  g_return_val_if_fail (dpb != NULL, NULL);
+
+  for (i = 0; i < dpb->pic_list->len; i++) {
+    GstH265Picture *picture =
+        g_array_index (dpb->pic_list, GstH265Picture *, i);
+
+    if (picture->system_frame_number == system_frame_number) {
+      gst_h265_picture_ref (picture);
+      return picture;
+    }
+  }
+
+  return NULL;
+}
+
+static gboolean
+gst_h265_dpb_check_latency_count (GstH265Dpb * dpb, guint32 max_latency)
+{
+  gint i;
+
+  for (i = 0; i < dpb->pic_list->len; i++) {
+    GstH265Picture *picture =
+        g_array_index (dpb->pic_list, GstH265Picture *, i);
+
+    if (!picture->needed_for_output)
+      continue;
+
+    if (picture->pic_latency_cnt >= max_latency)
+      return TRUE;
+  }
+
+  return FALSE;
+}
+
+/**
+ * gst_h265_dpb_needs_bump:
+ * @dpb: a #GstH265Dpb
+ * @max_num_reorder_pics: sps_max_num_reorder_pics[HighestTid]
+ * @max_latency_increase: SpsMaxLatencyPictures[HighestTid]
+ * @max_dec_pic_buffering: sps_max_dec_pic_buffering_minus1[HighestTid ] + 1
+ *   or zero if this shouldn't be used for bumping decision
+ *
+ * Returns: %TRUE if bumping is required
+ *
+ * Since: 1.20
  */
 gboolean
-gst_h265_dpb_is_full (GstH265Dpb * dpb)
+gst_h265_dpb_needs_bump (GstH265Dpb * dpb, guint max_num_reorder_pics,
+    guint max_latency_increase, guint max_dec_pic_buffering)
 {
-  g_return_val_if_fail (dpb != NULL, -1);
+  g_return_val_if_fail (dpb != NULL, FALSE);
+  g_assert (dpb->num_output_needed >= 0);
 
-  return dpb->pic_list->len >= dpb->max_num_pics;
+  /* If DPB is full and there is no empty space to store current picture,
+   * need bumping.
+   * NOTE: current picture was added already by our decoding flow, so we
+   * need to do bumping until dpb->pic_list->len == dpb->max_num_pic
+   */
+  if (dpb->pic_list->len > dpb->max_num_pics) {
+    GST_TRACE ("No empty frame buffer, need bumping");
+    return TRUE;
+  }
+
+  /* C.5.2.3 */
+  if (dpb->num_output_needed > max_num_reorder_pics) {
+    GST_TRACE ("num_output_needed (%d) > max_num_reorder_pics (%d)",
+        dpb->num_output_needed, max_num_reorder_pics);
+    return TRUE;
+  }
+
+  if (dpb->num_output_needed && max_latency_increase &&
+      gst_h265_dpb_check_latency_count (dpb, max_latency_increase)) {
+    GST_TRACE ("has late picture, max_latency_increase: %d",
+        max_latency_increase);
+    return TRUE;
+  }
+
+  /* C.5.2.2 */
+  if (max_dec_pic_buffering && dpb->pic_list->len >= max_dec_pic_buffering) {
+    GST_TRACE ("dpb size (%d) >= max_dec_pic_buffering (%d)",
+        dpb->pic_list->len, max_dec_pic_buffering);
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+static gint
+gst_h265_dpb_get_lowest_output_needed_picture (GstH265Dpb * dpb,
+    GstH265Picture ** picture)
+{
+  gint i;
+  GstH265Picture *lowest = NULL;
+  gint index = -1;
+
+  *picture = NULL;
+
+  for (i = 0; i < dpb->pic_list->len; i++) {
+    GstH265Picture *picture =
+        g_array_index (dpb->pic_list, GstH265Picture *, i);
+
+    if (!picture->needed_for_output)
+      continue;
+
+    if (!lowest) {
+      lowest = picture;
+      index = i;
+      continue;
+    }
+
+    if (picture->pic_order_cnt < lowest->pic_order_cnt) {
+      lowest = picture;
+      index = i;
+    }
+  }
+
+  if (lowest)
+    *picture = gst_h265_picture_ref (lowest);
+
+  return index;
+}
+
+/**
+ * gst_h265_dpb_bump:
+ * @dpb: a #GstH265Dpb
+ * @drain: whether draining or not
+ *
+ * Perform bumping process as defined in C.5.2.4 "Bumping" process.
+ * If @drain is %TRUE, @dpb will remove a #GstH265Picture from internal array
+ * so that returned #GstH265Picture could hold the last reference of it
+ *
+ * Returns: (nullable) (transfer full): a #GstH265Picture which is needed to be
+ * outputted
+ *
+ * Since: 1.20
+ */
+GstH265Picture *
+gst_h265_dpb_bump (GstH265Dpb * dpb, gboolean drain)
+{
+  GstH265Picture *picture;
+  gint index;
+
+  g_return_val_if_fail (dpb != NULL, NULL);
+
+  /* C.5.2.4 "Bumping" process */
+  index = gst_h265_dpb_get_lowest_output_needed_picture (dpb, &picture);
+
+  if (!picture || index < 0)
+    return NULL;
+
+  picture->needed_for_output = FALSE;
+
+  dpb->num_output_needed--;
+  g_assert (dpb->num_output_needed >= 0);
+
+  if (!picture->ref || drain)
+    g_array_remove_index_fast (dpb->pic_list, index);
+
+  return picture;
 }

@@ -29,11 +29,14 @@
 #include "linux/videodev2.h"
 
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <gst/base/base.h>
+
+#define IMAGE_MINSZ (256*1024)  /* 256kB */
 
 GST_DEBUG_CATEGORY (v4l2_decoder_debug);
 #define GST_CAT_DEFAULT v4l2_decoder_debug
@@ -47,12 +50,22 @@ enum
 
 struct _GstV4l2Request
 {
+  /* non-thread safe */
+  gint ref_count;
+
   GstV4l2Decoder *decoder;
   gint fd;
+  guint32 frame_num;
   GstMemory *bitstream;
+  GstBuffer *pic_buf;
   GstPoll *poll;
   GstPollFD pollfd;
+
+  /* request state */
   gboolean pending;
+  gboolean failed;
+  gboolean hold_pic_buf;
+  gboolean sub_request;
 };
 
 struct _GstV4l2Decoder
@@ -64,6 +77,7 @@ struct _GstV4l2Decoder
   gint video_fd;
   GstQueueArray *request_pool;
   GstQueueArray *pending_requests;
+  guint version;
 
   enum v4l2_buf_type src_buf_type;
   enum v4l2_buf_type sink_buf_type;
@@ -72,11 +86,17 @@ struct _GstV4l2Decoder
   /* properties */
   gchar *media_device;
   gchar *video_device;
+  guint render_delay;
+
+  /* detected features */
+  gboolean supports_holding_capture;
 };
 
 G_DEFINE_TYPE_WITH_CODE (GstV4l2Decoder, gst_v4l2_decoder, GST_TYPE_OBJECT,
     GST_DEBUG_CATEGORY_INIT (v4l2_decoder_debug, "v4l2codecs-decoder", 0,
         "V4L2 stateless decoder helper"));
+
+static void gst_v4l2_request_free (GstV4l2Request * request);
 
 static guint32
 direction_to_buffer_type (GstV4l2Decoder * self, GstPadDirection direction)
@@ -97,6 +117,7 @@ gst_v4l2_decoder_finalize (GObject * obj)
   g_free (self->media_device);
   g_free (self->video_device);
   gst_queue_array_free (self->request_pool);
+  gst_queue_array_free (self->pending_requests);
 
   G_OBJECT_CLASS (gst_v4l2_decoder_parent_class)->finalize (obj);
 }
@@ -135,6 +156,12 @@ gst_v4l2_decoder_new (GstV4l2CodecDevice * device)
   return gst_object_ref_sink (decoder);
 }
 
+guint
+gst_v4l2_decoder_get_version (GstV4l2Decoder * self)
+{
+  return self->version;
+}
+
 gboolean
 gst_v4l2_decoder_open (GstV4l2Decoder * self)
 {
@@ -162,6 +189,8 @@ gst_v4l2_decoder_open (GstV4l2Decoder * self)
     gst_v4l2_decoder_close (self);
     return FALSE;
   }
+
+  self->version = querycap.version;
 
   if (querycap.capabilities & V4L2_CAP_DEVICE_CAPS)
     capabilities = querycap.device_caps;
@@ -191,6 +220,9 @@ gboolean
 gst_v4l2_decoder_close (GstV4l2Decoder * self)
 {
   GstV4l2Request *request;
+
+  while ((request = gst_queue_array_pop_head (self->pending_requests)))
+    gst_v4l2_request_unref (request);
 
   while ((request = gst_queue_array_pop_head (self->request_pool)))
     gst_v4l2_request_free (request);
@@ -225,16 +257,18 @@ gst_v4l2_decoder_streamon (GstV4l2Decoder * self, GstPadDirection direction)
 gboolean
 gst_v4l2_decoder_streamoff (GstV4l2Decoder * self, GstPadDirection direction)
 {
-  GstV4l2Request *pending_req;
   guint32 type = direction_to_buffer_type (self, direction);
   gint ret;
 
   if (direction == GST_PAD_SRC) {
+    GstV4l2Request *pending_req;
+
     /* STREAMOFF have the effect of cancelling all requests and unqueuing all
      * buffers, so clear the pending request list */
     while ((pending_req = gst_queue_array_pop_head (self->pending_requests))) {
       g_clear_pointer (&pending_req->bitstream, gst_memory_unref);
       pending_req->pending = FALSE;
+      gst_v4l2_request_unref (pending_req);
     }
   }
 
@@ -296,8 +330,9 @@ gst_v4l2_decoder_set_sink_fmt (GstV4l2Decoder * self, guint32 pix_fmt,
         },
   };
   gint ret;
+
   /* Using raw image size for now, it is guarantied to be large enough */
-  gsize sizeimage = (width * height * pixel_bitdepth) / 8;
+  gsize sizeimage = MAX (IMAGE_MINSZ, (width * height * pixel_bitdepth) / 8);
 
   if (self->mplane)
     format.fmt.pix_mp.plane_fmt[0].sizeimage = sizeimage;
@@ -321,6 +356,79 @@ gst_v4l2_decoder_set_sink_fmt (GstV4l2Decoder * self, guint32 pix_fmt,
   return TRUE;
 }
 
+static GstCaps *
+gst_v4l2_decoder_enum_size_for_format (GstV4l2Decoder * self,
+    guint32 pixelformat, gint index, gint unscaled_width, gint unscaled_height)
+{
+  struct v4l2_frmsizeenum size;
+  GstVideoFormat format;
+  gint ret;
+  gboolean res;
+
+  memset (&size, 0, sizeof (struct v4l2_frmsizeenum));
+  size.index = index;
+  size.pixel_format = pixelformat;
+
+  GST_DEBUG_OBJECT (self, "enumerate size index %d for %" GST_FOURCC_FORMAT,
+      index, GST_FOURCC_ARGS (pixelformat));
+
+  ret = ioctl (self->video_fd, VIDIOC_ENUM_FRAMESIZES, &size);
+
+  if (ret < 0)
+    return NULL;
+
+  if (size.type != V4L2_FRMSIZE_TYPE_DISCRETE) {
+    GST_WARNING_OBJECT (self, "V4L2_FRMSIZE type not supported");
+    return NULL;
+  }
+
+  if (gst_util_fraction_compare (unscaled_width, unscaled_height,
+          size.discrete.width, size.discrete.height)) {
+    GST_DEBUG_OBJECT (self,
+        "Pixel ratio modification not supported %dx%d %dx%d (%d)",
+        unscaled_width, unscaled_height, size.discrete.width,
+        size.discrete.height, ret);
+    return NULL;
+  }
+
+  res = gst_v4l2_format_to_video_format (pixelformat, &format);
+  g_assert (res);
+
+  GST_DEBUG_OBJECT (self, "get size (%d x %d) index %d for %" GST_FOURCC_FORMAT,
+      size.discrete.width, size.discrete.height, index,
+      GST_FOURCC_ARGS (pixelformat));
+
+  return gst_caps_new_simple ("video/x-raw", "format", G_TYPE_STRING,
+      gst_video_format_to_string (format),
+      "width", G_TYPE_INT, size.discrete.width,
+      "height", G_TYPE_INT, size.discrete.height, NULL);
+}
+
+static GstCaps *
+gst_v4l2_decoder_probe_caps_for_format (GstV4l2Decoder * self,
+    guint32 pixelformat, gint unscaled_width, gint unscaled_height)
+{
+  gint index = 0;
+  GstCaps *caps, *tmp;
+  GstVideoFormat format;
+
+  GST_DEBUG_OBJECT (self, "enumerate size for %" GST_FOURCC_FORMAT,
+      GST_FOURCC_ARGS (pixelformat));
+
+  if (!gst_v4l2_format_to_video_format (pixelformat, &format))
+    return gst_caps_new_empty ();
+
+  caps = gst_caps_new_simple ("video/x-raw", "format", G_TYPE_STRING,
+      gst_video_format_to_string (format), NULL);
+
+  while ((tmp = gst_v4l2_decoder_enum_size_for_format (self, pixelformat,
+              index++, unscaled_width, unscaled_height))) {
+    caps = gst_caps_merge (caps, tmp);
+  }
+
+  return caps;
+}
+
 GstCaps *
 gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self)
 {
@@ -328,10 +436,7 @@ gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self)
   struct v4l2_format fmt = {
     .type = self->src_buf_type,
   };
-  GstVideoFormat format;
   GstCaps *caps;
-  GValue list = G_VALUE_INIT;
-  GValue value = G_VALUE_INIT;
   gint i;
 
   g_return_val_if_fail (self->opened, FALSE);
@@ -342,20 +447,15 @@ gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self)
     return FALSE;
   }
 
-  /* We first place a structure with the default pixel format */
-  if (gst_v4l2_format_to_video_format (fmt.fmt.pix_mp.pixelformat, &format))
-    caps = gst_caps_new_simple ("video/x-raw", "format", G_TYPE_STRING,
-        gst_video_format_to_string (format), NULL);
-  else
-    caps = gst_caps_new_empty ();
+  caps =
+      gst_v4l2_decoder_probe_caps_for_format (self,
+      fmt.fmt.pix_mp.pixelformat, fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height);
 
   /* And then enumerate other possible formats and place that as a second
    * structure in the caps */
-  g_value_init (&list, GST_TYPE_LIST);
-  g_value_init (&value, G_TYPE_STRING);
-
   for (i = 0; ret >= 0; i++) {
     struct v4l2_fmtdesc fmtdesc = { i, self->src_buf_type, };
+    GstCaps *tmp;
 
     ret = ioctl (self->video_fd, VIDIOC_ENUM_FMT, &fmtdesc);
     if (ret < 0) {
@@ -365,19 +465,9 @@ gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self)
       continue;
     }
 
-    if (gst_v4l2_format_to_video_format (fmtdesc.pixelformat, &format)) {
-      g_value_set_static_string (&value, gst_video_format_to_string (format));
-      gst_value_list_append_value (&list, &value);
-    }
-  }
-  g_value_reset (&value);
-
-  if (gst_value_list_get_size (&list) > 0) {
-    GstStructure *str = gst_structure_new_empty ("video/x-raw");
-    gst_structure_take_value (str, "format", &list);
-    gst_caps_append_structure (caps, str);
-  } else {
-    g_value_reset (&list);
+    tmp = gst_v4l2_decoder_probe_caps_for_format (self, fmtdesc.pixelformat,
+        fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height);
+    caps = gst_caps_merge (caps, tmp);
   }
 
   return caps;
@@ -456,6 +546,13 @@ gst_v4l2_decoder_request_buffers (GstV4l2Decoder * self,
     return ret;
   }
 
+  if (direction == GST_PAD_SINK) {
+    if (reqbufs.capabilities & V4L2_BUF_CAP_SUPPORTS_M2M_HOLD_CAPTURE_BUF)
+      self->supports_holding_capture = TRUE;
+    else
+      self->supports_holding_capture = FALSE;
+  }
+
   return reqbufs.count;
 }
 
@@ -530,12 +627,12 @@ gst_v4l2_decoder_export_buffer (GstV4l2Decoder * self,
   return TRUE;
 }
 
-gboolean
+static gboolean
 gst_v4l2_decoder_queue_sink_mem (GstV4l2Decoder * self,
-    GstV4l2Request * request, GstMemory * mem, guint32 frame_num,
-    gsize bytesused, guint flags)
+    GstV4l2Request * request, GstMemory * mem, guint32 frame_num, guint flags)
 {
   gint ret;
+  gsize bytesused = gst_memory_get_sizes (mem, NULL, NULL);
   struct v4l2_plane plane = {
     .bytesused = bytesused,
   };
@@ -563,14 +660,11 @@ gst_v4l2_decoder_queue_sink_mem (GstV4l2Decoder * self,
     return FALSE;
   }
 
-  request->bitstream = gst_memory_ref (mem);
-
   return TRUE;
 }
 
-gboolean
-gst_v4l2_decoder_queue_src_buffer (GstV4l2Decoder * self, GstBuffer * buffer,
-    guint32 frame_num)
+static gboolean
+gst_v4l2_decoder_queue_src_buffer (GstV4l2Decoder * self, GstBuffer * buffer)
 {
   gint i, ret;
   struct v4l2_plane planes[GST_VIDEO_MAX_PLANES];
@@ -606,7 +700,7 @@ gst_v4l2_decoder_queue_src_buffer (GstV4l2Decoder * self, GstBuffer * buffer,
   return TRUE;
 }
 
-gboolean
+static gboolean
 gst_v4l2_decoder_dequeue_sink (GstV4l2Decoder * self)
 {
   gint ret;
@@ -632,7 +726,7 @@ gst_v4l2_decoder_dequeue_sink (GstV4l2Decoder * self)
   return TRUE;
 }
 
-gboolean
+static gboolean
 gst_v4l2_decoder_dequeue_src (GstV4l2Decoder * self, guint32 * out_frame_num)
 {
   gint ret;
@@ -702,6 +796,31 @@ gst_v4l2_decoder_get_controls (GstV4l2Decoder * self,
   return TRUE;
 }
 
+gboolean
+gst_v4l2_decoder_query_control_size (GstV4l2Decoder * self,
+    unsigned int control_id, unsigned int *control_size)
+{
+  gint ret;
+  struct v4l2_query_ext_ctrl control = {
+    .id = control_id,
+  };
+
+  if (control_size)
+    *control_size = 0;
+
+  ret = ioctl (self->video_fd, VIDIOC_QUERY_EXT_CTRL, &control);
+  if (ret < 0)
+    /*
+     * It's not an error if a control is not supported by this driver.
+     * Return false but don't print any error.
+     */
+    return FALSE;
+
+  if (control_size)
+    *control_size = control.elem_size;
+  return TRUE;
+}
+
 void
 gst_v4l2_decoder_install_properties (GObjectClass * gobject_class,
     gint prop_offset, GstV4l2CodecDevice * device)
@@ -765,10 +884,27 @@ gst_v4l2_decoder_get_property (GObject * object, guint prop_id,
   }
 }
 
+/**
+ * gst_v4l2_decoder_register:
+ * @plugin: a #GstPlugin
+ * @dec_type: A #GType for the codec
+ * @class_init: The #GClassInitFunc for #dec_type
+ * @instance_init: The #GInstanceInitFunc for #dec_type
+ * @element_name_tmpl: A string to use for the first codec found and as a template for the next ones.
+ * @device: (transfer full) A #GstV4l2CodecDevice
+ * @rank: The rank to use for the element
+ * @class_data: (nullable) (transfer full) A #gpointer to pass as class_data, set to @device if null
+ * @element_name (nullable) (out) Sets the pointer to the new element name
+ *
+ * Registers a decoder element as a subtype of @dec_type for @plugin.
+ * Will create a different sub_types for each subsequent @decoder of the
+ * same type.
+ */
 void
 gst_v4l2_decoder_register (GstPlugin * plugin,
-    GType dec_type, GClassInitFunc class_init, GInstanceInitFunc instance_init,
-    const gchar * element_name_tmpl, GstV4l2CodecDevice * device, guint rank)
+    GType dec_type, GClassInitFunc class_init, gconstpointer class_data,
+    GInstanceInitFunc instance_init, const gchar * element_name_tmpl,
+    GstV4l2CodecDevice * device, guint rank, gchar ** element_name)
 {
   GTypeQuery type_query;
   GTypeInfo type_info = { 0, };
@@ -780,9 +916,11 @@ gst_v4l2_decoder_register (GstPlugin * plugin,
   type_info.class_size = type_query.class_size;
   type_info.instance_size = type_query.instance_size;
   type_info.class_init = class_init;
-  type_info.class_data = gst_mini_object_ref (GST_MINI_OBJECT (device));
+  type_info.class_data = class_data;
   type_info.instance_init = instance_init;
-  GST_MINI_OBJECT_FLAG_SET (device, GST_MINI_OBJECT_FLAG_MAY_BE_LEAKED);
+
+  if (class_data == device)
+    GST_MINI_OBJECT_FLAG_SET (device, GST_MINI_OBJECT_FLAG_MAY_BE_LEAKED);
 
   /* The first decoder to be registered should use a constant name, like
    * v4l2slvp8dec, for any additional decoders, we create unique names. Decoder
@@ -800,14 +938,35 @@ gst_v4l2_decoder_register (GstPlugin * plugin,
 
   subtype = g_type_register_static (dec_type, type_name, &type_info, 0);
 
-  if (!gst_element_register (plugin, type_name, rank, subtype))
+  if (!gst_element_register (plugin, type_name, rank, subtype)) {
     GST_WARNING ("Failed to register plugin '%s'", type_name);
+    g_free (type_name);
+    type_name = NULL;
+  }
 
-  g_free (type_name);
+  if (element_name)
+    *element_name = type_name;
+  else
+    g_free (type_name);
 }
 
+/*
+ * gst_v4l2_decoder_alloc_request:
+ * @self a #GstV4l2Decoder pointer
+ * @frame_num: Used as a timestamp to identify references
+ * @bitstream the #GstMemory that holds the bitstream data
+ * @pic_buf the #GstBuffer holding the decoded picture
+ *
+ * Allocate a Linux media request file descriptor. This request wrapper will
+ * hold a reference to the requested bitstream memory to decoded and the
+ * picture buffer this request will decode to. This will be used for
+ * transparent management of the V4L2 queues.
+ *
+ * Returns: a new #GstV4l2Request
+ */
 GstV4l2Request *
-gst_v4l2_decoder_alloc_request (GstV4l2Decoder * self)
+gst_v4l2_decoder_alloc_request (GstV4l2Decoder * self, guint32 frame_num,
+    GstMemory * bitstream, GstBuffer * pic_buf)
 {
   GstV4l2Request *request = gst_queue_array_pop_head (self->request_pool);
   gint ret;
@@ -830,108 +989,284 @@ gst_v4l2_decoder_alloc_request (GstV4l2Decoder * self)
   }
 
   request->decoder = g_object_ref (self);
+  request->bitstream = gst_memory_ref (bitstream);
+  request->pic_buf = gst_buffer_ref (pic_buf);
+  request->frame_num = frame_num;
+  request->ref_count = 1;
+
   return request;
 }
 
+/*
+ * gst_v4l2_decoder_alloc_sub_request:
+ * @self a #GstV4l2Decoder pointer
+ * @prev_request the #GstV4l2Request this request continue
+ * @bitstream the #GstMemory that holds the bitstream data
+ *
+ * Allocate a Linux media request file descriptor. Similar to
+ * gst_v4l2_decoder_alloc_request(), but used when a request is the
+ * continuation of the decoding of the same picture. This is notably the case
+ * for subsequent slices or for second field of a frame.
+ *
+ * Returns: a new #GstV4l2Request
+ */
+GstV4l2Request *
+gst_v4l2_decoder_alloc_sub_request (GstV4l2Decoder * self,
+    GstV4l2Request * prev_request, GstMemory * bitstream)
+{
+  GstV4l2Request *request = gst_queue_array_pop_head (self->request_pool);
+  gint ret;
+
+  if (!request) {
+    request = g_new0 (GstV4l2Request, 1);
+
+    ret = ioctl (self->media_fd, MEDIA_IOC_REQUEST_ALLOC, &request->fd);
+    if (ret < 0) {
+      GST_ERROR_OBJECT (self, "MEDIA_IOC_REQUEST_ALLOC failed: %s",
+          g_strerror (errno));
+      return NULL;
+    }
+
+    request->poll = gst_poll_new (FALSE);
+    gst_poll_fd_init (&request->pollfd);
+    request->pollfd.fd = request->fd;
+    gst_poll_add_fd (request->poll, &request->pollfd);
+    gst_poll_fd_ctl_pri (request->poll, &request->pollfd, TRUE);
+  }
+
+  request->decoder = g_object_ref (self);
+  request->bitstream = gst_memory_ref (bitstream);
+  request->pic_buf = gst_buffer_ref (prev_request->pic_buf);
+  request->frame_num = prev_request->frame_num;
+  request->sub_request = TRUE;
+  request->ref_count = 1;
+
+  return request;
+}
+
+/**
+ * gst_v4l2_decoder_set_render_delay:
+ * @self: a #GstV4l2Decoder pointer
+ * @delay: The expected render delay
+ *
+ * The decoder will adjust the number of allowed concurrent request in order
+ * to allow this delay. The same number of concurrent bitstream buffer will be
+ * used, so make sure to adjust the number of bitstream buffer.
+ *
+ * For per-slice decoder, this is the maximum number of pending slice, so the
+ * render backlog in frame may be less then the render delay.
+ */
 void
+gst_v4l2_decoder_set_render_delay (GstV4l2Decoder * self, guint delay)
+{
+  self->render_delay = delay;
+}
+
+/**
+ * gst_v4l2_decoder_get_render_delay:
+ * @self: a #GstV4l2Decoder pointer
+ *
+ * This function is used to avoid storing the render delay in multiple places.
+ *
+ * Returns: The currently configured render delay.
+ */
+guint
+gst_v4l2_decoder_get_render_delay (GstV4l2Decoder * self)
+{
+  return self->render_delay;
+}
+
+GstV4l2Request *
+gst_v4l2_request_ref (GstV4l2Request * request)
+{
+  request->ref_count++;
+  return request;
+}
+
+static void
 gst_v4l2_request_free (GstV4l2Request * request)
+{
+  GstV4l2Decoder *decoder = request->decoder;
+
+  request->decoder = NULL;
+  close (request->fd);
+  gst_poll_free (request->poll);
+  g_free (request);
+
+  if (decoder)
+    g_object_unref (decoder);
+}
+
+void
+gst_v4l2_request_unref (GstV4l2Request * request)
 {
   GstV4l2Decoder *decoder = request->decoder;
   gint ret;
 
-  if (!decoder) {
-    close (request->fd);
-    gst_poll_free (request->poll);
-    g_free (request);
+  g_return_if_fail (request->ref_count > 0);
+
+  if (--request->ref_count > 0)
     return;
-  }
 
   g_clear_pointer (&request->bitstream, gst_memory_unref);
-  request->decoder = NULL;
+  g_clear_pointer (&request->pic_buf, gst_buffer_unref);
+  request->frame_num = G_MAXUINT32;
+  request->failed = FALSE;
+  request->hold_pic_buf = FALSE;
+  request->sub_request = FALSE;
 
   if (request->pending) {
     gint idx;
 
-    GST_DEBUG_OBJECT (decoder, "Freeing pending request %p.", request);
+    GST_DEBUG_OBJECT (decoder, "Freeing pending request %i.", request->fd);
 
     idx = gst_queue_array_find (decoder->pending_requests, NULL, request);
     if (idx >= 0)
       gst_queue_array_drop_element (decoder->pending_requests, idx);
 
     gst_v4l2_request_free (request);
-    g_object_unref (decoder);
     return;
   }
 
-  GST_TRACE_OBJECT (decoder, "Recycling request %p.", request);
+  GST_TRACE_OBJECT (decoder, "Recycling request %i.", request->fd);
 
   ret = ioctl (request->fd, MEDIA_REQUEST_IOC_REINIT, NULL);
   if (ret < 0) {
     GST_ERROR_OBJECT (request->decoder, "MEDIA_REQUEST_IOC_REINIT failed: %s",
         g_strerror (errno));
     gst_v4l2_request_free (request);
-    g_object_unref (decoder);
     return;
   }
 
   gst_queue_array_push_tail (decoder->request_pool, request);
-  g_object_unref (decoder);
+  g_clear_object (&request->decoder);
 }
 
 gboolean
-gst_v4l2_request_queue (GstV4l2Request * request)
+gst_v4l2_request_queue (GstV4l2Request * request, guint flags)
 {
+  GstV4l2Decoder *decoder = request->decoder;
   gint ret;
+  guint max_pending;
 
-  GST_TRACE_OBJECT (request->decoder, "Queuing request %p.", request);
+  GST_TRACE_OBJECT (decoder, "Queuing request %i.", request->fd);
+
+  /* this would lead to stalls if we tried to use this feature and it wasn't
+   * supported. */
+  if ((flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF)
+      && !decoder->supports_holding_capture) {
+    GST_ERROR_OBJECT (decoder,
+        "Driver does not support holding capture buffer.");
+    return FALSE;
+  }
+
+  if (!gst_v4l2_decoder_queue_sink_mem (decoder, request,
+          request->bitstream, request->frame_num, flags)) {
+    GST_ERROR_OBJECT (decoder, "Driver did not accept the bitstream data.");
+    return FALSE;
+  }
+
+  if (!request->sub_request &&
+      !gst_v4l2_decoder_queue_src_buffer (decoder, request->pic_buf)) {
+    GST_ERROR_OBJECT (decoder, "Driver did not accept the picture buffer.");
+    return FALSE;
+  }
 
   ret = ioctl (request->fd, MEDIA_REQUEST_IOC_QUEUE, NULL);
   if (ret < 0) {
-    GST_ERROR_OBJECT (request->decoder, "MEDIA_REQUEST_IOC_QUEUE, failed: %s",
+    GST_ERROR_OBJECT (decoder, "MEDIA_REQUEST_IOC_QUEUE, failed: %s",
         g_strerror (errno));
     return FALSE;
   }
 
+  if (flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF)
+    request->hold_pic_buf = TRUE;
+
   request->pending = TRUE;
-  gst_queue_array_push_tail (request->decoder->pending_requests, request);
+  gst_queue_array_push_tail (decoder->pending_requests,
+      gst_v4l2_request_ref (request));
+
+  max_pending = MAX (1, decoder->render_delay);
+
+  if (gst_queue_array_get_length (decoder->pending_requests) > max_pending) {
+    GstV4l2Request *pending_req;
+
+    pending_req = gst_queue_array_peek_head (decoder->pending_requests);
+    gst_v4l2_request_set_done (pending_req);
+  }
 
   return TRUE;
 }
 
 gint
-gst_v4l2_request_poll (GstV4l2Request * request, GstClockTime timeout)
-{
-  return gst_poll_wait (request->poll, timeout);
-}
-
-void
 gst_v4l2_request_set_done (GstV4l2Request * request)
 {
-  if (request->bitstream) {
-    GstV4l2Decoder *dec = request->decoder;
-    GstV4l2Request *pending_req;
+  GstV4l2Decoder *decoder = request->decoder;
+  GstV4l2Request *pending_req = NULL;
+  gint ret;
 
-    while ((pending_req = gst_queue_array_pop_head (dec->pending_requests))) {
-      gst_v4l2_decoder_dequeue_sink (request->decoder);
-      g_clear_pointer (&pending_req->bitstream, gst_memory_unref);
+  if (!request->pending)
+    return 1;
 
-      if (pending_req == request)
-        break;
-    }
+  GST_DEBUG_OBJECT (decoder, "Waiting for request %i to complete.",
+      request->fd);
 
-    /* Pending request should always be found in the fifo */
-    if (pending_req != request) {
-      g_warning ("Pending request not found in the pending list.");
-      gst_v4l2_decoder_dequeue_sink (request->decoder);
-      g_clear_pointer (&pending_req->bitstream, gst_memory_unref);
-    }
+  ret = gst_poll_wait (request->poll, GST_SECOND);
+  if (ret == 0) {
+    GST_WARNING_OBJECT (decoder, "Request %i took too long.", request->fd);
+    return 0;
   }
 
-  request->pending = FALSE;
+  if (ret < 0) {
+    GST_WARNING_OBJECT (decoder, "Request %i error: %s (%i)",
+        request->fd, g_strerror (errno), errno);
+    return ret;
+  }
+
+  while ((pending_req = gst_queue_array_pop_head (decoder->pending_requests))) {
+    gst_v4l2_decoder_dequeue_sink (decoder);
+    g_clear_pointer (&pending_req->bitstream, gst_memory_unref);
+
+    if (!pending_req->hold_pic_buf) {
+      guint32 frame_num = G_MAXUINT32;
+
+      if (!gst_v4l2_decoder_dequeue_src (decoder, &frame_num)) {
+        pending_req->failed = TRUE;
+      } else if (frame_num != pending_req->frame_num) {
+        GST_WARNING_OBJECT (decoder,
+            "Requested frame %u, but driver returned frame %u.",
+            pending_req->frame_num, frame_num);
+        pending_req->failed = TRUE;
+      }
+    }
+
+    pending_req->pending = FALSE;
+    gst_v4l2_request_unref (pending_req);
+
+    if (pending_req == request)
+      break;
+  }
+
+  /* Pending request must be in the pending request list */
+  g_assert (pending_req == request);
+
+  return ret;
 }
 
 gboolean
-gst_v4l2_request_is_done (GstV4l2Request * request)
+gst_v4l2_request_failed (GstV4l2Request * request)
 {
-  return !request->pending;
+  return request->failed;
+}
+
+GstBuffer *
+gst_v4l2_request_dup_pic_buf (GstV4l2Request * request)
+{
+  return gst_buffer_ref (request->pic_buf);
+}
+
+gint
+gst_v4l2_request_get_fd (GstV4l2Request * request)
+{
+  return request->fd;
 }

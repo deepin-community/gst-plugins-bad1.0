@@ -34,6 +34,7 @@
 
 GST_DEBUG_CATEGORY_STATIC (gst_decklink_debug);
 #define GST_CAT_DEFAULT gst_decklink_debug
+#define DEFAULT_PERSISTENT_ID (-1)
 
 GType
 gst_decklink_mode_get_type (void)
@@ -88,11 +89,43 @@ gst_decklink_mode_get_type (void)
     {GST_DECKLINK_MODE_2160p5994, "4k 59.94p", "2160p5994"},
     {GST_DECKLINK_MODE_2160p60, "4k 60p", "2160p60"},
 
-    {GST_DECKLINK_MODE_NTSC_WIDESCREEN, "NTSC SD 60i Widescreen", "ntsc-widescreen"},
-    {GST_DECKLINK_MODE_NTSC2398_WIDESCREEN, "NTSC SD 60i Widescreen (24 fps)", "ntsc2398-widescreen"},
-    {GST_DECKLINK_MODE_PAL_WIDESCREEN, "PAL SD 50i Widescreen", "pal-widescreen"},
-    {GST_DECKLINK_MODE_NTSC_P_WIDESCREEN, "NTSC SD 60p Widescreen", "ntsc-p-widescreen"},
-    {GST_DECKLINK_MODE_PAL_P_WIDESCREEN, "PAL SD 50p Widescreen", "pal-p-widescreen"},
+    {GST_DECKLINK_MODE_NTSC_WIDESCREEN, "NTSC SD 60i Widescreen",
+        "ntsc-widescreen"},
+    {GST_DECKLINK_MODE_NTSC2398_WIDESCREEN, "NTSC SD 60i Widescreen (24 fps)",
+        "ntsc2398-widescreen"},
+    {GST_DECKLINK_MODE_PAL_WIDESCREEN, "PAL SD 50i Widescreen",
+        "pal-widescreen"},
+    {GST_DECKLINK_MODE_NTSC_P_WIDESCREEN, "NTSC SD 60p Widescreen",
+        "ntsc-p-widescreen"},
+    {GST_DECKLINK_MODE_PAL_P_WIDESCREEN, "PAL SD 50p Widescreen",
+        "pal-p-widescreen"},
+
+    {GST_DECKLINK_MODE_4Kp2398, "4k dci 23.98p", "4kdcip2398"},
+    {GST_DECKLINK_MODE_4Kp24, "4k dci 24p", "4kdcip24"},
+    {GST_DECKLINK_MODE_4Kp25, "4k dci 25p", "4kdcip25"},
+    {GST_DECKLINK_MODE_4Kp2997, "4k dci 29.97p", "4kdcip2997"},
+    {GST_DECKLINK_MODE_4Kp30, "4k dci 30p", "4kdcip30"},
+    {GST_DECKLINK_MODE_4Kp50, "4k dci 50p", "4kdcip50"},
+    {GST_DECKLINK_MODE_4Kp5994, "4k dci 59.94p", "4kdcip5994"},
+    {GST_DECKLINK_MODE_4Kp60, "4k dci 60p", "4kdcip60"},
+
+    {GST_DECKLINK_MODE_4320p2398, "8k 23.98p", "8kp2398"},
+    {GST_DECKLINK_MODE_4320p24, "8k 24p", "8kp24"},
+    {GST_DECKLINK_MODE_4320p25, "8k 25p", "8kp25"},
+    {GST_DECKLINK_MODE_4320p2997, "8k 29.97p", "8kp2997"},
+    {GST_DECKLINK_MODE_4320p30, "8k 30p", "8kp30"},
+    {GST_DECKLINK_MODE_4320p50, "8k 50p", "8kp50"},
+    {GST_DECKLINK_MODE_4320p5994, "8k 59.94p", "8kp5994"},
+    {GST_DECKLINK_MODE_4320p60, "8k 60p", "8kp60"},
+
+    {GST_DECKLINK_MODE_8Kp2398, "8k dci 23.98p", "8kdcip2398"},
+    {GST_DECKLINK_MODE_8Kp24, "8k dci 24p", "8kdcip24"},
+    {GST_DECKLINK_MODE_8Kp25, "8k dci 25p", "8kdcip25"},
+    {GST_DECKLINK_MODE_8Kp2997, "8k dci 29.97p", "8kdcip2997"},
+    {GST_DECKLINK_MODE_8Kp30, "8k dci 30p", "8kdcip30"},
+    {GST_DECKLINK_MODE_8Kp50, "8k dci 50p", "8kdcip50"},
+    {GST_DECKLINK_MODE_8Kp5994, "8k dci 59.94p", "8kdcip5994"},
+    {GST_DECKLINK_MODE_8Kp60, "8k dci 60p", "8kdcip60"},
 
     {0, NULL, NULL}
   };
@@ -138,8 +171,8 @@ gst_decklink_video_format_get_type (void)
     {GST_DECKLINK_VIDEO_FORMAT_10BIT_YUV, "bmdFormat10BitYUV", "10bit-yuv"},
     {GST_DECKLINK_VIDEO_FORMAT_8BIT_ARGB, "bmdFormat8BitARGB", "8bit-argb"},
     {GST_DECKLINK_VIDEO_FORMAT_8BIT_BGRA, "bmdFormat8BitBGRA", "8bit-bgra"},
+    {GST_DECKLINK_VIDEO_FORMAT_10BIT_RGB, "bmdFormat10BitRGB", "10bit-rgb"},
     /* Not yet supported:
-       {GST_DECKLINK_VIDEO_FORMAT_10BIT_RGB, "bmdFormat10BitRGB", "10bit-rgb"},
        {GST_DECKLINK_VIDEO_FORMAT_12BIT_RGB, "bmdFormat12BitRGB", "12bit-rgb"},
        {GST_DECKLINK_VIDEO_FORMAT_12BIT_RGBLE, "bmdFormat12BitRGBLE", "12bit-rgble"},
        {GST_DECKLINK_VIDEO_FORMAT_10BIT_RGBXLE, "bmdFormat10BitRGBXLE", "10bit-rgbxle"},
@@ -156,18 +189,71 @@ gst_decklink_video_format_get_type (void)
   return (GType) id;
 }
 
+/**
+ * GstDecklinkProfileId:
+ * @GST_DECKLINK_PROFILE_ID_DEFAULT: Don't change the profile
+ * @GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX: Equivalent to bmdProfileOneSubDeviceFullDuplex
+ * @GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX: Equivalent to bmdProfileOneSubDeviceHalfDuplex
+ * @GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX: Equivalent to bmdProfileTwoSubDevicesFullDuplex
+ * @GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_HALF_DUPLEX: Equivalent to bmdProfileTwoSubDevicesHalfDuplex
+ * @GST_DECKLINK_PROFILE_ID_FOUR_SUB_DEVICES_HALF_DUPLEX: Equivalent to bmdProfileFourSubDevicesHalfDuplex
+ *
+ * Decklink Profile ID
+ *
+ * Since: 1.20
+ */
 GType
-gst_decklink_duplex_mode_get_type (void)
+gst_decklink_profile_id_get_type (void)
 {
   static gsize id = 0;
   static const GEnumValue types[] = {
-    {GST_DECKLINK_DUPLEX_MODE_HALF, "Half-Duplex", "half"},
-    {GST_DECKLINK_DUPLEX_MODE_FULL, "Full-Duplex", "full"},
+    {GST_DECKLINK_PROFILE_ID_DEFAULT, "Default, don't change profile",
+        "default"},
+    {GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX,
+        "One sub-device, Full-Duplex", "one-sub-device-full"},
+    {GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX,
+        "One sub-device, Half-Duplex", "one-sub-device-half"},
+    {GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX,
+        "Two sub-devices, Full-Duplex", "two-sub-devices-full"},
+    {GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_HALF_DUPLEX,
+        "Two sub-devices, Half-Duplex", "two-sub-devices-half"},
+    {GST_DECKLINK_PROFILE_ID_FOUR_SUB_DEVICES_HALF_DUPLEX,
+        "Four sub-devices, Half-Duplex", "four-sub-devices-half"},
     {0, NULL, NULL}
   };
 
   if (g_once_init_enter (&id)) {
-    GType tmp = g_enum_register_static ("GstDecklinkDuplexMode", types);
+    GType tmp = g_enum_register_static ("GstDecklinkProfileId", types);
+    g_once_init_leave (&id, tmp);
+  }
+
+  return (GType) id;
+}
+
+/**
+ * GstDecklinkMappingFormat:
+ * @GST_DECKLINK_MAPPING_FORMAT_DEFAULT: Don't change the mapping format
+ * @GST_DECKLINK_MAPPING_FORMAT_LEVEL_A: Level A
+ * @GST_DECKLINK_MAPPING_FORMAT_LEVEL_B: Level B
+ *
+ * 3G-SDI mapping format (SMPTE ST 425-1:2017)
+ *
+ * Since: 1.22
+ */
+GType
+gst_decklink_mapping_format_get_type (void)
+{
+  static gsize id = 0;
+  static const GEnumValue mappingformats[] = {
+    {GST_DECKLINK_MAPPING_FORMAT_DEFAULT, "Default, don't change mapping format",
+      "default"},
+    {GST_DECKLINK_MAPPING_FORMAT_LEVEL_A, "Level A", "level-a"},
+    {GST_DECKLINK_MAPPING_FORMAT_LEVEL_B, "Level B", "level-b"},
+    {0, NULL, NULL}
+  };
+
+  if (g_once_init_enter (&id)) {
+    GType tmp = g_enum_register_static ("GstDecklinkMappingFormat", mappingformats);
     g_once_init_leave (&id, tmp);
   }
 
@@ -327,7 +413,34 @@ static const GstDecklinkMode modes[] = {
   {bmdModeNTSC2398, 720, 486, 24000, 1001, true, NTSC_WS},
   {bmdModePAL, 720, 576, 25, 1, true, PAL_WS},
   {bmdModeNTSCp, 720, 486, 30000, 1001, false, NTSC_WS},
-  {bmdModePALp, 720, 576, 25, 1, false, PAL_WS}
+  {bmdModePALp, 720, 576, 25, 1, false, PAL_WS},
+
+  {bmdMode4kDCI2398, 4096, 2160, 24000, 1001, false, UHD},
+  {bmdMode4kDCI24, 4096, 2160, 24, 1, false, UHD},
+  {bmdMode4kDCI25, 4096, 2160, 25, 1, false, UHD},
+  {bmdMode4kDCI2997, 4096, 2160, 30000, 1001, false, UHD},
+  {bmdMode4kDCI30, 4096, 2160, 30, 1, false, UHD},
+  {bmdMode4kDCI50, 4096, 2160, 50, 1, false, UHD},
+  {bmdMode4kDCI5994, 4096, 2160, 60000, 1001, false, UHD},
+  {bmdMode4kDCI60, 4096, 2160, 60, 1, false, UHD},
+
+  {bmdMode8K4320p2398, 7680, 4320, 24000, 1001, false, UHD},
+  {bmdMode8K4320p24, 7680, 4320, 24, 1, false, UHD},
+  {bmdMode8K4320p25, 7680, 4320, 25, 1, false, UHD},
+  {bmdMode8K4320p2997, 7680, 4320, 30000, 1001, false, UHD},
+  {bmdMode8K4320p30, 7680, 4320, 30, 1, false, UHD},
+  {bmdMode8K4320p50, 7680, 4320, 50, 1, false, UHD},
+  {bmdMode8K4320p5994, 7680, 4320, 60000, 1001, false, UHD},
+  {bmdMode8K4320p60, 7680, 4320, 60, 1, false, UHD},
+
+  {bmdMode8kDCI2398, 8192, 4320, 24000, 1001, false, UHD},
+  {bmdMode8kDCI24, 8192, 4320, 24, 1, false, UHD},
+  {bmdMode8kDCI25, 8192, 4320, 25, 1, false, UHD},
+  {bmdMode8kDCI2997, 8192, 4320, 30000, 1001, false, UHD},
+  {bmdMode8kDCI30, 8192, 4320, 30, 1, false, UHD},
+  {bmdMode8kDCI50, 8192, 4320, 50, 1, false, UHD},
+  {bmdMode8kDCI5994, 8192, 4320, 60000, 1001, false, UHD},
+  {bmdMode8kDCI60, 8192, 4320, 60, 1, false, UHD},
 };
 
 static const struct
@@ -342,8 +455,8 @@ static const struct
   {bmdFormat10BitYUV, 4, GST_VIDEO_FORMAT_v210},
   {bmdFormat8BitARGB, 4, GST_VIDEO_FORMAT_ARGB},
   {bmdFormat8BitBGRA, 4, GST_VIDEO_FORMAT_BGRA},
+  {bmdFormat10BitRGB, 4, GST_VIDEO_FORMAT_r210},
 /* Not yet supported
-  {bmdFormat10BitRGB, FIXME, FIXME},
   {bmdFormat12BitRGB, FIXME, FIXME},
   {bmdFormat12BitRGBLE, FIXME, FIXME},
   {bmdFormat10BitRGBXLE, FIXME, FIXME},
@@ -351,15 +464,18 @@ static const struct
   /* *INDENT-ON* */
 };
 
-static const struct
+enum ProfileSetOperationResult
 {
-  BMDDuplexMode mode;
-  GstDecklinkDuplexMode gstmode;
-} duplex_modes[] = {
-  /* *INDENT-OFF* */
-  {bmdDuplexModeHalf, GST_DECKLINK_DUPLEX_MODE_HALF},
-  {bmdDuplexModeFull, GST_DECKLINK_DUPLEX_MODE_FULL},
-  /* *INDENT-ON* */
+  PROFILE_SET_UNSUPPORTED,
+  PROFILE_SET_SUCCESS,
+  PROFILE_SET_FAILURE
+};
+
+enum MappingFormatSetOperationResult
+{
+  MAPPING_FORMAT_SET_UNSUPPORTED,
+  MAPPING_FORMAT_SET_SUCCESS,
+  MAPPING_FORMAT_SET_FAILURE
 };
 
 enum DuplexModeSetOperationResult
@@ -400,7 +516,7 @@ static const struct
 const GstDecklinkMode *
 gst_decklink_get_mode (GstDecklinkModeEnum e)
 {
-  if (e < GST_DECKLINK_MODE_AUTO || e > GST_DECKLINK_MODE_PAL_P_WIDESCREEN)
+  if (e < GST_DECKLINK_MODE_AUTO || e > GST_DECKLINK_MODE_8Kp60)
     return NULL;
   return &modes[e];
 }
@@ -524,6 +640,78 @@ gst_decklink_get_mode_enum_from_bmd (BMDDisplayMode mode)
     case bmdMode4K2160p60:
       displayMode = GST_DECKLINK_MODE_2160p60;
       break;
+    case bmdMode4kDCI2398:
+      displayMode = GST_DECKLINK_MODE_4Kp2398;
+      break;
+    case bmdMode4kDCI24:
+      displayMode = GST_DECKLINK_MODE_4Kp24;
+      break;
+    case bmdMode4kDCI25:
+      displayMode = GST_DECKLINK_MODE_4Kp25;
+      break;
+    case bmdMode4kDCI2997:
+      displayMode = GST_DECKLINK_MODE_4Kp2997;
+      break;
+    case bmdMode4kDCI30:
+      displayMode = GST_DECKLINK_MODE_4Kp30;
+      break;
+    case bmdMode4kDCI50:
+      displayMode = GST_DECKLINK_MODE_4Kp50;
+      break;
+    case bmdMode4kDCI5994:
+      displayMode = GST_DECKLINK_MODE_4Kp5994;
+      break;
+    case bmdMode4kDCI60:
+      displayMode = GST_DECKLINK_MODE_4Kp60;
+      break;
+    case bmdMode8K4320p2398:
+      displayMode = GST_DECKLINK_MODE_4320p2398;
+      break;
+    case bmdMode8K4320p24:
+      displayMode = GST_DECKLINK_MODE_4320p24;
+      break;
+    case bmdMode8K4320p25:
+      displayMode = GST_DECKLINK_MODE_4320p25;
+      break;
+    case bmdMode8K4320p2997:
+      displayMode = GST_DECKLINK_MODE_4320p2997;
+      break;
+    case bmdMode8K4320p30:
+      displayMode = GST_DECKLINK_MODE_4320p30;
+      break;
+    case bmdMode8K4320p50:
+      displayMode = GST_DECKLINK_MODE_4320p50;
+      break;
+    case bmdMode8K4320p5994:
+      displayMode = GST_DECKLINK_MODE_4320p5994;
+      break;
+    case bmdMode8K4320p60:
+      displayMode = GST_DECKLINK_MODE_4320p60;
+      break;
+    case bmdMode8kDCI2398:
+      displayMode = GST_DECKLINK_MODE_4Kp2398;
+      break;
+    case bmdMode8kDCI24:
+      displayMode = GST_DECKLINK_MODE_4Kp24;
+      break;
+    case bmdMode8kDCI25:
+      displayMode = GST_DECKLINK_MODE_4Kp25;
+      break;
+    case bmdMode8kDCI2997:
+      displayMode = GST_DECKLINK_MODE_4Kp2997;
+      break;
+    case bmdMode8kDCI30:
+      displayMode = GST_DECKLINK_MODE_4Kp30;
+      break;
+    case bmdMode8kDCI50:
+      displayMode = GST_DECKLINK_MODE_4Kp50;
+      break;
+    case bmdMode8kDCI5994:
+      displayMode = GST_DECKLINK_MODE_4Kp5994;
+      break;
+    case bmdMode8kDCI60:
+      displayMode = GST_DECKLINK_MODE_4Kp60;
+      break;
     default:
       displayMode = (GstDecklinkModeEnum) - 1;
       break;
@@ -587,25 +775,6 @@ gst_decklink_timecode_format_to_enum (BMDTimecodeFormat f)
   }
   g_assert_not_reached ();
   return GST_DECKLINK_TIMECODE_FORMAT_RP188ANY;
-}
-
-const BMDDuplexMode
-gst_decklink_duplex_mode_from_enum (GstDecklinkDuplexMode m)
-{
-  return duplex_modes[m].mode;
-}
-
-const GstDecklinkDuplexMode
-gst_decklink_duplex_mode_to_enum (BMDDuplexMode m)
-{
-  guint i;
-
-  for (i = 0; i < G_N_ELEMENTS (duplex_modes); i++) {
-    if (duplex_modes[i].mode == m)
-      return duplex_modes[i].gstmode;
-  }
-  g_assert_not_reached ();
-  return GST_DECKLINK_DUPLEX_MODE_HALF;
 }
 
 const BMDKeyerMode
@@ -712,6 +881,8 @@ gst_decklink_mode_get_structure (GstDecklinkModeEnum e, BMDPixelFormat f,
       gst_structure_set (s, "format", G_TYPE_STRING, "BGRA", NULL);
       break;
     case bmdFormat10BitRGB:    /* 'r210' Big-endian RGB 10-bit per component with SMPTE video levels (64-960). Packed as 2:10:10:10 */
+      gst_structure_set (s, "format", G_TYPE_STRING, "r210", NULL);
+      break;
     case bmdFormat12BitRGB:    /* 'R12B' Big-endian RGB 12-bit per component with full range (0-4095). Packed as 12-bit per component */
     case bmdFormat12BitRGBLE:  /* 'R12L' Little-endian RGB 12-bit per component with full range (0-4095). Packed as 12-bit per component */
     case bmdFormat10BitRGBXLE: /* 'R10l' Little-endian 10-bit RGB with SMPTE video levels (64-940) */
@@ -860,14 +1031,22 @@ struct _Device
   GstDecklinkDevice *devices[4];
 };
 
-DuplexModeSetOperationResult gst_decklink_configure_duplex_mode (Device *
-    device, BMDDuplexMode duplex_mode);
-DuplexModeSetOperationResult
-gst_decklink_configure_duplex_mode_pair_device (Device * device,
-    BMDDuplexMode duplex_mode);
-Device *gst_decklink_find_device_by_persistent_id (int64_t persistent_id);
-gboolean gst_decklink_device_has_persistent_id (Device * device,
-    int64_t persistent_id);
+static ProfileSetOperationResult gst_decklink_configure_profile (Device *
+    device, GstDecklinkProfileId profile_id);
+static MappingFormatSetOperationResult gst_decklink_configure_mapping_format (Device *
+    device, GstDecklinkMappingFormat mapping_format);
+
+static gboolean
+persistent_id_is_equal_input (const Device * a, const gint64 * b)
+{
+  return a->input.persistent_id == *b;
+}
+
+static gboolean
+persistent_id_is_equal_output (const Device * a, const gint64 * b)
+{
+  return a->output.persistent_id == *b;
+}
 
 class GStreamerDecklinkInputCallback:public IDeckLinkInputCallback
 {
@@ -926,17 +1105,40 @@ public:
       VideoInputFormatChanged (BMDVideoInputFormatChangedEvents,
       IDeckLinkDisplayMode * mode, BMDDetectedVideoInputFormatFlags formatFlags)
   {
-    BMDPixelFormat pixelFormat;
+    BMDPixelFormat pixelFormat = bmdFormatUnspecified;
 
     GST_INFO ("Video input format changed");
 
-    if ((formatFlags & bmdDetectedVideoInputRGB444)
-        && m_input->format == bmdFormat8BitYUV) {
-      /* user-set format was auto or 8BitYUV, change to RGB */
-      pixelFormat = bmdFormat8BitARGB;
-    } else {
-      /* use the user-set format, defaulting to 8BitYUV */
-      pixelFormat = m_input->format;
+    /* Detect input format */
+    if (formatFlags & bmdDetectedVideoInputRGB444) {
+      if (formatFlags & bmdDetectedVideoInput10BitDepth) {
+        pixelFormat = bmdFormat10BitRGB;
+      } else if (formatFlags & bmdDetectedVideoInput8BitDepth) {
+        /* Cannot detect ARGB vs BGRA, so assume ARGB unless user sets BGRA */
+        if (m_input->format == bmdFormat8BitBGRA) {
+          pixelFormat = bmdFormat8BitBGRA;
+        } else {
+          pixelFormat = bmdFormat8BitARGB;
+        }
+      } else {
+        GST_ERROR ("Not implemented depth");
+      }
+    } else if (formatFlags & bmdDetectedVideoInputYCbCr422) {
+      if (formatFlags & bmdDetectedVideoInput10BitDepth) {
+        pixelFormat = bmdFormat10BitYUV;
+      } else if (formatFlags & bmdDetectedVideoInput8BitDepth) {
+        pixelFormat = bmdFormat8BitYUV;
+      }
+    }
+
+    if (pixelFormat == bmdFormatUnspecified) {
+      GST_ERROR ("Video input format is not supported");
+      return E_FAIL;
+    }
+
+    if (!m_input->auto_format && (m_input->format != pixelFormat)) {
+      GST_ERROR ("Video input format does not match the user-set format");
+      return E_FAIL;
     }
 
     g_mutex_lock (&m_input->lock);
@@ -947,7 +1149,8 @@ public:
 
     /* Reset any timestamp observations we might've made */
     if (m_input->videosrc) {
-      GstDecklinkVideoSrc *videosrc = GST_DECKLINK_VIDEO_SRC (m_input->videosrc);
+      GstDecklinkVideoSrc *videosrc =
+          GST_DECKLINK_VIDEO_SRC (m_input->videosrc);
 
       g_mutex_lock (&videosrc->lock);
       videosrc->window_fill = 0;
@@ -991,7 +1194,7 @@ public:
         GstClockTime stream_time, GstClockTime stream_duration,
         GstClockTime hardware_time, GstClockTime hardware_duration,
         gboolean no_signal) = NULL;
-    GstDecklinkModeEnum mode;
+    GstDecklinkModeEnum mode = GST_DECKLINK_MODE_AUTO;
     GstClockTime capture_time = GST_CLOCK_TIME_NONE;
     GstClockTime base_time = 0;
     gboolean no_signal = FALSE;
@@ -1009,7 +1212,9 @@ public:
       base_time = gst_element_get_base_time (videosrc);
       got_video_frame = m_input->got_video_frame;
     }
-    mode = gst_decklink_get_mode_enum_from_bmd (m_input->mode->mode);
+
+    if (m_input->mode)
+      mode = gst_decklink_get_mode_enum_from_bmd (m_input->mode->mode);
 
     if (m_input->audiosrc) {
       audiosrc = GST_ELEMENT_CAST (gst_object_ref (m_input->audiosrc));
@@ -1152,7 +1357,7 @@ private:
     while ((buf = (uint8_t *) gst_queue_array_pop_head (m_buffers))) {
       uint8_t offset = *(buf - 1);
       void *alloc_buf = buf - 128 + offset;
-      g_free (alloc_buf);
+        g_free (alloc_buf);
     }
   }
 
@@ -1356,9 +1561,9 @@ static GPtrArray *devices;      /* array of Device */
 
 static GstDecklinkDevice *
 gst_decklink_device_new (const gchar * model_name, const gchar * display_name,
-    const gchar * serial_number, gboolean supports_format_detection,
-    GstCaps * video_caps, guint max_channels, gboolean video, gboolean capture,
-    guint device_number)
+    const gchar * serial_number, gint64 persistent_id,
+    gboolean supports_format_detection, GstCaps * video_caps,
+    guint max_channels, gboolean video, gboolean capture, guint device_number)
 {
   GstDevice *ret;
   gchar *name;
@@ -1407,6 +1612,10 @@ gst_decklink_device_new (const gchar * model_name, const gchar * display_name,
     gst_structure_set (properties, "serial-number", G_TYPE_STRING,
         serial_number, NULL);
 
+  if (persistent_id)
+    gst_structure_set (properties, "persistent-id", G_TYPE_INT64,
+        persistent_id, NULL);
+
   ret = GST_DEVICE (g_object_new (GST_TYPE_DECKLINK_DEVICE,
           "display-name", name,
           "device-class", device_class, "caps", caps, "properties", properties,
@@ -1418,9 +1627,17 @@ gst_decklink_device_new (const gchar * model_name, const gchar * display_name,
 
   GST_DECKLINK_DEVICE (ret)->video = video;
   GST_DECKLINK_DEVICE (ret)->capture = capture;
-  GST_DECKLINK_DEVICE (ret)->device_number = device_number;
+  GST_DECKLINK_DEVICE (ret)->persistent_id = persistent_id;
 
   return GST_DECKLINK_DEVICE (ret);
+}
+
+static gint
+compare_persistent_id (gconstpointer a, gconstpointer b)
+{
+  const Device *const dev1 = *(Device **) a;
+  const Device *const dev2 = *(Device **) b;
+  return dev1->input.persistent_id - dev2->input.persistent_id;
 }
 
 static gpointer
@@ -1461,6 +1678,7 @@ init_devices (gpointer data)
     gchar *model_name = NULL;
     gchar *display_name = NULL;
     gchar *serial_number = NULL;
+    gint64 persistent_id = 0;
     gboolean supports_format_detection = 0;
     gint64 max_channels = 2;
     GstCaps *video_input_caps = gst_caps_new_empty ();
@@ -1582,7 +1800,7 @@ init_devices (gpointer data)
       }
     }
 
-    ret = decklink->QueryInterface (IID_IDeckLinkAttributes,
+    ret = decklink->QueryInterface (IID_IDeckLinkProfileAttributes,
         (void **) &dev->input.attributes);
     dev->output.attributes = dev->input.attributes;
     if (ret != S_OK) {
@@ -1591,13 +1809,28 @@ init_devices (gpointer data)
     } else {
       bool tmp_bool = false;
       int64_t tmp_int = 2;
+      int64_t tmp_int_persistent_id = 0;
 
-      dev->input.attributes->GetInt (BMDDeckLinkMaximumAudioChannels,
-          &tmp_int);
+      dev->input.attributes->GetInt (BMDDeckLinkMaximumAudioChannels, &tmp_int);
       dev->input.attributes->GetFlag (BMDDeckLinkSupportsInputFormatDetection,
           &tmp_bool);
       supports_format_detection = tmp_bool;
       max_channels = tmp_int;
+
+      ret =
+          dev->input.attributes->GetInt (BMDDeckLinkPersistentID,
+          &tmp_int_persistent_id);
+      if (ret == S_OK) {
+        persistent_id = tmp_int_persistent_id;
+        dev->output.persistent_id = persistent_id;
+        dev->input.persistent_id = persistent_id;
+        GST_DEBUG ("device %d has persistent id %" G_GINT64_FORMAT, i, persistent_id);
+      } else {
+        persistent_id = i;
+        dev->output.persistent_id = i;
+        dev->input.persistent_id = i;
+        GST_DEBUG ("device %d does not have persistent id. Value set to %d", i, i);
+      }
     }
 
     decklink->GetModelName ((COMSTR_T *) & model_name);
@@ -1610,22 +1843,22 @@ init_devices (gpointer data)
     if (capture) {
       dev->devices[0] =
           gst_decklink_device_new (model_name, display_name, serial_number,
-          supports_format_detection, video_input_caps, max_channels, TRUE, TRUE,
-          i);
+          persistent_id, supports_format_detection, video_input_caps,
+          max_channels, TRUE, TRUE, i);
       dev->devices[1] =
           gst_decklink_device_new (model_name, display_name, serial_number,
-          supports_format_detection, video_input_caps, max_channels, FALSE,
-          TRUE, i);
+          persistent_id, supports_format_detection, video_input_caps,
+          max_channels, FALSE, TRUE, i);
     }
     if (output) {
       dev->devices[2] =
           gst_decklink_device_new (model_name, display_name, serial_number,
-          supports_format_detection, video_output_caps, max_channels, TRUE,
-          FALSE, i);
+          persistent_id, supports_format_detection, video_output_caps,
+          max_channels, TRUE, FALSE, i);
       dev->devices[3] =
           gst_decklink_device_new (model_name, display_name, serial_number,
-          supports_format_detection, video_output_caps, max_channels, FALSE,
-          FALSE, i);
+          persistent_id, supports_format_detection, video_output_caps,
+          max_channels, FALSE, FALSE, i);
     }
 
     if (model_name)
@@ -1653,6 +1886,8 @@ init_devices (gpointer data)
   GST_INFO ("Detected %u devices", devices->len);
 
   iterator->Release ();
+
+  g_ptr_array_sort (devices, compare_persistent_id);
 
   return NULL;
 }
@@ -1691,15 +1926,27 @@ gst_decklink_get_devices (void)
 }
 
 GstDecklinkOutput *
-gst_decklink_acquire_nth_output (gint n, GstElement * sink, gboolean is_audio)
+gst_decklink_acquire_nth_output (gint n, gint64 persistent_id,
+    GstElement * sink, gboolean is_audio)
 {
   GstDecklinkOutput *output;
   Device *device;
+  guint found_index;
 
   g_once (&devices_once, init_devices, NULL);
 
   if (devices == NULL)
     return NULL;
+
+  if (persistent_id != DEFAULT_PERSISTENT_ID) {
+    if (g_ptr_array_find_with_equal_func (devices, &persistent_id,
+            (GEqualFunc) persistent_id_is_equal_output, &found_index)) {
+      n = found_index;
+      GST_DEBUG ("Persistent ID: %" G_GINT64_FORMAT ", used", persistent_id);
+    } else {
+      return NULL;
+    }
+  }
 
   if (n < 0 || (guint) n >= devices->len)
     return NULL;
@@ -1713,8 +1960,12 @@ gst_decklink_acquire_nth_output (gint n, GstElement * sink, gboolean is_audio)
 
   if (!is_audio) {
     GstDecklinkVideoSink *videosink = (GstDecklinkVideoSink *) (sink);
-    if (gst_decklink_configure_duplex_mode (device,
-            videosink->duplex_mode) == DUPLEX_MODE_SET_FAILURE) {
+    if (gst_decklink_configure_profile (device,
+            videosink->profile_id) == PROFILE_SET_FAILURE) {
+      return NULL;
+    }
+    if (gst_decklink_configure_mapping_format (device,
+            videosink->mapping_format) == MAPPING_FORMAT_SET_FAILURE) {
       return NULL;
     }
   }
@@ -1736,13 +1987,25 @@ gst_decklink_acquire_nth_output (gint n, GstElement * sink, gboolean is_audio)
 }
 
 void
-gst_decklink_release_nth_output (gint n, GstElement * sink, gboolean is_audio)
+gst_decklink_release_nth_output (gint n, gint64 persistent_id,
+    GstElement * sink, gboolean is_audio)
 {
   GstDecklinkOutput *output;
   Device *device;
+  guint found_index;
 
   if (devices == NULL)
     return;
+
+  if (persistent_id != DEFAULT_PERSISTENT_ID) {
+    if (g_ptr_array_find_with_equal_func (devices, &persistent_id,
+            (GEqualFunc) persistent_id_is_equal_output, &found_index)) {
+      n = found_index;
+      GST_DEBUG ("Persistent ID: %" G_GINT64_FORMAT ", used", persistent_id);
+    } else {
+      return;
+    }
+  }
 
   if (n < 0 || (guint) n >= devices->len)
     return;
@@ -1765,15 +2028,27 @@ gst_decklink_release_nth_output (gint n, GstElement * sink, gboolean is_audio)
 }
 
 GstDecklinkInput *
-gst_decklink_acquire_nth_input (gint n, GstElement * src, gboolean is_audio)
+gst_decklink_acquire_nth_input (gint n, gint64 persistent_id, GstElement * src,
+    gboolean is_audio)
 {
   GstDecklinkInput *input;
   Device *device;
+  guint found_index;
 
   g_once (&devices_once, init_devices, NULL);
 
   if (devices == NULL)
     return NULL;
+
+  if (persistent_id != DEFAULT_PERSISTENT_ID) {
+    if (g_ptr_array_find_with_equal_func (devices, &persistent_id,
+            (GEqualFunc) persistent_id_is_equal_input, &found_index)) {
+      n = found_index;
+      GST_DEBUG ("Persistent ID: %" G_GINT64_FORMAT ", used", persistent_id);
+    } else {
+      return NULL;
+    }
+  }
 
   if (n < 0 || (guint) n >= devices->len)
     return NULL;
@@ -1787,11 +2062,12 @@ gst_decklink_acquire_nth_input (gint n, GstElement * src, gboolean is_audio)
 
   if (!is_audio) {
     GstDecklinkVideoSrc *videosrc = (GstDecklinkVideoSrc *) (src);
-    if (gst_decklink_configure_duplex_mode (device,
-            videosrc->duplex_mode) == DUPLEX_MODE_SET_FAILURE) {
+    if (gst_decklink_configure_profile (device,
+            videosrc->profile_id) == PROFILE_SET_FAILURE) {
       return NULL;
     }
   }
+
   g_mutex_lock (&input->lock);
   input->input->SetVideoInputFrameMemoryAllocator (new
       GStreamerDecklinkMemoryAllocator);
@@ -1804,6 +2080,7 @@ gst_decklink_acquire_nth_input (gint n, GstElement * src, gboolean is_audio)
     g_mutex_unlock (&input->lock);
     return input;
   }
+
   g_mutex_unlock (&input->lock);
 
   GST_ERROR ("Input device %d (audio: %d) in use already", n, is_audio);
@@ -1811,13 +2088,25 @@ gst_decklink_acquire_nth_input (gint n, GstElement * src, gboolean is_audio)
 }
 
 void
-gst_decklink_release_nth_input (gint n, GstElement * src, gboolean is_audio)
+gst_decklink_release_nth_input (gint n, gint64 persistent_id, GstElement * src,
+    gboolean is_audio)
 {
   GstDecklinkInput *input;
   Device *device;
+  guint found_index;
 
   if (devices == NULL)
     return;
+
+  if (persistent_id != DEFAULT_PERSISTENT_ID) {
+    if (g_ptr_array_find_with_equal_func (devices, &persistent_id,
+            (GEqualFunc) persistent_id_is_equal_input, &found_index)) {
+      n = found_index;
+      GST_DEBUG ("Persistent ID: %" G_GINT64_FORMAT ", used", persistent_id);
+    } else {
+      return;
+    }
+  }
 
   if (n < 0 || (guint) n >= devices->len)
     return;
@@ -1840,148 +2129,109 @@ gst_decklink_release_nth_input (gint n, GstElement * src, gboolean is_audio)
   g_mutex_unlock (&input->lock);
 }
 
-/*
- * Probes if duplex-mode is supported and sets it accordingly. I duplex-mode is not supported
- * but this device is part of a pair (Duo2- and Quad2-Cards) and Half-Dupley-Mode is requested,
- * the parent device is also checked and configured accordingly.
- *
- * If
- *  - full-duplex-mode is requested and the device does not support it *or*
- *  - half-duplex-mode is requested and there is not parent-device *or*
- *  - half-duplex-mode is requested and neither the device nor the parent device does support setting
- *    the duplex-mode, DUPLEX_MODE_SET_UNSUPPORTED is returnded.
- * If the device does support duplex-mode and setting it succeeded, DUPLEX_MODE_SET_SUCCESS is rerturned.
- * If
- *  - the device does support duplex-mode and setting it failed *or*
- *  - the Device reported a pair-device that does not exist in the system,
- *    DUPLEX_MODE_SET_FAILURE is returned.
- */
-DuplexModeSetOperationResult
-gst_decklink_configure_duplex_mode (Device * device, BMDDuplexMode duplex_mode)
+static ProfileSetOperationResult
+gst_decklink_configure_profile (Device * device,
+    GstDecklinkProfileId profile_id)
 {
-  HRESULT result;
-  bool duplex_supported;
-  int64_t paired_device_id;
+  HRESULT res;
+
+  if (profile_id == GST_DECKLINK_PROFILE_ID_DEFAULT)
+    return PROFILE_SET_SUCCESS;
 
   GstDecklinkInput *input = &device->input;
+  IDeckLink *decklink = input->device;
 
-  result =
-      input->attributes->GetFlag (BMDDeckLinkSupportsDuplexModeConfiguration,
-      &duplex_supported);
-  if (result != S_OK) {
-    duplex_supported = false;
-  }
+  IDeckLinkProfileManager *manager = NULL;
+  if (decklink->QueryInterface (IID_IDeckLinkProfileManager,
+          (void **) &manager) == S_OK) {
+    BMDProfileID bmd_profile_id;
 
-  if (!duplex_supported) {
-    if (duplex_mode == bmdDuplexModeFull) {
-      GST_DEBUG ("Device does not support Full-Duplex-Mode");
-      return DUPLEX_MODE_SET_UNSUPPORTED;
-    } else if (duplex_mode == bmdDuplexModeHalf) {
-      result =
-          input->attributes->GetInt (BMDDeckLinkPairedDevicePersistentID,
-          &paired_device_id);
+    switch (profile_id) {
+      case GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_FULL_DUPLEX:
+        bmd_profile_id = bmdProfileOneSubDeviceFullDuplex;
+        break;
+      case GST_DECKLINK_PROFILE_ID_ONE_SUB_DEVICE_HALF_DUPLEX:
+        bmd_profile_id = bmdProfileOneSubDeviceHalfDuplex;
+        break;
+      case GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_FULL_DUPLEX:
+        bmd_profile_id = bmdProfileTwoSubDevicesFullDuplex;
+        break;
+      case GST_DECKLINK_PROFILE_ID_TWO_SUB_DEVICES_HALF_DUPLEX:
+        bmd_profile_id = bmdProfileTwoSubDevicesHalfDuplex;
+        break;
+      case GST_DECKLINK_PROFILE_ID_FOUR_SUB_DEVICES_HALF_DUPLEX:
+        bmd_profile_id = bmdProfileFourSubDevicesHalfDuplex;
+        break;
+      default:
+      case GST_DECKLINK_PROFILE_ID_DEFAULT:
+        g_assert_not_reached ();
+        break;
+    }
 
-      if (result == S_OK) {
-        GST_DEBUG ("Device does not support Half-Duplex-Mode but the Device is "
-            "a Part of a Device-Pair, trying to set Half-Duplex-Mode "
-            "on the Parent-Device");
+    IDeckLinkProfile *profile = NULL;
+    res = manager->GetProfile (bmd_profile_id, &profile);
 
-        Device *pair_device =
-            gst_decklink_find_device_by_persistent_id (paired_device_id);
-        if (pair_device == NULL) {
-          GST_ERROR ("Device reported as Pair-Device does not exist");
-          return DUPLEX_MODE_SET_FAILURE;
-        }
-        return gst_decklink_configure_duplex_mode_pair_device (pair_device,
-            duplex_mode);
-      } else {
-        GST_DEBUG ("Device does not support Half-Duplex-Mode");
-        return DUPLEX_MODE_SET_SUCCESS;
-      }
+    if (res == S_OK && profile) {
+      res = profile->SetActive ();
+      profile->Release ();
+    }
+
+    manager->Release ();
+
+    if (res == S_OK) {
+      GST_DEBUG ("Successfully set profile");
+      return PROFILE_SET_SUCCESS;
     } else {
-      GST_ERROR ("duplex_mode=%d", duplex_mode);
-      g_assert_not_reached ();
+      GST_ERROR ("Failed to set profile");
+      return PROFILE_SET_FAILURE;
     }
   } else {
-    GST_DEBUG ("Setting duplex-mode of Device");
-    result = input->config->SetInt (bmdDeckLinkConfigDuplexMode, duplex_mode);
+    GST_DEBUG ("Device has only one profile");
+    return PROFILE_SET_UNSUPPORTED;
+  }
+}
 
-    if (result == S_OK) {
-      GST_DEBUG ("Duplex mode set successful");
-      return DUPLEX_MODE_SET_SUCCESS;
+static MappingFormatSetOperationResult
+gst_decklink_configure_mapping_format (Device * device,
+    GstDecklinkMappingFormat mapping_format)
+{
+  HRESULT res;
+
+  bool level_a_output;
+  switch (mapping_format) {
+    case GST_DECKLINK_MAPPING_FORMAT_LEVEL_A:
+      level_a_output = true;
+      break;
+    case GST_DECKLINK_MAPPING_FORMAT_LEVEL_B:
+      level_a_output = false;
+      break;
+    default:
+    case GST_DECKLINK_MAPPING_FORMAT_DEFAULT:
+      return MAPPING_FORMAT_SET_SUCCESS;
+  }
+
+  // Make sure Level A is supported
+  bool supports_level_a_output = false;
+  res = device->output.attributes->GetFlag(BMDDeckLinkSupportsSMPTELevelAOutput,
+    &supports_level_a_output);
+  if (res != S_OK || !supports_level_a_output) {
+    if (level_a_output) {
+      GST_DEBUG ("Device does not support Level A mapping format");
+      return MAPPING_FORMAT_SET_UNSUPPORTED;
     } else {
-      GST_ERROR ("Setting duplex mode failed");
-      return DUPLEX_MODE_SET_FAILURE;
+      // Level B is the only supported option
+      return MAPPING_FORMAT_SET_SUCCESS;
     }
   }
 
-  g_assert_not_reached ();
-  return DUPLEX_MODE_SET_FAILURE;
-}
-
-DuplexModeSetOperationResult
-gst_decklink_configure_duplex_mode_pair_device (Device * device,
-    BMDDuplexMode duplex_mode)
-{
-  HRESULT result;
-  bool duplex_supported;
-
-  GstDecklinkInput *input = &device->input;
-
-  result =
-      input->attributes->GetFlag (BMDDeckLinkSupportsDuplexModeConfiguration,
-      &duplex_supported);
-  if (result != S_OK) {
-    duplex_supported = false;
-  }
-
-  if (!duplex_supported) {
-    GST_DEBUG ("Pair-Device does not support Duplex-Mode");
-    return DUPLEX_MODE_SET_UNSUPPORTED;
-  }
-
-  GST_DEBUG ("Setting duplex-mode of Pair-Device");
-  result = input->config->SetInt (bmdDeckLinkConfigDuplexMode, duplex_mode);
-
-  if (result == S_OK) {
-    GST_DEBUG ("Duplex mode set successful");
-    return DUPLEX_MODE_SET_SUCCESS;
+  res = device->input.config->SetFlag(bmdDeckLinkConfigSMPTELevelAOutput, level_a_output);
+  if (res == S_OK) {
+    GST_DEBUG ("Successfully set mapping format");
+    return MAPPING_FORMAT_SET_SUCCESS;
   } else {
-    GST_ERROR ("Setting duplex mode failed");
-    return DUPLEX_MODE_SET_FAILURE;
+    GST_ERROR ("Failed to set mapping format");
+    return MAPPING_FORMAT_SET_FAILURE;
   }
-}
-
-gboolean
-gst_decklink_device_has_persistent_id (Device * device, int64_t persistent_id)
-{
-  HRESULT result;
-  int64_t this_device_persistent_id;
-
-  GstDecklinkInput *input = &device->input;
-
-  result =
-      input->attributes->GetInt (BMDDeckLinkPersistentID,
-      &this_device_persistent_id);
-  return (result == S_OK) && (this_device_persistent_id == persistent_id);
-}
-
-Device *
-gst_decklink_find_device_by_persistent_id (int64_t persistent_id)
-{
-  GST_DEBUG ("Searching Device by persistent ID %" G_GINT64_FORMAT,
-      (gint64) persistent_id);
-
-  for (guint index = 0; index < devices->len; index++) {
-    Device *device = (Device *) g_ptr_array_index (devices, index);
-
-    if (gst_decklink_device_has_persistent_id (device, persistent_id)) {
-      GST_DEBUG ("Found matching Device %u", index);
-      return device;
-    }
-  }
-
-  return NULL;
 }
 
 G_DEFINE_TYPE (GstDecklinkClock, gst_decklink_clock, GST_TYPE_SYSTEM_CLOCK);
@@ -2073,38 +2323,22 @@ gst_decklink_clock_get_internal_time (GstClock * clock)
   return result;
 }
 
-static gboolean
-plugin_init (GstPlugin * plugin)
+void
+decklink_element_init (GstPlugin * plugin)
 {
-  GST_DEBUG_CATEGORY_INIT (gst_decklink_debug, "decklink", 0,
-      "debug category for decklink plugin");
+  static gsize res = FALSE;
+  if (g_once_init_enter (&res)) {
+    GST_DEBUG_CATEGORY_INIT (gst_decklink_debug, "decklink", 0,
+        "debug category for decklink plugin");
+    gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_AUDIO_CHANNELS, (GstPluginAPIFlags) 0);
+    gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_AUDIO_CONNECTION, (GstPluginAPIFlags) 0);
+    gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_PROFILE_ID, (GstPluginAPIFlags) 0);
+    gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_KEYER_MODE, (GstPluginAPIFlags) 0);
+    gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_MODE, (GstPluginAPIFlags) 0);
+    gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_TIMECODE_FORMAT, (GstPluginAPIFlags) 0);
+    gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_VIDEO_FORMAT, (GstPluginAPIFlags) 0);
+    gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_CONNECTION, (GstPluginAPIFlags) 0);
 
-  gst_element_register (plugin, "decklinkaudiosink", GST_RANK_NONE,
-      GST_TYPE_DECKLINK_AUDIO_SINK);
-  gst_element_register (plugin, "decklinkvideosink", GST_RANK_NONE,
-      GST_TYPE_DECKLINK_VIDEO_SINK);
-  gst_element_register (plugin, "decklinkaudiosrc", GST_RANK_NONE,
-      GST_TYPE_DECKLINK_AUDIO_SRC);
-  gst_element_register (plugin, "decklinkvideosrc", GST_RANK_NONE,
-      GST_TYPE_DECKLINK_VIDEO_SRC);
-
-  gst_device_provider_register (plugin, "decklinkdeviceprovider",
-      GST_RANK_PRIMARY, GST_TYPE_DECKLINK_DEVICE_PROVIDER);
-
-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_AUDIO_CHANNELS, (GstPluginAPIFlags) 0);
-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_AUDIO_CONNECTION, (GstPluginAPIFlags) 0);
-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_DUPLEX_MODE, (GstPluginAPIFlags) 0);
-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_KEYER_MODE, (GstPluginAPIFlags) 0);
-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_MODE, (GstPluginAPIFlags) 0);
-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_TIMECODE_FORMAT, (GstPluginAPIFlags) 0);
-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_VIDEO_FORMAT, (GstPluginAPIFlags) 0);
-  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_CONNECTION, (GstPluginAPIFlags) 0);
-
-  return TRUE;
+    g_once_init_leave (&res, TRUE);
+  }
 }
-
-GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
-    GST_VERSION_MINOR,
-    decklink,
-    "Blackmagic Decklink plugin",
-    plugin_init, VERSION, "LGPL", PACKAGE_NAME, GST_PACKAGE_ORIGIN)

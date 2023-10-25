@@ -67,7 +67,7 @@
 #include "config.h"
 #endif
 
-#include "gst/gst-i18n-plugin.h"
+#include <glib/gi18n-lib.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,7 +109,8 @@ GST_STATIC_PAD_TEMPLATE ("audio_%02u",
 
 #define gst_mss_demux_parent_class parent_class
 G_DEFINE_TYPE (GstMssDemux, gst_mss_demux, GST_TYPE_ADAPTIVE_DEMUX);
-
+GST_ELEMENT_REGISTER_DEFINE (mssdemux, "mssdemux",
+    GST_RANK_PRIMARY, GST_TYPE_MSS_DEMUX);
 static void gst_mss_demux_dispose (GObject * object);
 static void gst_mss_demux_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);

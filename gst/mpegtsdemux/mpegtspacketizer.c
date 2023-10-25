@@ -21,6 +21,9 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -272,6 +275,7 @@ mpegts_packetizer_init (MpegTSPacketizer2 * packetizer)
   packetizer->pcr_discont_threshold = GST_SECOND;
   packetizer->last_pts = GST_CLOCK_TIME_NONE;
   packetizer->last_dts = GST_CLOCK_TIME_NONE;
+  packetizer->extra_shift = 0;
 }
 
 static void
@@ -364,7 +368,7 @@ mpegts_packetizer_parse_adaptation_field_control (MpegTSPacketizer2 *
      * adaptation field length is 183. This just means a zero length
      * payload so we clear the payload flag here and continue.
      */
-    GST_WARNING ("PID 0x%04x afc == 0x%02x and length %d == 183 (ignored)",
+    GST_DEBUG ("PID 0x%04x afc == 0x%02x and length %d == 183 (ignored)",
         packet->pid, packet->scram_afc_cc & 0x30, length);
     packet->scram_afc_cc &= ~0x10;
   } else if (length > 182) {
@@ -959,6 +963,7 @@ mpegts_packetizer_push_section (MpegTSPacketizer2 * packetizer,
   guint8 packet_cc;
   GList *others = NULL;
   guint8 version_number, section_number, last_section_number;
+  gboolean cc_discont = FALSE;
 
   data = packet->data;
   packet_cc = FLAGS_CONTINUITY_COUNTER (packet->scram_afc_cc);
@@ -1005,24 +1010,18 @@ mpegts_packetizer_push_section (MpegTSPacketizer2 * packetizer,
    *
    **/
 
-  if (packet->payload_unit_start_indicator) {
+  if (packet->payload_unit_start_indicator)
     pointer = *data++;
-    /* If the pointer is zero, we're guaranteed to be able to handle it */
-    if (pointer == 0) {
-      GST_LOG
-          ("PID 0x%04x PUSI and pointer == 0, skipping straight to section_start parsing",
-          packet->pid);
-      mpegts_packetizer_clear_section (stream);
-      goto section_start;
-    }
-  }
 
   if (stream->continuity_counter == CONTINUITY_UNSET ||
       (stream->continuity_counter + 1) % 16 != packet_cc) {
-    if (stream->continuity_counter != CONTINUITY_UNSET)
+    if (stream->continuity_counter != CONTINUITY_UNSET) {
       GST_WARNING ("PID 0x%04x section discontinuity (%d vs %d)", packet->pid,
           stream->continuity_counter, packet_cc);
+      cc_discont = TRUE;
+    }
     mpegts_packetizer_clear_section (stream);
+    stream->continuity_counter = packet_cc;
     /* If not a PUSI, not much we can do */
     if (!packet->payload_unit_start_indicator) {
       GST_LOG ("PID 0x%04x continuity discont/unset and not PUSI, bailing out",
@@ -1036,6 +1035,19 @@ mpegts_packetizer_push_section (MpegTSPacketizer2 * packetizer,
         pointer);
     goto section_start;
   }
+
+  if (packet->payload_unit_start_indicator && pointer == 0) {
+    /* If the pointer is zero, we're guaranteed to be able to handle it */
+    GST_LOG
+        ("PID 0x%04x PUSI and pointer == 0, skipping straight to section_start parsing",
+        packet->pid);
+    mpegts_packetizer_clear_section (stream);
+    stream->continuity_counter = packet_cc;
+    goto section_start;
+  }
+
+  stream->continuity_counter = packet_cc;
+
 
   GST_LOG ("Accumulating data from beginning of packet");
 
@@ -1113,7 +1125,7 @@ section_start:
     /* Only do fast-path if we have enough byte */
     if (data + section_length <= packet->data_end) {
       if ((section =
-              gst_mpegts_section_new (packet->pid, g_memdup (data,
+              gst_mpegts_section_new (packet->pid, g_memdup2 (data,
                       section_length), section_length))) {
         GST_DEBUG ("PID 0x%04x Short section complete !", packet->pid);
         section->offset = packet->offset;
@@ -1188,7 +1200,7 @@ section_start:
    * * same last_section_number
    * * same section_number was seen
    */
-  if (seen_section_before (stream, table_id, subtable_extension,
+  if (!cc_discont && seen_section_before (stream, table_id, subtable_extension,
           version_number, section_number, last_section_number)) {
     GST_DEBUG
         ("PID 0x%04x Already processed table_id:0x%02x subtable_extension:0x%04x, version_number:%d, section_number:%d",
@@ -2238,9 +2250,9 @@ mpegts_packetizer_offset_to_ts (MpegTSPacketizer2 * packetizer,
 
 /* Input  : local PTS (in GHz units)
  * Return : Stream time (in GHz units) */
-GstClockTime
-mpegts_packetizer_pts_to_ts (MpegTSPacketizer2 * packetizer,
-    GstClockTime pts, guint16 pcr_pid)
+static GstClockTime
+mpegts_packetizer_pts_to_ts_internal (MpegTSPacketizer2 * packetizer,
+    GstClockTime pts, guint16 pcr_pid, gboolean check_diff)
 {
   GstClockTime res = GST_CLOCK_TIME_NONE;
   MpegTSPCR *pcrtable;
@@ -2263,23 +2275,24 @@ mpegts_packetizer_pts_to_ts (MpegTSPacketizer2 * packetizer,
         GST_TIME_ARGS (pcrtable->base_pcrtime),
         GST_TIME_ARGS (pcrtable->base_time),
         GST_TIME_ARGS (pcrtable->pcroffset));
-    res = pts + pcrtable->pcroffset;
+    res = pts + pcrtable->pcroffset + packetizer->extra_shift;
 
     /* Don't return anything if we differ too much against last seen PCR */
-    /* FIXME : Ideally we want to figure out whether we have a wraparound or
-     * a reset so we can provide actual values.
-     * That being said, this will only happen for the small interval of time
-     * where PTS/DTS are wrapping just before we see the first reset/wrap PCR
-     */
-    if (G_UNLIKELY (pcr_pid != 0x1fff &&
-            ABSDIFF (res, pcrtable->last_pcrtime) > 15 * GST_SECOND))
+    if (G_UNLIKELY (check_diff && pcr_pid != 0x1fff &&
+            ABSDIFF (res, pcrtable->last_pcrtime) > 15 * GST_SECOND)) {
       res = GST_CLOCK_TIME_NONE;
-    else {
+    } else {
       GstClockTime tmp = pcrtable->base_time + pcrtable->skew;
-      if (tmp + res >= pcrtable->base_pcrtime)
+      if (tmp + res >= pcrtable->base_pcrtime) {
         res += tmp - pcrtable->base_pcrtime;
-      else
+      } else if (!check_diff || ABSDIFF (tmp + res + PCR_GST_MAX_VALUE,
+              pcrtable->base_pcrtime) < PCR_GST_MAX_VALUE / 2) {
+        /* Handle wrapover */
+        res += tmp + PCR_GST_MAX_VALUE - pcrtable->base_pcrtime;
+      } else {
+        /* Fallback for values that differ way too much */
         res = GST_CLOCK_TIME_NONE;
+      }
     }
   } else if (packetizer->calculate_offset && pcrtable->groups) {
     gint64 refpcr = G_MAXINT64, refpcroffset;
@@ -2370,6 +2383,24 @@ mpegts_packetizer_pts_to_ts (MpegTSPacketizer2 * packetizer,
       GST_TIME_FORMAT " pcr_pid:0x%04x", GST_TIME_ARGS (res),
       GST_TIME_ARGS (pts), pcr_pid);
   return res;
+}
+
+/* Input  : local PTS (in GHz units)
+ * Return : Stream time (in GHz units) */
+GstClockTime
+mpegts_packetizer_pts_to_ts_unchecked (MpegTSPacketizer2 * packetizer,
+    GstClockTime pts, guint16 pcr_pid)
+{
+  return mpegts_packetizer_pts_to_ts_internal (packetizer, pts, pcr_pid, FALSE);
+}
+
+/* Input  : local PTS (in GHz units)
+ * Return : Stream time (in GHz units) */
+GstClockTime
+mpegts_packetizer_pts_to_ts (MpegTSPacketizer2 * packetizer,
+    GstClockTime pts, guint16 pcr_pid)
+{
+  return mpegts_packetizer_pts_to_ts_internal (packetizer, pts, pcr_pid, TRUE);
 }
 
 /* Stream time to offset */

@@ -6,10 +6,9 @@
  *
  * Copyright (C) 2011 Jan Schmidt <thaytan@noraisin.net>
  *
- * This library is licensed under 4 different licenses and you
+ * This library is licensed under 3 different licenses and you
  * can choose to use it under the terms of any one of them. The
- * four licenses are the MPL 1.1, the LGPL, the GPL and the MIT
- * license.
+ * three licenses are the MPL 1.1, the LGPL and the MIT license.
  *
  * MPL:
  *
@@ -40,22 +39,6 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  *
- * GPL:
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.
- *
  * MIT:
  *
  * Unless otherwise indicated, Source Code is licensed under MIT license.
@@ -80,7 +63,11 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  *
+ * SPDX-License-Identifier: MPL-1.1 OR MIT OR LGPL-2.0-or-later
  */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -142,6 +129,7 @@ gst_base_ts_mux_pad_flush (GstAggregatorPad * agg_pad, GstAggregator * agg)
 
   /* Send initial segments again after a flush-stop, and also resend the
    * header sections */
+  g_mutex_lock (&mux->lock);
   mux->first = TRUE;
 
   /* output PAT, SI tables */
@@ -154,6 +142,7 @@ gst_base_ts_mux_pad_flush (GstAggregatorPad * agg_pad, GstAggregator * agg)
 
     tsmux_resend_pmt (program);
   }
+  g_mutex_unlock (&mux->lock);
 
   return GST_FLOW_OK;
 }
@@ -210,6 +199,7 @@ enum
 #define CLOCK_BASE 9LL
 #define CLOCK_FREQ (CLOCK_BASE * 10000) /* 90 kHz PTS clock */
 #define CLOCK_FREQ_SCR (CLOCK_FREQ * 300)       /* 27 MHz SCR clock */
+#define TS_MUX_CLOCK_BASE (TSMUX_CLOCK_FREQ * 10 * 360)
 
 #define GSTTIME_TO_MPEGTIME(time) \
     (((time) > 0 ? (gint64) 1 : (gint64) -1) * \
@@ -236,7 +226,8 @@ typedef struct
   GstBuffer *buffer;
 } StreamData;
 
-G_DEFINE_TYPE (GstBaseTsMux, gst_base_ts_mux, GST_TYPE_AGGREGATOR);
+G_DEFINE_TYPE_WITH_CODE (GstBaseTsMux, gst_base_ts_mux, GST_TYPE_AGGREGATOR,
+    gst_mpegts_initialize ());
 
 /* Internals */
 
@@ -272,10 +263,13 @@ gst_base_ts_mux_set_header_on_caps (GstBaseTsMux * mux)
   GValue value = { 0 };
   GstCaps *caps;
 
-  caps =
-      gst_caps_make_writable (gst_pad_get_current_caps (GST_AGGREGATOR_SRC_PAD
-          (mux)));
+  caps = gst_pad_get_pad_template_caps (GST_AGGREGATOR_SRC_PAD (mux));
+
+  caps = gst_caps_make_writable (caps);
   structure = gst_caps_get_structure (caps, 0);
+
+  gst_structure_set (structure, "packetsize", G_TYPE_INT, mux->packet_size,
+      NULL);
 
   g_value_init (&array, GST_TYPE_ARRAY);
 
@@ -304,6 +298,7 @@ steal_si_section (GstMpegtsSectionType * type, TsMuxSection * section,
   return TRUE;
 }
 
+/* Must be called with mux->lock held */
 static void
 gst_base_ts_mux_reset (GstBaseTsMux * mux, gboolean alloc)
 {
@@ -314,7 +309,7 @@ gst_base_ts_mux_reset (GstBaseTsMux * mux, gboolean alloc)
 
   mux->first = TRUE;
   mux->last_flow_ret = GST_FLOW_OK;
-  mux->last_ts = 0;
+  mux->last_ts = GST_CLOCK_TIME_NONE;
   mux->is_delta = TRUE;
   mux->is_header = FALSE;
 
@@ -324,6 +319,7 @@ gst_base_ts_mux_reset (GstBaseTsMux * mux, gboolean alloc)
 
   if (mux->out_adapter)
     gst_adapter_clear (mux->out_adapter);
+  mux->output_ts_offset = GST_CLOCK_STIME_NONE;
 
   if (mux->tsmux) {
     if (mux->tsmux->si_sections)
@@ -366,6 +362,8 @@ gst_base_ts_mux_reset (GstBaseTsMux * mux, gboolean alloc)
   if (si_sections)
     g_hash_table_unref (si_sections);
 
+  mux->last_scte35_event_seqnum = GST_SEQNUM_INVALID;
+
   if (klass->reset)
     klass->reset (mux);
 }
@@ -376,13 +374,12 @@ release_buffer_cb (guint8 * data, void *user_data)
   stream_data_free ((StreamData *) user_data);
 }
 
+/* Must be called with mux->lock held */
 static GstFlowReturn
-gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
+gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
+    GstBaseTsMuxPad * ts_pad, GstCaps * caps)
 {
-  GstFlowReturn ret = GST_FLOW_ERROR;
-  GstCaps *caps;
   GstStructure *s;
-  GstPad *pad;
   guint st = TSMUX_ST_RESERVED;
   const gchar *mt;
   const GValue *value = NULL;
@@ -392,16 +389,13 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
   guint8 main_level = 0;
   guint32 max_rate = 0;
   guint8 color_spec = 0;
-  j2k_private_data *private_data = NULL;
   const gchar *stream_format = NULL;
+  const char *interlace_mode = NULL;
+  gchar *pmt_name;
 
-  pad = GST_PAD (ts_pad);
-  caps = gst_pad_get_current_caps (pad);
-  if (caps == NULL)
-    goto not_negotiated;
-
-  GST_DEBUG_OBJECT (pad, "Creating stream with PID 0x%04x for caps %"
-      GST_PTR_FORMAT, ts_pad->pid, caps);
+  GST_DEBUG_OBJECT (ts_pad,
+      "%s stream with PID 0x%04x for caps %" GST_PTR_FORMAT,
+      ts_pad->stream ? "Recreating" : "Creating", ts_pad->pid, caps);
 
   s = gst_caps_get_structure (caps, 0);
 
@@ -409,6 +403,9 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
   value = gst_structure_get_value (s, "codec_data");
   if (value != NULL)
     codec_data = gst_value_get_buffer (value);
+
+  g_clear_pointer (&ts_pad->codec_data, gst_buffer_unref);
+  ts_pad->prepare_func = NULL;
 
   stream_format = gst_structure_get_string (s, "stream-format");
 
@@ -428,7 +425,7 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
     gint mpegversion;
 
     if (!gst_structure_get_int (s, "mpegversion", &mpegversion)) {
-      GST_ERROR_OBJECT (pad, "caps missing mpegversion");
+      GST_ERROR_OBJECT (ts_pad, "caps missing mpegversion");
       goto not_negotiated;
     }
 
@@ -467,7 +464,7 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
         /* Check the stream format. We need codec_data with RAW streams and mpegversion=4 */
         if (g_strcmp0 (stream_format, "raw") == 0) {
           if (codec_data) {
-            GST_DEBUG_OBJECT (pad,
+            GST_DEBUG_OBJECT (ts_pad,
                 "we have additional codec data (%" G_GSIZE_FORMAT " bytes)",
                 gst_buffer_get_size (codec_data));
             ts_pad->codec_data = gst_buffer_ref (codec_data);
@@ -477,18 +474,22 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
             GST_ERROR_OBJECT (mux, "Need codec_data for raw MPEG-4 AAC");
             goto not_negotiated;
           }
+        } else if (codec_data) {
+          ts_pad->codec_data = gst_buffer_ref (codec_data);
+        } else {
+          ts_pad->codec_data = NULL;
         }
         break;
       }
       default:
-        GST_WARNING_OBJECT (pad, "unsupported mpegversion %d", mpegversion);
+        GST_WARNING_OBJECT (ts_pad, "unsupported mpegversion %d", mpegversion);
         goto not_negotiated;
     }
   } else if (strcmp (mt, "video/mpeg") == 0) {
     gint mpegversion;
 
     if (!gst_structure_get_int (s, "mpegversion", &mpegversion)) {
-      GST_ERROR_OBJECT (pad, "caps missing mpegversion");
+      GST_ERROR_OBJECT (ts_pad, "caps missing mpegversion");
       goto not_negotiated;
     }
 
@@ -503,7 +504,7 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
         st = TSMUX_ST_VIDEO_MPEG4;
         break;
       default:
-        GST_WARNING_OBJECT (pad, "unsupported mpegversion %d", mpegversion);
+        GST_WARNING_OBJECT (ts_pad, "unsupported mpegversion %d", mpegversion);
         goto not_negotiated;
     }
   } else if (strcmp (mt, "subpicture/x-dvb") == 0) {
@@ -518,7 +519,7 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
 
     if (!gst_codec_utils_opus_parse_caps (caps, NULL, &channels,
             &mapping_family, &stream_count, &coupled_count, channel_mapping)) {
-      GST_ERROR_OBJECT (pad, "Incomplete Opus caps");
+      GST_ERROR_OBJECT (ts_pad, "Incomplete Opus caps");
       goto not_negotiated;
     }
 
@@ -565,7 +566,7 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
               channels) == 0) {
         opus_channel_config_code = channels | 0x80;
       } else {
-        GST_FIXME_OBJECT (pad, "Opus channel mapping not handled");
+        GST_FIXME_OBJECT (ts_pad, "Opus channel mapping not handled");
         goto not_negotiated;
       }
     }
@@ -587,21 +588,22 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
     const GValue *vMainlevel = gst_structure_get_value (s, "main-level");
     const GValue *vFramerate = gst_structure_get_value (s, "framerate");
     const GValue *vColorimetry = gst_structure_get_value (s, "colorimetry");
-    private_data = g_new0 (j2k_private_data, 1);
+    j2k_private_data *private_data;
+
     /* for now, we relax the condition that profile must exist and equal
      * GST_JPEG2000_PARSE_PROFILE_BC_SINGLE */
     if (vProfile) {
       profile = g_value_get_int (vProfile);
       if (profile != GST_JPEG2000_PARSE_PROFILE_BC_SINGLE) {
-        GST_LOG_OBJECT (pad, "Invalid JPEG 2000 profile %d", profile);
-        /*goto not_negotiated; */
+        GST_LOG_OBJECT (ts_pad, "Invalid JPEG 2000 profile %d", profile);
+        /* goto not_negotiated; */
       }
     }
     /* for now, we will relax the condition that the main level must be present */
     if (vMainlevel) {
       main_level = g_value_get_uint (vMainlevel);
       if (main_level > 11) {
-        GST_ERROR_OBJECT (pad, "Invalid main level %d", main_level);
+        GST_ERROR_OBJECT (ts_pad, "Invalid main level %d", main_level);
         goto not_negotiated;
       }
       if (main_level >= 6) {
@@ -625,10 +627,12 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
         }
       }
     } else {
-      /*GST_ERROR_OBJECT (pad, "Missing main level");
-         goto not_negotiated; */
+      /* GST_ERROR_OBJECT (ts_pad, "Missing main level");
+       * goto not_negotiated; */
     }
+
     /* We always mux video in J2K-over-MPEG-TS non-interlaced mode */
+    private_data = g_new0 (j2k_private_data, 1);
     private_data->interlace = FALSE;
     private_data->den = 0;
     private_data->num = 0;
@@ -658,7 +662,8 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
       }
       private_data->color_spec = color_spec;
     } else {
-      GST_ERROR_OBJECT (pad, "Colorimetry not present in caps");
+      GST_ERROR_OBJECT (ts_pad, "Colorimetry not present in caps");
+      g_free (private_data);
       goto not_negotiated;
     }
     st = TSMUX_ST_VIDEO_JP2K;
@@ -673,64 +678,106 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
     }
   }
 
-
-  if (st != TSMUX_ST_RESERVED) {
-    ts_pad->stream = tsmux_create_stream (mux->tsmux, st, ts_pad->pid,
-        ts_pad->language);
-  } else {
-    GST_DEBUG_OBJECT (pad, "Failed to determine stream type");
+  if (st == TSMUX_ST_RESERVED) {
+    GST_ERROR_OBJECT (ts_pad, "Failed to determine stream type");
+    goto error;
   }
 
-  if (ts_pad->stream != NULL) {
-    const char *interlace_mode = gst_structure_get_string (s, "interlace-mode");
-    gst_structure_get_int (s, "rate", &ts_pad->stream->audio_sampling);
-    gst_structure_get_int (s, "channels", &ts_pad->stream->audio_channels);
-    gst_structure_get_int (s, "bitrate", &ts_pad->stream->audio_bitrate);
-
-    /* frame rate */
-    gst_structure_get_fraction (s, "framerate", &ts_pad->stream->num,
-        &ts_pad->stream->den);
-
-    /* Interlace mode */
-    ts_pad->stream->interlace_mode = FALSE;
-    if (interlace_mode) {
-      ts_pad->stream->interlace_mode =
-          g_str_equal (interlace_mode, "interleaved");
-    }
-    /* Width and Height */
-    gst_structure_get_int (s, "width", &ts_pad->stream->horizontal_size);
-    gst_structure_get_int (s, "height", &ts_pad->stream->vertical_size);
-
-    ts_pad->stream->color_spec = color_spec;
-    ts_pad->stream->max_bitrate = max_rate;
-    ts_pad->stream->profile_and_level = profile | main_level;
-
-    ts_pad->stream->opus_channel_config_code = opus_channel_config_code;
-
-    tsmux_stream_set_buffer_release_func (ts_pad->stream, release_buffer_cb);
-    tsmux_program_add_stream (ts_pad->prog, ts_pad->stream);
-
-    ret = GST_FLOW_OK;
+  if (ts_pad->stream && st != ts_pad->stream->stream_type) {
+    GST_ELEMENT_ERROR (mux, STREAM, MUX,
+        ("Stream type change from %02x to %02x not supported",
+            ts_pad->stream->stream_type, st), NULL);
+    goto error;
   }
-  gst_caps_unref (caps);
-  return ret;
+
+  if (ts_pad->stream == NULL) {
+    ts_pad->stream =
+        tsmux_create_stream (mux->tsmux, st, ts_pad->pid, ts_pad->language);
+    if (ts_pad->stream == NULL)
+      goto error;
+  }
+
+  pmt_name = g_strdup_printf ("PMT_%d", ts_pad->pid);
+  if (mux->prog_map && gst_structure_has_field (mux->prog_map, pmt_name)) {
+    gst_structure_get_int (mux->prog_map, pmt_name, &ts_pad->stream->pmt_index);
+  }
+  g_free (pmt_name);
+
+  interlace_mode = gst_structure_get_string (s, "interlace-mode");
+  gst_structure_get_int (s, "rate", &ts_pad->stream->audio_sampling);
+  gst_structure_get_int (s, "channels", &ts_pad->stream->audio_channels);
+  gst_structure_get_int (s, "bitrate", &ts_pad->stream->audio_bitrate);
+
+  /* frame rate */
+  gst_structure_get_fraction (s, "framerate", &ts_pad->stream->num,
+      &ts_pad->stream->den);
+
+  /* Interlace mode */
+  ts_pad->stream->interlace_mode = FALSE;
+  if (interlace_mode) {
+    ts_pad->stream->interlace_mode =
+        g_str_equal (interlace_mode, "interleaved");
+  }
+
+  /* Width and Height */
+  gst_structure_get_int (s, "width", &ts_pad->stream->horizontal_size);
+  gst_structure_get_int (s, "height", &ts_pad->stream->vertical_size);
+
+  ts_pad->stream->color_spec = color_spec;
+  ts_pad->stream->max_bitrate = max_rate;
+  ts_pad->stream->profile_and_level = profile | main_level;
+
+  ts_pad->stream->opus_channel_config_code = opus_channel_config_code;
+
+  tsmux_stream_set_buffer_release_func (ts_pad->stream, release_buffer_cb);
+
+  return GST_FLOW_OK;
+
   /* ERRORS */
 not_negotiated:
-  {
-    g_free (private_data);
-    GST_DEBUG_OBJECT (pad, "Sink pad caps were not set before pushing");
-    if (caps)
-      gst_caps_unref (caps);
-    return GST_FLOW_NOT_NEGOTIATED;
-  }
+  return GST_FLOW_NOT_NEGOTIATED;
+
+error:
+  return GST_FLOW_ERROR;
 }
 
+static gboolean
+is_valid_pmt_pid (guint16 pmt_pid)
+{
+  if (pmt_pid < 0x0010 || pmt_pid > 0x1ffe)
+    return FALSE;
+  return TRUE;
+}
+
+/* Must be called with mux->lock held */
+static GstFlowReturn
+gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
+{
+  GstCaps *caps = gst_pad_get_current_caps (GST_PAD (ts_pad));
+  GstFlowReturn ret;
+
+  if (caps == NULL) {
+    GST_DEBUG_OBJECT (ts_pad, "Sink pad caps were not set before pushing");
+    return GST_FLOW_NOT_NEGOTIATED;
+  }
+
+  ret = gst_base_ts_mux_create_or_update_stream (mux, ts_pad, caps);
+  gst_caps_unref (caps);
+
+  if (ret == GST_FLOW_OK) {
+    tsmux_program_add_stream (ts_pad->prog, ts_pad->stream);
+  }
+
+  return ret;
+}
+
+/* Must be called with mux->lock held */
 static GstFlowReturn
 gst_base_ts_mux_create_pad_stream (GstBaseTsMux * mux, GstPad * pad)
 {
   GstBaseTsMuxPad *ts_pad = GST_BASE_TS_MUX_PAD (pad);
   gchar *name = NULL;
-  gchar *pcr_name;
+  gchar *prop_name;
   GstFlowReturn ret = GST_FLOW_OK;
 
   if (ts_pad->prog_id == -1) {
@@ -767,6 +814,25 @@ gst_base_ts_mux_create_pad_stream (GstBaseTsMux * mux, GstPad * pad)
     tsmux_program_set_scte35_interval (ts_pad->prog, mux->scte35_null_interval);
     g_hash_table_insert (mux->programs, GINT_TO_POINTER (ts_pad->prog_id),
         ts_pad->prog);
+
+    /* Check for user-specified PMT PID */
+    prop_name = g_strdup_printf ("PMT_%d", ts_pad->prog->pgm_number);
+    if (mux->prog_map && gst_structure_has_field (mux->prog_map, prop_name)) {
+      guint pmt_pid;
+
+      if (gst_structure_get_uint (mux->prog_map, prop_name, &pmt_pid)) {
+        if (is_valid_pmt_pid (pmt_pid)) {
+          GST_DEBUG_OBJECT (mux, "User specified pid=%u as PMT for "
+              "program (prog_id = %d)", pmt_pid, ts_pad->prog->pgm_number);
+          tsmux_program_set_pmt_pid (ts_pad->prog, pmt_pid);
+        } else {
+          GST_ELEMENT_WARNING (mux, LIBRARY, SETTINGS,
+              ("User specified PMT pid %u for program %d is not valid.",
+                  pmt_pid, ts_pad->prog->pgm_number), (NULL));
+        }
+      }
+    }
+    g_free (prop_name);
   }
 
   if (ts_pad->stream == NULL) {
@@ -785,9 +851,10 @@ gst_base_ts_mux_create_pad_stream (GstBaseTsMux * mux, GstPad * pad)
   }
 
   /* Check for user-specified PCR PID */
-  pcr_name = g_strdup_printf ("PCR_%d", ts_pad->prog->pgm_number);
-  if (mux->prog_map && gst_structure_has_field (mux->prog_map, pcr_name)) {
-    const gchar *sink_name = gst_structure_get_string (mux->prog_map, pcr_name);
+  prop_name = g_strdup_printf ("PCR_%d", ts_pad->prog->pgm_number);
+  if (mux->prog_map && gst_structure_has_field (mux->prog_map, prop_name)) {
+    const gchar *sink_name =
+        gst_structure_get_string (mux->prog_map, prop_name);
 
     if (!g_strcmp0 (name, sink_name)) {
       GST_DEBUG_OBJECT (mux, "User specified stream (pid=%d) as PCR for "
@@ -795,7 +862,7 @@ gst_base_ts_mux_create_pad_stream (GstBaseTsMux * mux, GstPad * pad)
       tsmux_program_set_pcr_stream (ts_pad->prog, ts_pad->stream);
     }
   }
-  g_free (pcr_name);
+  g_free (prop_name);
 
   return ret;
 
@@ -814,6 +881,7 @@ no_stream:
   }
 }
 
+/* Must be called with mux->lock held */
 static gboolean
 gst_base_ts_mux_create_pad_stream_func (GstElement * element, GstPad * pad,
     gpointer user_data)
@@ -825,6 +893,7 @@ gst_base_ts_mux_create_pad_stream_func (GstElement * element, GstPad * pad,
   return *ret == GST_FLOW_OK;
 }
 
+/* Must be called with mux->lock held */
 static GstFlowReturn
 gst_base_ts_mux_create_streams (GstBaseTsMux * mux)
 {
@@ -1048,15 +1117,44 @@ static gboolean
 new_packet_cb (GstBuffer * buf, void *user_data, gint64 new_pcr)
 {
   GstBaseTsMux *mux = (GstBaseTsMux *) user_data;
+  GstAggregator *agg = GST_AGGREGATOR (mux);
   GstBaseTsMuxClass *klass = GST_BASE_TS_MUX_GET_CLASS (mux);
   GstMapInfo map;
+  GstSegment *agg_segment = &GST_AGGREGATOR_PAD (agg->srcpad)->segment;
 
   g_assert (klass->output_packet);
 
   gst_buffer_map (buf, &map, GST_MAP_READWRITE);
 
-  if (!GST_CLOCK_TIME_IS_VALID (GST_BUFFER_PTS (buf)))
+  if (!GST_CLOCK_TIME_IS_VALID (GST_BUFFER_PTS (buf))) {
+    /* tsmux isn't generating timestamps. Use the input times */
     GST_BUFFER_PTS (buf) = mux->last_ts;
+  }
+
+  if (GST_CLOCK_TIME_IS_VALID (GST_BUFFER_PTS (buf))) {
+    if (!GST_CLOCK_STIME_IS_VALID (mux->output_ts_offset)) {
+      GstClockTime output_start_time = agg_segment->position;
+      if (agg_segment->position == -1
+          || agg_segment->position < agg_segment->start) {
+        output_start_time = agg_segment->start;
+      }
+
+      mux->output_ts_offset =
+          GST_CLOCK_DIFF (GST_BUFFER_PTS (buf), output_start_time);
+
+      GST_DEBUG_OBJECT (mux, "New output ts offset %" GST_STIME_FORMAT,
+          GST_STIME_ARGS (mux->output_ts_offset));
+    }
+
+    GST_BUFFER_PTS (buf) += mux->output_ts_offset;
+
+    agg_segment->position = GST_BUFFER_PTS (buf);
+  } else if (agg_segment->position == -1
+      || agg_segment->position < agg_segment->start) {
+    GST_BUFFER_PTS (buf) = agg_segment->start;
+  } else {
+    GST_BUFFER_PTS (buf) = agg_segment->position;
+  }
 
   /* do common init (flags and streamheaders) */
   new_packet_common_init (mux, buf, map.data, map.size);
@@ -1099,11 +1197,13 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
     return GST_FLOW_OK;
   }
 
+  g_mutex_lock (&mux->lock);
   if (G_UNLIKELY (mux->first)) {
     ret = gst_base_ts_mux_create_streams (mux);
     if (G_UNLIKELY (ret != GST_FLOW_OK)) {
       if (buf)
         gst_buffer_unref (buf);
+      g_mutex_unlock (&mux->lock);
       return ret;
     }
 
@@ -1142,6 +1242,7 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
   if (mux->force_key_unit_event != NULL && best->stream->is_video_stream) {
     GstEvent *event;
 
+    g_mutex_unlock (&mux->lock);
     event = check_pending_key_unit_event (mux->force_key_unit_event,
         &agg_pad->segment, GST_BUFFER_PTS (buf),
         GST_BUFFER_FLAGS (buf), mux->pending_key_unit_ts);
@@ -1161,6 +1262,7 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
           GST_TIME_ARGS (running_time), count);
       gst_pad_push_event (GST_AGGREGATOR_SRC_PAD (mux), event);
 
+      g_mutex_lock (&mux->lock);
       /* output PAT, SI tables */
       tsmux_resend_pat (mux->tsmux);
       tsmux_resend_si (mux->tsmux);
@@ -1171,6 +1273,8 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
 
         tsmux_resend_pmt (program);
       }
+    } else {
+      g_mutex_lock (&mux->lock);
     }
   }
 
@@ -1199,7 +1303,9 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
   if (GST_CLOCK_TIME_IS_VALID (GST_BUFFER_PTS (buf))) {
     pts = GSTTIME_TO_MPEGTIME (GST_BUFFER_PTS (buf));
     GST_DEBUG_OBJECT (mux, "Buffer has PTS  %" GST_TIME_FORMAT " pts %"
-        G_GINT64_FORMAT, GST_TIME_ARGS (GST_BUFFER_PTS (buf)), pts);
+        G_GINT64_FORMAT "%s", GST_TIME_ARGS (GST_BUFFER_PTS (buf)), pts,
+        !GST_BUFFER_FLAG_IS_SET (buf,
+            GST_BUFFER_FLAG_DELTA_UNIT) ? " (keyframe)" : "");
   }
 
   if (GST_CLOCK_STIME_IS_VALID (best->dts)) {
@@ -1223,14 +1329,17 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
     GST_WARNING_OBJECT (mux, "KLV meta unit too big, splitting not supported");
 
     gst_buffer_unref (buf);
+    g_mutex_unlock (&mux->lock);
     return GST_FLOW_OK;
   }
 
   GST_DEBUG_OBJECT (mux, "delta: %d", delta);
 
-  stream_data = stream_data_new (buf);
-  tsmux_stream_add_data (best->stream, stream_data->map_info.data,
-      stream_data->map_info.size, stream_data, pts, dts, !delta);
+  if (gst_buffer_get_size (buf) > 0) {
+    stream_data = stream_data_new (buf);
+    tsmux_stream_add_data (best->stream, stream_data->map_info.data,
+        stream_data->map_info.size, stream_data, pts, dts, !delta);
+  }
 
   /* outgoing ts follows ts of PCR program stream */
   if (prog->pcr_stream == best->stream) {
@@ -1252,6 +1361,7 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
       goto write_fail;
     }
   }
+  g_mutex_unlock (&mux->lock);
   /* flush packet cache */
   return gst_base_ts_mux_push_packets (mux, FALSE);
 
@@ -1293,9 +1403,12 @@ gst_base_ts_mux_request_new_pad (GstElement * element, GstPadTemplate * templ,
   GstPad *pad = NULL;
   gchar *free_name = NULL;
 
+  g_mutex_lock (&mux->lock);
   if (name != NULL && sscanf (name, "sink_%d", &pid) == 1) {
-    if (tsmux_find_stream (mux->tsmux, pid))
+    if (tsmux_find_stream (mux->tsmux, pid)) {
+      g_mutex_unlock (&mux->lock);
       goto stream_exists;
+    }
     /* Make sure we don't use reserved PID.
      * FIXME : This should be extended to other variants (ex: ATSC) reserved PID */
     if (pid < TSMUX_START_ES_PID)
@@ -1308,6 +1421,7 @@ gst_base_ts_mux_request_new_pad (GstElement * element, GstPadTemplate * templ,
     /* Name the pad correctly after the selected pid */
     name = free_name = g_strdup_printf ("sink_%d", pid);
   }
+  g_mutex_unlock (&mux->lock);
 
   pad = (GstPad *)
       GST_ELEMENT_CLASS (parent_class)->request_new_pad (element,
@@ -1341,6 +1455,7 @@ gst_base_ts_mux_release_pad (GstElement * element, GstPad * pad)
 {
   GstBaseTsMux *mux = GST_BASE_TS_MUX (element);
 
+  g_mutex_lock (&mux->lock);
   if (mux->tsmux) {
     GList *cur;
     GstBaseTsMuxPad *ts_pad = GST_BASE_TS_MUX_PAD (pad);
@@ -1365,8 +1480,409 @@ gst_base_ts_mux_release_pad (GstElement * element, GstPad * pad)
       tsmux_resend_pmt (program);
     }
   }
+  g_mutex_unlock (&mux->lock);
 
   GST_ELEMENT_CLASS (parent_class)->release_pad (element, pad);
+}
+
+/* GstAggregator implementation */
+
+static void
+request_keyframe (GstBaseTsMux * mux, GstClockTime running_time)
+{
+  GList *l;
+  GST_OBJECT_LOCK (mux);
+
+  for (l = GST_ELEMENT_CAST (mux)->sinkpads; l; l = l->next) {
+    gst_pad_push_event (GST_PAD (l->data),
+        gst_video_event_new_upstream_force_key_unit (running_time, TRUE, 0));
+  }
+
+  GST_OBJECT_UNLOCK (mux);
+}
+
+static const guint32 crc_tab[256] = {
+  0x00000000, 0x04c11db7, 0x09823b6e, 0x0d4326d9, 0x130476dc, 0x17c56b6b,
+  0x1a864db2, 0x1e475005, 0x2608edb8, 0x22c9f00f, 0x2f8ad6d6, 0x2b4bcb61,
+  0x350c9b64, 0x31cd86d3, 0x3c8ea00a, 0x384fbdbd, 0x4c11db70, 0x48d0c6c7,
+  0x4593e01e, 0x4152fda9, 0x5f15adac, 0x5bd4b01b, 0x569796c2, 0x52568b75,
+  0x6a1936c8, 0x6ed82b7f, 0x639b0da6, 0x675a1011, 0x791d4014, 0x7ddc5da3,
+  0x709f7b7a, 0x745e66cd, 0x9823b6e0, 0x9ce2ab57, 0x91a18d8e, 0x95609039,
+  0x8b27c03c, 0x8fe6dd8b, 0x82a5fb52, 0x8664e6e5, 0xbe2b5b58, 0xbaea46ef,
+  0xb7a96036, 0xb3687d81, 0xad2f2d84, 0xa9ee3033, 0xa4ad16ea, 0xa06c0b5d,
+  0xd4326d90, 0xd0f37027, 0xddb056fe, 0xd9714b49, 0xc7361b4c, 0xc3f706fb,
+  0xceb42022, 0xca753d95, 0xf23a8028, 0xf6fb9d9f, 0xfbb8bb46, 0xff79a6f1,
+  0xe13ef6f4, 0xe5ffeb43, 0xe8bccd9a, 0xec7dd02d, 0x34867077, 0x30476dc0,
+  0x3d044b19, 0x39c556ae, 0x278206ab, 0x23431b1c, 0x2e003dc5, 0x2ac12072,
+  0x128e9dcf, 0x164f8078, 0x1b0ca6a1, 0x1fcdbb16, 0x018aeb13, 0x054bf6a4,
+  0x0808d07d, 0x0cc9cdca, 0x7897ab07, 0x7c56b6b0, 0x71159069, 0x75d48dde,
+  0x6b93dddb, 0x6f52c06c, 0x6211e6b5, 0x66d0fb02, 0x5e9f46bf, 0x5a5e5b08,
+  0x571d7dd1, 0x53dc6066, 0x4d9b3063, 0x495a2dd4, 0x44190b0d, 0x40d816ba,
+  0xaca5c697, 0xa864db20, 0xa527fdf9, 0xa1e6e04e, 0xbfa1b04b, 0xbb60adfc,
+  0xb6238b25, 0xb2e29692, 0x8aad2b2f, 0x8e6c3698, 0x832f1041, 0x87ee0df6,
+  0x99a95df3, 0x9d684044, 0x902b669d, 0x94ea7b2a, 0xe0b41de7, 0xe4750050,
+  0xe9362689, 0xedf73b3e, 0xf3b06b3b, 0xf771768c, 0xfa325055, 0xfef34de2,
+  0xc6bcf05f, 0xc27dede8, 0xcf3ecb31, 0xcbffd686, 0xd5b88683, 0xd1799b34,
+  0xdc3abded, 0xd8fba05a, 0x690ce0ee, 0x6dcdfd59, 0x608edb80, 0x644fc637,
+  0x7a089632, 0x7ec98b85, 0x738aad5c, 0x774bb0eb, 0x4f040d56, 0x4bc510e1,
+  0x46863638, 0x42472b8f, 0x5c007b8a, 0x58c1663d, 0x558240e4, 0x51435d53,
+  0x251d3b9e, 0x21dc2629, 0x2c9f00f0, 0x285e1d47, 0x36194d42, 0x32d850f5,
+  0x3f9b762c, 0x3b5a6b9b, 0x0315d626, 0x07d4cb91, 0x0a97ed48, 0x0e56f0ff,
+  0x1011a0fa, 0x14d0bd4d, 0x19939b94, 0x1d528623, 0xf12f560e, 0xf5ee4bb9,
+  0xf8ad6d60, 0xfc6c70d7, 0xe22b20d2, 0xe6ea3d65, 0xeba91bbc, 0xef68060b,
+  0xd727bbb6, 0xd3e6a601, 0xdea580d8, 0xda649d6f, 0xc423cd6a, 0xc0e2d0dd,
+  0xcda1f604, 0xc960ebb3, 0xbd3e8d7e, 0xb9ff90c9, 0xb4bcb610, 0xb07daba7,
+  0xae3afba2, 0xaafbe615, 0xa7b8c0cc, 0xa379dd7b, 0x9b3660c6, 0x9ff77d71,
+  0x92b45ba8, 0x9675461f, 0x8832161a, 0x8cf30bad, 0x81b02d74, 0x857130c3,
+  0x5d8a9099, 0x594b8d2e, 0x5408abf7, 0x50c9b640, 0x4e8ee645, 0x4a4ffbf2,
+  0x470cdd2b, 0x43cdc09c, 0x7b827d21, 0x7f436096, 0x7200464f, 0x76c15bf8,
+  0x68860bfd, 0x6c47164a, 0x61043093, 0x65c52d24, 0x119b4be9, 0x155a565e,
+  0x18197087, 0x1cd86d30, 0x029f3d35, 0x065e2082, 0x0b1d065b, 0x0fdc1bec,
+  0x3793a651, 0x3352bbe6, 0x3e119d3f, 0x3ad08088, 0x2497d08d, 0x2056cd3a,
+  0x2d15ebe3, 0x29d4f654, 0xc5a92679, 0xc1683bce, 0xcc2b1d17, 0xc8ea00a0,
+  0xd6ad50a5, 0xd26c4d12, 0xdf2f6bcb, 0xdbee767c, 0xe3a1cbc1, 0xe760d676,
+  0xea23f0af, 0xeee2ed18, 0xf0a5bd1d, 0xf464a0aa, 0xf9278673, 0xfde69bc4,
+  0x89b8fd09, 0x8d79e0be, 0x803ac667, 0x84fbdbd0, 0x9abc8bd5, 0x9e7d9662,
+  0x933eb0bb, 0x97ffad0c, 0xafb010b1, 0xab710d06, 0xa6322bdf, 0xa2f33668,
+  0xbcb4666d, 0xb8757bda, 0xb5365d03, 0xb1f740b4
+};
+
+static guint32
+_calc_crc32 (const guint8 * data, guint datalen)
+{
+  gint i;
+  guint32 crc = 0xffffffff;
+
+  for (i = 0; i < datalen; i++) {
+    crc = (crc << 8) ^ crc_tab[((crc >> 24) ^ *data++) & 0xff];
+  }
+  return crc;
+}
+
+#define MPEGTIME_TO_GSTTIME(t) ((t) * (guint64)100000 / 9)
+
+static GstMpegtsSCTESpliceEvent *
+copy_splice (GstMpegtsSCTESpliceEvent * splice)
+{
+  return g_boxed_copy (GST_TYPE_MPEGTS_SCTE_SPLICE_EVENT, splice);
+}
+
+static void
+free_splice (GstMpegtsSCTESpliceEvent * splice)
+{
+  g_boxed_free (GST_TYPE_MPEGTS_SCTE_SPLICE_EVENT, splice);
+}
+
+/* FIXME: get rid of this when depending on glib >= 2.62 */
+
+static GPtrArray *
+_g_ptr_array_copy (GPtrArray * array,
+    GCopyFunc func, GFreeFunc free_func, gpointer user_data)
+{
+  GPtrArray *new_array;
+
+  g_return_val_if_fail (array != NULL, NULL);
+
+  new_array = g_ptr_array_new_with_free_func (free_func);
+
+  g_ptr_array_set_size (new_array, array->len);
+
+  if (func != NULL) {
+    guint i;
+
+    for (i = 0; i < array->len; i++)
+      new_array->pdata[i] = func (array->pdata[i], user_data);
+  } else if (array->len > 0) {
+    memcpy (new_array->pdata, array->pdata,
+        array->len * sizeof (*array->pdata));
+  }
+
+  new_array->len = array->len;
+
+  return new_array;
+}
+
+static GstMpegtsSCTESIT *
+deep_copy_sit (const GstMpegtsSCTESIT * sit)
+{
+  GstMpegtsSCTESIT *sit_copy = g_boxed_copy (GST_TYPE_MPEGTS_SCTE_SIT, sit);
+  GPtrArray *splices_copy =
+      _g_ptr_array_copy (sit_copy->splices, (GCopyFunc) copy_splice,
+      (GFreeFunc) free_splice, NULL);
+
+  g_ptr_array_unref (sit_copy->splices);
+  sit_copy->splices = splices_copy;
+
+  return sit_copy;
+}
+
+/* Takes ownership of @section.
+ *
+ * This function is a bit complex because the SCTE sections can
+ * have various origins:
+ *
+ * * Sections created by the application with the gst_mpegts_scte_*_new()
+ *   API. The splice times / durations contained by these are expressed
+ *   in the GStreamer running time domain, and must be translated to
+ *   our local PES time domain. In this case, we will packetize the section
+ *   ourselves.
+ *
+ * * Sections passed through from tsdemux: this case is complicated as
+ *   splice times in the incoming stream may be encrypted, with pts_adjustment
+ *   being the only timing field guaranteed *not* to be encrypted. In this
+ *   case, the original binary data (section->data) will be reinjected as is
+ *   in the output stream, with pts_adjustment adjusted. tsdemux provides us
+ *   with the pts_offset it introduces, the difference between the original
+ *   PES PTSs and the running times it outputs.
+ *
+ * Additionally, in either of these cases when the splice times aren't encrypted
+ * we want to make use of those to request keyframes. For the passthrough case,
+ * as the splice times are left untouched tsdemux provides us with the running
+ * times the section originally referred to. We cannot calculate it locally
+ * because we would need to have access to the information that the timestamps
+ * in the original PES domain have wrapped around, and how many times they have
+ * done so. While we could probably make educated guesses, tsdemux (more specifically
+ * mpegtspacketizer) already keeps track of that, and it seemed more logical to
+ * perform the calculation there and forward it alongside the downstream events.
+ *
+ * Finally, while we can't request keyframes at splice points in the encrypted
+ * case, if the input stream was compliant in that regard and no reencoding took
+ * place the splice times will still match with valid splice points, it is up
+ * to the application to ensure that that is the case.
+ */
+static void
+handle_scte35_section (GstBaseTsMux * mux, GstEvent * event,
+    GstMpegtsSection * section, guint64 mpeg_pts_offset,
+    GstStructure * rtime_map)
+{
+  GstMpegtsSCTESIT *sit;
+  guint i;
+  gboolean forward = TRUE;
+  guint64 pts_adjust;
+  guint8 *section_data;
+  guint8 *crc;
+  gboolean translate = FALSE;
+
+  sit = (GstMpegtsSCTESIT *) gst_mpegts_section_get_scte_sit (section);
+
+  /* When the application injects manually constructed splice events,
+   * their time domain is the GStreamer running time, we receive them
+   * unpacketized and translate the fields in the SIT to local PTS.
+   *
+   * We make a copy of the SIT in order to make sure we can rewrite it.
+   */
+  if (sit->is_running_time) {
+    sit = deep_copy_sit (sit);
+    translate = TRUE;
+  }
+
+  switch (sit->splice_command_type) {
+    case GST_MTS_SCTE_SPLICE_COMMAND_NULL:
+      /* We implement heartbeating ourselves */
+      forward = FALSE;
+      break;
+    case GST_MTS_SCTE_SPLICE_COMMAND_SCHEDULE:
+      /* No need to request keyframes at this point, splice_insert
+       * messages will precede the future splice points and we
+       * can request keyframes then. Only translate if needed.
+       */
+      if (translate) {
+        for (i = 0; i < sit->splices->len; i++) {
+          GstMpegtsSCTESpliceEvent *sevent =
+              g_ptr_array_index (sit->splices, i);
+
+          if (sevent->program_splice_time_specified)
+            sevent->program_splice_time =
+                GSTTIME_TO_MPEGTIME (sevent->program_splice_time) +
+                TS_MUX_CLOCK_BASE;
+
+          if (sevent->duration_flag)
+            sevent->break_duration =
+                GSTTIME_TO_MPEGTIME (sevent->break_duration);
+        }
+      }
+      break;
+    case GST_MTS_SCTE_SPLICE_COMMAND_INSERT:
+      /* We want keyframes at splice points */
+      if (sit->fully_parsed && (rtime_map || translate)) {
+
+        for (i = 0; i < sit->splices->len; i++) {
+          guint64 running_time = GST_CLOCK_TIME_NONE;
+
+          GstMpegtsSCTESpliceEvent *sevent =
+              g_ptr_array_index (sit->splices, i);
+          if (sevent->program_splice_time_specified) {
+            if (rtime_map) {
+              gchar *field_name = g_strdup_printf ("event-%u-splice-time",
+                  sevent->splice_event_id);
+              if (gst_structure_get_uint64 (rtime_map, field_name,
+                      &running_time)) {
+                GST_DEBUG_OBJECT (mux,
+                    "Requesting keyframe for splice point at %" GST_TIME_FORMAT,
+                    GST_TIME_ARGS (running_time));
+                request_keyframe (mux, running_time);
+              }
+              g_free (field_name);
+            } else {
+              g_assert (translate == TRUE);
+              running_time = sevent->program_splice_time;
+              GST_DEBUG_OBJECT (mux,
+                  "Requesting keyframe for splice point at %" GST_TIME_FORMAT,
+                  GST_TIME_ARGS (running_time));
+              request_keyframe (mux, running_time);
+              sevent->program_splice_time =
+                  GSTTIME_TO_MPEGTIME (running_time) + TS_MUX_CLOCK_BASE;
+            }
+          } else {
+            GST_DEBUG_OBJECT (mux,
+                "Requesting keyframe for immediate splice point");
+            request_keyframe (mux, GST_CLOCK_TIME_NONE);
+          }
+
+          if (sevent->duration_flag) {
+            if (translate) {
+              sevent->break_duration =
+                  GSTTIME_TO_MPEGTIME (sevent->break_duration);
+            }
+
+            /* Even if auto_return is FALSE, when a break_duration is specified it
+             * is intended as a redundancy mechanism in case the follow-up
+             * splice insert goes missing.
+             *
+             * Schedule a keyframe at that point (if we can calculate its position
+             * accurately).
+             */
+            if (GST_CLOCK_TIME_IS_VALID (running_time)) {
+              running_time += MPEGTIME_TO_GSTTIME (sevent->break_duration);
+              GST_DEBUG_OBJECT (mux,
+                  "Requesting keyframe for end of break at %" GST_TIME_FORMAT,
+                  GST_TIME_ARGS (running_time));
+              request_keyframe (mux, running_time);
+            }
+          }
+        }
+      }
+      break;
+    case GST_MTS_SCTE_SPLICE_COMMAND_TIME:{
+      /* Adjust timestamps and potentially request keyframes */
+      gboolean do_request_keyframes = FALSE;
+
+      /* TODO: we can probably be a little more fine-tuned about determining
+       * whether a keyframe is actually needed, but this at least takes care
+       * of the requirement in 10.3.4 that a keyframe should not be created
+       * when the signal contains only a time_descriptor.
+       */
+      if (sit->fully_parsed && (rtime_map || translate)) {
+        for (i = 0; i < sit->descriptors->len; i++) {
+          GstMpegtsDescriptor *descriptor =
+              g_ptr_array_index (sit->descriptors, i);
+
+          switch (descriptor->tag) {
+            case GST_MTS_SCTE_DESC_AVAIL:
+            case GST_MTS_SCTE_DESC_DTMF:
+            case GST_MTS_SCTE_DESC_SEGMENTATION:
+              do_request_keyframes = TRUE;
+              break;
+            case GST_MTS_SCTE_DESC_TIME:
+            case GST_MTS_SCTE_DESC_AUDIO:
+              break;
+          }
+
+          if (do_request_keyframes)
+            break;
+        }
+
+        if (sit->splice_time_specified) {
+          GstClockTime running_time = GST_CLOCK_TIME_NONE;
+
+          if (rtime_map) {
+            if (do_request_keyframes
+                && gst_structure_get_uint64 (rtime_map, "splice-time",
+                    &running_time)) {
+              GST_DEBUG_OBJECT (mux,
+                  "Requesting keyframe for time signal at %" GST_TIME_FORMAT,
+                  GST_TIME_ARGS (running_time));
+              request_keyframe (mux, running_time);
+            }
+          } else {
+            g_assert (translate);
+            running_time = sit->splice_time;
+            sit->splice_time =
+                GSTTIME_TO_MPEGTIME (running_time) + TS_MUX_CLOCK_BASE;
+            if (do_request_keyframes) {
+              GST_DEBUG_OBJECT (mux,
+                  "Requesting keyframe for time signal at %" GST_TIME_FORMAT,
+                  GST_TIME_ARGS (running_time));
+              request_keyframe (mux, running_time);
+            }
+          }
+        } else if (do_request_keyframes) {
+          GST_DEBUG_OBJECT (mux,
+              "Requesting keyframe for immediate time signal");
+          request_keyframe (mux, GST_CLOCK_TIME_NONE);
+        }
+      }
+      break;
+    }
+    case GST_MTS_SCTE_SPLICE_COMMAND_BANDWIDTH:
+    case GST_MTS_SCTE_SPLICE_COMMAND_PRIVATE:
+      /* Just let those go through untouched, none of our business */
+      break;
+    default:
+      break;
+  }
+
+  if (!forward) {
+    gst_mpegts_section_unref (section);
+    return;
+  }
+
+  if (!translate) {
+    g_assert (section->data);
+    /* Calculate the final adjustment, as a sum of:
+     * - The adjustment in the original packet
+     * - The offset introduced between the original local PTS
+     *   and the GStreamer PTS output by tsdemux
+     * - Our own 1-hour offset
+     */
+    pts_adjust = sit->pts_adjustment + mpeg_pts_offset + TS_MUX_CLOCK_BASE;
+
+    /* Account for offsets potentially introduced between the demuxer and us */
+    pts_adjust +=
+        GSTTIME_TO_MPEGTIME (gst_event_get_running_time_offset (event));
+
+    pts_adjust &= 0x1ffffffff;
+    section_data = g_memdup2 (section->data, section->section_length);
+    section_data[4] |= pts_adjust >> 32;
+    section_data[5] = pts_adjust >> 24;
+    section_data[6] = pts_adjust >> 16;
+    section_data[7] = pts_adjust >> 8;
+    section_data[8] = pts_adjust;
+
+    /* Now rewrite our checksum */
+    crc = section_data + section->section_length - 4;
+    GST_WRITE_UINT32_BE (crc, _calc_crc32 (section_data, crc - section_data));
+
+    GST_OBJECT_LOCK (mux);
+    GST_DEBUG_OBJECT (mux, "Storing SCTE section");
+    if (mux->pending_scte35_section)
+      gst_mpegts_section_unref (mux->pending_scte35_section);
+    mux->pending_scte35_section =
+        gst_mpegts_section_new (mux->scte35_pid, section_data,
+        section->section_length);
+    GST_OBJECT_UNLOCK (mux);
+
+    gst_mpegts_section_unref (section);
+  } else {
+    GST_OBJECT_LOCK (mux);
+    GST_DEBUG_OBJECT (mux, "Storing SCTE section");
+    gst_mpegts_section_unref (section);
+    if (mux->pending_scte35_section)
+      gst_mpegts_section_unref (mux->pending_scte35_section);
+    mux->pending_scte35_section =
+        gst_mpegts_section_from_scte_sit (sit, mux->scte35_pid);;
+    GST_OBJECT_UNLOCK (mux);
+  }
 }
 
 static gboolean
@@ -1381,16 +1897,12 @@ gst_base_ts_mux_send_event (GstElement * element, GstEvent * event)
     GST_DEBUG ("Received event with mpegts section");
 
     if (section->section_type == GST_MPEGTS_SECTION_SCTE_SIT) {
-      /* Will be sent from the streaming threads */
-      GST_DEBUG_OBJECT (mux, "Storing SCTE event");
-      GST_OBJECT_LOCK (element);
-      if (mux->pending_scte35_section)
-        gst_mpegts_section_unref (mux->pending_scte35_section);
-      mux->pending_scte35_section = section;
-      GST_OBJECT_UNLOCK (element);
+      handle_scte35_section (mux, event, section, 0, NULL);
     } else {
+      g_mutex_lock (&mux->lock);
       /* TODO: Check that the section type is supported */
       tsmux_add_mpegts_si_section (mux->tsmux, section);
+      g_mutex_unlock (&mux->lock);
     }
 
     gst_event_unref (event);
@@ -1414,11 +1926,95 @@ gst_base_ts_mux_sink_event (GstAggregator * agg, GstAggregatorPad * agg_pad,
   gboolean forward = TRUE;
 
   switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_CAPS:
+    {
+      GstCaps *caps;
+      GstFlowReturn ret;
+      GList *cur;
+
+      g_mutex_lock (&mux->lock);
+      if (ts_pad->stream == NULL) {
+        g_mutex_unlock (&mux->lock);
+        break;
+      }
+
+      forward = FALSE;
+
+      gst_event_parse_caps (event, &caps);
+      if (!caps || !gst_caps_is_fixed (caps)) {
+        g_mutex_unlock (&mux->lock);
+        break;
+      }
+
+      ret = gst_base_ts_mux_create_or_update_stream (mux, ts_pad, caps);
+      if (ret != GST_FLOW_OK) {
+        g_mutex_unlock (&mux->lock);
+        break;
+      }
+
+      mux->tsmux->pat_changed = TRUE;
+      mux->tsmux->si_changed = TRUE;
+      tsmux_resend_pat (mux->tsmux);
+      tsmux_resend_si (mux->tsmux);
+
+      /* output PMT for each program */
+      for (cur = mux->tsmux->programs; cur; cur = cur->next) {
+        TsMuxProgram *program = (TsMuxProgram *) cur->data;
+
+        program->pmt_changed = TRUE;
+        tsmux_resend_pmt (program);
+      }
+      g_mutex_unlock (&mux->lock);
+
+      res = TRUE;
+      break;
+    }
     case GST_EVENT_CUSTOM_DOWNSTREAM:
     {
       GstClockTime timestamp, stream_time, running_time;
       gboolean all_headers;
       guint count;
+      const GstStructure *s;
+
+      s = gst_event_get_structure (event);
+
+      if (gst_structure_has_name (s, "scte-sit") && mux->scte35_pid != 0) {
+
+        /* When operating downstream of tsdemux, tsdemux will send out events
+         * on all its source pads for each splice table it encounters. If we
+         * are remuxing multiple streams it has demuxed, this means we could
+         * unnecessarily repeat the same table multiple times, we avoid that
+         * by deduplicating thanks to the event sequm
+         */
+        if (gst_event_get_seqnum (event) != mux->last_scte35_event_seqnum) {
+          GstMpegtsSection *section;
+
+          gst_structure_get (s, "section", GST_TYPE_MPEGTS_SECTION, &section,
+              NULL);
+          if (section) {
+            guint64 mpeg_pts_offset = 0;
+            GstStructure *rtime_map = NULL;
+
+            gst_structure_get (s, "running-time-map", GST_TYPE_STRUCTURE,
+                &rtime_map, NULL);
+            gst_structure_get_uint64 (s, "mpeg-pts-offset", &mpeg_pts_offset);
+
+            handle_scte35_section (mux, event, section, mpeg_pts_offset,
+                rtime_map);
+            if (rtime_map)
+              gst_structure_free (rtime_map);
+            mux->last_scte35_event_seqnum = gst_event_get_seqnum (event);
+          } else {
+            GST_WARNING_OBJECT (ts_pad,
+                "Ignoring scte-sit event without a section");
+          }
+        } else {
+          GST_DEBUG_OBJECT (ts_pad, "Ignoring duplicate scte-sit event");
+        }
+        res = TRUE;
+        forward = FALSE;
+        goto out;
+      }
 
       if (!gst_video_event_is_force_key_unit (event))
         goto out;
@@ -1515,7 +2111,7 @@ gst_base_ts_mux_src_event (GstAggregator * agg, GstEvent * event)
       GstIterator *iter;
       GValue sinkpad_value = G_VALUE_INIT;
       GstClockTime running_time;
-      gboolean all_headers, done = FALSE, res = FALSE;
+      gboolean all_headers, done = FALSE;
       guint count;
 
       if (!gst_video_event_is_force_key_unit (event))
@@ -1652,20 +2248,6 @@ beach:
   return ret;
 }
 
-static GstFlowReturn
-gst_base_ts_mux_update_src_caps (GstAggregator * agg, GstCaps * caps,
-    GstCaps ** ret)
-{
-  GstBaseTsMux *mux = GST_BASE_TS_MUX (agg);
-  GstStructure *s;
-
-  *ret = gst_caps_copy (caps);
-  s = gst_caps_get_structure (*ret, 0);
-  gst_structure_set (s, "packetsize", G_TYPE_INT, mux->packet_size, NULL);
-
-  return GST_FLOW_OK;
-}
-
 static GstBaseTsMuxPad *
 gst_base_ts_mux_find_best_pad (GstAggregator * aggregator)
 {
@@ -1737,11 +2319,30 @@ gst_base_ts_mux_aggregate (GstAggregator * agg, gboolean timeout)
   GstBaseTsMux *mux = GST_BASE_TS_MUX (agg);
   GstFlowReturn ret = GST_FLOW_OK;
   GstBaseTsMuxPad *best = gst_base_ts_mux_find_best_pad (agg);
+  GstCaps *caps;
+
+  /* set caps on the srcpad if no caps were set yet */
+  if (!(caps = gst_pad_get_current_caps (agg->srcpad))) {
+    GstStructure *structure;
+
+    caps = gst_pad_get_pad_template_caps (GST_AGGREGATOR_SRC_PAD (mux));
+    caps = gst_caps_make_writable (caps);
+    structure = gst_caps_get_structure (caps, 0);
+    gst_structure_set (structure, "packetsize", G_TYPE_INT, mux->packet_size,
+        NULL);
+
+    gst_aggregator_set_src_caps (GST_AGGREGATOR (mux), caps);
+  }
+  gst_caps_unref (caps);
 
   if (best) {
     GstBuffer *buffer;
 
     buffer = gst_aggregator_pad_pop_buffer (GST_AGGREGATOR_PAD (best));
+    if (!buffer) {
+      /* We might have gotten a flush event after we picked the pad */
+      goto done;
+    }
 
     ret =
         gst_base_ts_mux_aggregate_buffer (GST_BASE_TS_MUX (agg),
@@ -1770,7 +2371,11 @@ done:
 static gboolean
 gst_base_ts_mux_start (GstAggregator * agg)
 {
-  gst_base_ts_mux_reset (GST_BASE_TS_MUX (agg), TRUE);
+  GstBaseTsMux *mux = GST_BASE_TS_MUX (agg);
+
+  g_mutex_lock (&mux->lock);
+  gst_base_ts_mux_reset (mux, TRUE);
+  g_mutex_unlock (&mux->lock);
 
   return TRUE;
 }
@@ -1778,7 +2383,11 @@ gst_base_ts_mux_start (GstAggregator * agg)
 static gboolean
 gst_base_ts_mux_stop (GstAggregator * agg)
 {
+  GstBaseTsMux *mux = GST_BASE_TS_MUX (agg);
+
+  g_mutex_lock (&mux->lock);
   gst_base_ts_mux_reset (GST_BASE_TS_MUX (agg), TRUE);
+  g_mutex_unlock (&mux->lock);
 
   return TRUE;
 }
@@ -1790,6 +2399,7 @@ gst_base_ts_mux_dispose (GObject * object)
 {
   GstBaseTsMux *mux = GST_BASE_TS_MUX (object);
 
+  g_mutex_lock (&mux->lock);
   gst_base_ts_mux_reset (mux, FALSE);
 
   if (mux->out_adapter) {
@@ -1804,7 +2414,17 @@ gst_base_ts_mux_dispose (GObject * object)
     g_hash_table_destroy (mux->programs);
     mux->programs = NULL;
   }
+  g_mutex_unlock (&mux->lock);
   GST_CALL_PARENT (G_OBJECT_CLASS, dispose, (object));
+}
+
+static void
+gst_base_ts_mux_finalize (GObject * object)
+{
+  GstBaseTsMux *mux = GST_BASE_TS_MUX (object);
+
+  g_mutex_clear (&mux->lock);
+  GST_CALL_PARENT (G_OBJECT_CLASS, finalize, (object));
 }
 
 static void
@@ -1813,7 +2433,9 @@ gst_base_ts_mux_constructed (GObject * object)
   GstBaseTsMux *mux = GST_BASE_TS_MUX (object);
 
   /* initial state */
+  g_mutex_lock (&mux->lock);
   gst_base_ts_mux_reset (mux, TRUE);
+  g_mutex_unlock (&mux->lock);
 }
 
 static void
@@ -1838,8 +2460,10 @@ gst_base_ts_mux_set_property (GObject * object, guint prop_id,
     }
     case PROP_PAT_INTERVAL:
       mux->pat_interval = g_value_get_uint (value);
+      g_mutex_lock (&mux->lock);
       if (mux->tsmux)
         tsmux_set_pat_interval (mux->tsmux, mux->pat_interval);
+      g_mutex_unlock (&mux->lock);
       break;
     case PROP_PMT_INTERVAL:
       mux->pmt_interval = g_value_get_uint (value);
@@ -1847,7 +2471,9 @@ gst_base_ts_mux_set_property (GObject * object, guint prop_id,
       for (l = GST_ELEMENT_CAST (mux)->sinkpads; l; l = l->next) {
         GstBaseTsMuxPad *ts_pad = GST_BASE_TS_MUX_PAD (l->data);
 
+        g_mutex_lock (&mux->lock);
         tsmux_set_pmt_interval (ts_pad->prog, mux->pmt_interval);
+        g_mutex_unlock (&mux->lock);
       }
       GST_OBJECT_UNLOCK (mux);
       break;
@@ -1856,17 +2482,23 @@ gst_base_ts_mux_set_property (GObject * object, guint prop_id,
       break;
     case PROP_SI_INTERVAL:
       mux->si_interval = g_value_get_uint (value);
+      g_mutex_lock (&mux->lock);
       tsmux_set_si_interval (mux->tsmux, mux->si_interval);
+      g_mutex_unlock (&mux->lock);
       break;
     case PROP_BITRATE:
       mux->bitrate = g_value_get_uint64 (value);
+      g_mutex_lock (&mux->lock);
       if (mux->tsmux)
         tsmux_set_bitrate (mux->tsmux, mux->bitrate);
+      g_mutex_unlock (&mux->lock);
       break;
     case PROP_PCR_INTERVAL:
       mux->pcr_interval = g_value_get_uint (value);
+      g_mutex_lock (&mux->lock);
       if (mux->tsmux)
         tsmux_set_pcr_interval (mux->tsmux, mux->pcr_interval);
+      g_mutex_unlock (&mux->lock);
       break;
     case PROP_SCTE_35_PID:
       mux->scte35_pid = g_value_get_uint (value);
@@ -1990,13 +2622,14 @@ gst_base_ts_mux_class_init (GstBaseTsMuxClass * klass)
   gobject_class->get_property =
       GST_DEBUG_FUNCPTR (gst_base_ts_mux_get_property);
   gobject_class->dispose = gst_base_ts_mux_dispose;
+  gobject_class->finalize = gst_base_ts_mux_finalize;
   gobject_class->constructed = gst_base_ts_mux_constructed;
 
   gstelement_class->request_new_pad = gst_base_ts_mux_request_new_pad;
   gstelement_class->release_pad = gst_base_ts_mux_release_pad;
   gstelement_class->send_event = gst_base_ts_mux_send_event;
 
-  gstagg_class->update_src_caps = gst_base_ts_mux_update_src_caps;
+  gstagg_class->negotiate = NULL;
   gstagg_class->aggregate = gst_base_ts_mux_aggregate;
   gstagg_class->clip = gst_base_ts_mux_clip;
   gstagg_class->sink_event = gst_base_ts_mux_sink_event;
@@ -2090,4 +2723,6 @@ gst_base_ts_mux_init (GstBaseTsMux * mux)
 
   mux->packet_size = GST_BASE_TS_MUX_NORMAL_PACKET_LENGTH;
   mux->automatic_alignment = 0;
+
+  g_mutex_init (&mux->lock);
 }

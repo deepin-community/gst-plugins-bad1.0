@@ -48,7 +48,6 @@ G_BEGIN_DECLS
 
 #define GST_VP9_FRAME_CONTEXTS_LOG2 2
 
-#define GST_VP9_MAX_LOOP_FILTER    63
 #define GST_VP9_MAX_SHARPNESS      7
 
 #define GST_VP9_MAX_REF_LF_DELTAS  4
@@ -461,7 +460,7 @@ struct _GstVp9SuperframeInfo {
  */
 struct _GstVp9Segmentation
 {
-  guint8 filter_level[4][2];
+  guint8 filter_level[GST_VP9_MAX_REF_LF_DELTAS][GST_VP9_MAX_MODE_LF_DELTAS];
   gint16 luma_ac_quant_scale;
   gint16 luma_dc_quant_scale;
   gint16 chroma_ac_quant_scale;

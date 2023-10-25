@@ -64,7 +64,7 @@ struct _GstH265Decoder
   guint NumPocStFoll;
   guint NumPocLtCurr;
   guint NumPocLtFoll;
-  guint NumPocTotalCurr;
+  guint NumPicTotalCurr;
 
   /*< private >*/
   GstH265DecoderPrivate *priv;
@@ -73,50 +73,113 @@ struct _GstH265Decoder
 
 /**
  * GstH265DecoderClass:
- * @new_sequence:   Notifies subclass of SPS update
- * @new_picture:    Optional.
- *                  Called whenever new #GstH265Picture is created.
- *                  Subclass can set implementation specific user data
- *                  on the #GstH265Picture via gst_h265_picture_set_user_data()
- * @start_picture:  Optional.
- *                  Called per one #GstH265Picture to notify subclass to prepare
- *                  decoding process for the #GstH265Picture
- * @decode_slice:   Provides per slice data with parsed slice header and
- *                  required raw bitstream for subclass to decode it
- * @end_picture:    Optional.
- *                  Called per one #GstH265Picture to notify subclass to finish
- *                  decoding process for the #GstH265Picture
- * @output_picture: Called with a #GstH265Picture which is required to be outputted.
- *                  Subclass can retrieve parent #GstVideoCodecFrame by using
- *                  gst_video_decoder_get_frame() with system_frame_number
- *                  and the #GstVideoCodecFrame must be consumed by subclass via
- *                  gst_video_decoder_{finish,drop,release}_frame().
+ *
+ * The opaque #GstH265DecoderClass data structure.
  */
 struct _GstH265DecoderClass
 {
   GstVideoDecoderClass parent_class;
 
-  gboolean      (*new_sequence)     (GstH265Decoder * decoder,
+  /**
+   * GstH265DecoderClass::new_sequence:
+   * @decoder: a #GstH265Decoder
+   * @sps: a #GstH265SPS
+   * @max_dpb_size: the size of dpb including preferred output delay
+   *   by subclass reported via get_preferred_output_delay method.
+   *
+   * Notifies subclass of video sequence update
+   */
+  GstFlowReturn (*new_sequence)     (GstH265Decoder * decoder,
                                      const GstH265SPS * sps,
                                      gint max_dpb_size);
 
-  gboolean      (*new_picture)      (GstH265Decoder * decoder,
+  /**
+   * GstH265DecoderClass::new_picture:
+   * @decoder: a #GstH265Decoder
+   * @frame: (transfer none): a #GstVideoCodecFrame
+   * @picture: (transfer none): a #GstH265Picture
+   *
+   * Optional. Called whenever new #GstH265Picture is created.
+   * Subclass can set implementation specific user data
+   * on the #GstH265Picture via gst_h265_picture_set_user_data()
+   */
+  GstFlowReturn (*new_picture)      (GstH265Decoder * decoder,
+                                     GstVideoCodecFrame * frame,
                                      GstH265Picture * picture);
 
-  gboolean      (*start_picture)    (GstH265Decoder * decoder,
+  /**
+   * GstH265DecoderClass::start_picture:
+   * @decoder: a #GstH265Decoder
+   * @picture: (transfer none): a #GstH265Picture
+   * @slice: (transfer none): a #GstH265Slice
+   * @dpb: (transfer none): a #GstH265Dpb
+   *
+   * Optional. Called per one #GstH265Picture to notify subclass to prepare
+   * decoding process for the #GstH265Picture
+   */
+  GstFlowReturn (*start_picture)    (GstH265Decoder * decoder,
                                      GstH265Picture * picture,
                                      GstH265Slice * slice,
                                      GstH265Dpb * dpb);
 
-  gboolean      (*decode_slice)     (GstH265Decoder * decoder,
+  /**
+   * GstH265DecoderClass::decode_slice:
+   * @decoder: a #GstH265Decoder
+   * @picture: (transfer none): a #GstH265Picture
+   * @slice: (transfer none): a #GstH265Slice
+   * @ref_pic_list0: (element-type GstH265Picture) (transfer none):
+   *    an array of #GstH265Picture pointers
+   * @ref_pic_list1: (element-type GstH265Picture) (transfer none):
+   *    an array of #GstH265Picture pointers
+   *
+   * Provides per slice data with parsed slice header and required raw bitstream
+   * for subclass to decode it. If gst_h265_decoder_set_process_ref_pic_lists()
+   * is called with %TRUE by the subclass, @ref_pic_list0 and @ref_pic_list1
+   * are non-%NULL.
+   */
+  GstFlowReturn (*decode_slice)     (GstH265Decoder * decoder,
                                      GstH265Picture * picture,
-                                     GstH265Slice * slice);
+                                     GstH265Slice * slice,
+                                     GArray * ref_pic_list0,
+                                     GArray * ref_pic_list1);
 
-  gboolean      (*end_picture)      (GstH265Decoder * decoder,
+  /**
+   * GstH265DecoderClass::end_picture:
+   * @decoder: a #GstH265Decoder
+   * @picture: (transfer none): a #GstH265Picture
+   *
+   * Optional. Called per one #GstH265Picture to notify subclass to finish
+   * decoding process for the #GstH265Picture
+   */
+  GstFlowReturn (*end_picture)      (GstH265Decoder * decoder,
                                      GstH265Picture * picture);
 
+  /**
+   * GstH265DecoderClass:output_picture:
+   * @decoder: a #GstH265Decoder
+   * @frame: (transfer full): a #GstVideoCodecFrame
+   * @picture: (transfer full): a #GstH265Picture
+   *
+   * Called with a #GstH265Picture which is required to be outputted.
+   */
   GstFlowReturn (*output_picture)   (GstH265Decoder * decoder,
+                                     GstVideoCodecFrame * frame,
                                      GstH265Picture * picture);
+
+  /**
+   * GstH265DecoderClass::get_preferred_output_delay:
+   * @decoder: a #GstH265Decoder
+   * @live: whether upstream is live or not
+   *
+   * Optional. Called by baseclass to query whether delaying output is
+   * preferred by subclass or not.
+   *
+   * Returns: the number of perferred delayed output frame
+   *
+   * Since: 1.22
+   */
+  guint (*get_preferred_output_delay)   (GstH265Decoder * decoder,
+                                         gboolean live);
 
   /*< private >*/
   gpointer padding[GST_PADDING_LARGE];
@@ -126,6 +189,14 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC(GstH265Decoder, gst_object_unref)
 
 GST_CODECS_API
 GType gst_h265_decoder_get_type (void);
+
+GST_CODECS_API
+void gst_h265_decoder_set_process_ref_pic_lists (GstH265Decoder * decoder,
+                                                 gboolean process);
+
+GST_CODECS_API
+GstH265Picture * gst_h265_decoder_get_picture   (GstH265Decoder * decoder,
+                                                 guint32 system_frame_number);
 
 G_END_DECLS
 

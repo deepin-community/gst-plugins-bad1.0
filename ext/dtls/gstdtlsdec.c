@@ -27,6 +27,7 @@
 #include "config.h"
 #endif
 
+#include "gstdtlselements.h"
 #include "gstdtlsdec.h"
 
 #include "gstdtlscertificate.h"
@@ -48,6 +49,8 @@ GST_DEBUG_CATEGORY_STATIC (gst_dtls_dec_debug);
 #define gst_dtls_dec_parent_class parent_class
 G_DEFINE_TYPE_WITH_CODE (GstDtlsDec, gst_dtls_dec, GST_TYPE_ELEMENT,
     GST_DEBUG_CATEGORY_INIT (gst_dtls_dec_debug, "dtlsdec", 0, "DTLS Decoder"));
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (dtlsdec, "dtlsdec", GST_RANK_NONE,
+    GST_TYPE_DTLS_DEC, dtls_element_init (plugin));
 
 enum
 {
@@ -422,7 +425,7 @@ static void
 on_key_received (GstDtlsConnection * connection, gpointer key, guint cipher,
     guint auth, GstDtlsDec * self)
 {
-  gpointer key_dup;
+  GstBuffer *new_decoder_key;
   gchar *key_str;
 
   g_return_if_fail (GST_IS_DTLS_DEC (self));
@@ -430,15 +433,13 @@ on_key_received (GstDtlsConnection * connection, gpointer key, guint cipher,
   self->srtp_cipher = cipher;
   self->srtp_auth = auth;
 
-  key_dup = g_memdup (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
+  new_decoder_key =
+      gst_buffer_new_memdup (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
 
-  if (self->decoder_key) {
+  if (self->decoder_key)
     gst_buffer_unref (self->decoder_key);
-    self->decoder_key = NULL;
-  }
 
-  self->decoder_key =
-      gst_buffer_new_wrapped (key_dup, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
+  self->decoder_key = new_decoder_key;
 
   key_str = g_base64_encode (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
   GST_INFO_OBJECT (self, "received key: %s", key_str);

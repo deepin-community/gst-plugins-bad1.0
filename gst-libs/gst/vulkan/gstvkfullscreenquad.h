@@ -99,6 +99,8 @@ struct _GstVulkanFullScreenQuadClass
   gpointer _reserved        [GST_PADDING];
 };
 
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (GstVulkanFullScreenQuad, gst_object_unref)
+
 GST_VULKAN_API
 GstVulkanFullScreenQuad *   gst_vulkan_full_screen_quad_new         (GstVulkanQueue * queue);
 
@@ -117,6 +119,22 @@ GST_VULKAN_API
 gboolean            gst_vulkan_full_screen_quad_set_input_buffer    (GstVulkanFullScreenQuad * self, GstBuffer * buffer, GError ** error);
 GST_VULKAN_API
 gboolean            gst_vulkan_full_screen_quad_set_output_buffer   (GstVulkanFullScreenQuad * self, GstBuffer * buffer, GError ** error);
+GST_VULKAN_API
+void                gst_vulkan_full_screen_quad_enable_blend        (GstVulkanFullScreenQuad * self,
+                                                                     gboolean enable_blend);
+GST_VULKAN_API
+void                gst_vulkan_full_screen_quad_set_blend_operation (GstVulkanFullScreenQuad * self,
+                                                                     VkBlendOp colour_blend_op,
+                                                                     VkBlendOp alpha_blend_op);
+GST_VULKAN_API
+void                gst_vulkan_full_screen_quad_set_blend_factors   (GstVulkanFullScreenQuad * self,
+                                                                     VkBlendFactor src_blend_factor,
+                                                                     VkBlendFactor dst_blend_factor,
+                                                                     VkBlendFactor src_alpha_blend_factor,
+                                                                     VkBlendFactor dst_alpha_blend_factor);
+GST_VULKAN_API
+void                gst_vulkan_full_screen_quad_enable_clear        (GstVulkanFullScreenQuad * self,
+                                                                     gboolean enable_clear);
 
 GST_VULKAN_API
 gboolean            gst_vulkan_full_screen_quad_prepare_draw        (GstVulkanFullScreenQuad * self, GstVulkanFence * fence, GError ** error);

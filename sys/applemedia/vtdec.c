@@ -19,13 +19,28 @@
  */
 /**
  * SECTION:element-vtdec
- * @title: gstvtdec
+ * @title: vtdec
  *
- * Apple VideoToolbox based decoder.
+ * Apple VideoToolbox based decoder which might use a HW or a SW
+ * implementation depending on the device.
  *
  * ## Example launch line
  * |[
  * gst-launch-1.0 -v filesrc location=file.mov ! qtdemux ! queue ! h264parse ! vtdec ! videoconvert ! autovideosink
+ * ]|
+ * Decode h264 video from a mov file.
+ *
+ */
+
+/**
+ * SECTION:element-vtdec_hw
+ * @title: vtdec_hw
+ *
+ * Apple VideoToolbox based HW-only decoder.
+ *
+ * ## Example launch line
+ * |[
+ * gst-launch-1.0 -v filesrc location=file.mov ! qtdemux ! queue ! h264parse ! vtdec_hw ! videoconvert ! autovideosink
  * ]|
  * Decode h264 video from a mov file.
  *
@@ -57,6 +72,7 @@ enum
   /* leave some headroom for new GstVideoCodecFrameFlags flags */
   VTDEC_FRAME_FLAG_SKIP = (1 << 10),
   VTDEC_FRAME_FLAG_DROP = (1 << 11),
+  VTDEC_FRAME_FLAG_ERROR = (1 << 12),
 };
 
 static void gst_vtdec_finalize (GObject * object);
@@ -89,6 +105,8 @@ static void gst_vtdec_session_output_callback (void
     CMTime duration);
 static gboolean compute_h264_decode_picture_buffer_length (GstVtdec * vtdec,
     GstBuffer * codec_data, int *length);
+static gboolean compute_hevc_decode_picture_buffer_length (GstVtdec * vtdec,
+    GstBuffer * codec_data, int *length);
 static gboolean gst_vtdec_compute_reorder_queue_length (GstVtdec * vtdec,
     CMVideoCodecType cm_format, GstBuffer * codec_data);
 static void gst_vtdec_set_latency (GstVtdec * vtdec);
@@ -100,8 +118,12 @@ static GstStaticPadTemplate gst_vtdec_sink_template =
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS ("video/x-h264, stream-format=avc, alignment=au,"
         " width=(int)[1, MAX], height=(int)[1, MAX];"
+        "video/x-h265, stream-format=(string){ hev1, hvc1 }, alignment=au,"
+        " width=(int)[1, MAX], height=(int)[1, MAX];"
         "video/mpeg, mpegversion=2, systemstream=false, parsed=true;"
-        "image/jpeg")
+        "image/jpeg;"
+        "video/x-prores, variant = { (string)standard, (string)hq, (string)lt,"
+        " (string)proxy, (string)4444, (string)4444xq };")
     );
 
 /* define EnableHardwareAcceleratedVideoDecoder in < 10.9 */
@@ -114,20 +136,20 @@ const CFStringRef
 CFSTR ("RequireHardwareAcceleratedVideoDecoder");
 #endif
 
-#if defined(APPLEMEDIA_MOLTENVK)
-#define VIDEO_SRC_CAPS \
-    GST_VIDEO_CAPS_MAKE("NV12") ";"                                     \
+#define VIDEO_SRC_CAPS_FORMATS "{ NV12, AYUV64, ARGB64_BE }"
+
+#define VIDEO_SRC_CAPS_NATIVE                                           \
+    GST_VIDEO_CAPS_MAKE(VIDEO_SRC_CAPS_FORMATS) ";"                     \
     GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_MEMORY_GL_MEMORY,\
-        "NV12") ", "                                                    \
-    "texture-target = (string) rectangle ; "                            \
-    GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE,\
-        "NV12")
-#else
-#define VIDEO_SRC_CAPS \
-    GST_VIDEO_CAPS_MAKE("NV12") ";"                                     \
-    GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_MEMORY_GL_MEMORY,\
-        "NV12") ", "                                                    \
+        VIDEO_SRC_CAPS_FORMATS) ", "                                    \
     "texture-target = (string) rectangle "
+
+#if defined(APPLEMEDIA_MOLTENVK)
+#define VIDEO_SRC_CAPS VIDEO_SRC_CAPS_NATIVE "; "                           \
+    GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE, \
+        VIDEO_SRC_CAPS_FORMATS)
+#else
+#define VIDEO_SRC_CAPS VIDEO_SRC_CAPS_NATIVE
 #endif
 
 G_DEFINE_TYPE (GstVtdec, gst_vtdec, GST_TYPE_VIDEO_DECODER);
@@ -143,9 +165,15 @@ gst_vtdec_class_init (GstVtdecClass * klass)
      base_class_init if you intend to subclass this class. */
   gst_element_class_add_static_pad_template (element_class,
       &gst_vtdec_sink_template);
-  gst_element_class_add_pad_template (element_class,
-      gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
-          gst_caps_from_string (VIDEO_SRC_CAPS)));
+
+  {
+    GstCaps *caps = gst_caps_from_string (VIDEO_SRC_CAPS);
+    /* RGBA64_LE is kCVPixelFormatType_64RGBALE, only available on macOS 11.3+ */
+    if (GST_VTUTIL_HAVE_64RGBALE)
+      caps = gst_vtutil_caps_append_video_format (caps, "RGBA64_LE");
+    gst_element_class_add_pad_template (element_class,
+        gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS, caps));
+  }
 
   gst_element_class_set_static_metadata (element_class,
       "Apple VideoToolbox decoder",
@@ -234,14 +262,56 @@ gst_vtdec_stop (GstVideoDecoder * decoder)
 }
 
 static void
-setup_texture_cache (GstVtdec * vtdec)
+setup_texture_cache (GstVtdec * vtdec, GstVideoFormat format)
 {
   GstVideoCodecState *output_state;
 
+  GST_INFO_OBJECT (vtdec, "setting up texture cache");
   output_state = gst_video_decoder_get_output_state (GST_VIDEO_DECODER (vtdec));
-  gst_video_texture_cache_set_format (vtdec->texture_cache,
-      GST_VIDEO_FORMAT_NV12, output_state->caps);
+  gst_video_texture_cache_set_format (vtdec->texture_cache, format,
+      output_state->caps);
   gst_video_codec_state_unref (output_state);
+}
+
+/*
+ * Unconditionally output a high bit-depth + alpha format when decoding Apple
+ * ProRes video if downstream supports it.
+ * TODO: read src_pix_fmt to get the preferred output format
+ * https://wiki.multimedia.cx/index.php/Apple_ProRes#Frame_header
+ */
+static GstVideoFormat
+get_preferred_video_format (GstStructure * s, gboolean prores)
+{
+  const GValue *list = gst_structure_get_value (s, "format");
+  guint i, size = gst_value_list_get_size (list);
+  for (i = 0; i < size; i++) {
+    const GValue *value = gst_value_list_get_value (list, i);
+    const char *fmt = g_value_get_string (value);
+    GstVideoFormat vfmt = gst_video_format_from_string (fmt);
+    switch (vfmt) {
+      case GST_VIDEO_FORMAT_NV12:
+        if (!prores)
+          return vfmt;
+        break;
+      case GST_VIDEO_FORMAT_AYUV64:
+      case GST_VIDEO_FORMAT_ARGB64_BE:
+        if (prores)
+          return vfmt;
+        break;
+      case GST_VIDEO_FORMAT_RGBA64_LE:
+        if (GST_VTUTIL_HAVE_64RGBALE) {
+          if (prores)
+            return vfmt;
+        } else {
+          /* Codepath will never be hit on macOS older than Big Sur (11.3) */
+          g_warn_if_reached ();
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  return GST_VIDEO_FORMAT_UNKNOWN;
 }
 
 static gboolean
@@ -249,9 +319,7 @@ gst_vtdec_negotiate (GstVideoDecoder * decoder)
 {
   GstVideoCodecState *output_state = NULL;
   GstCaps *peercaps = NULL, *caps = NULL, *templcaps = NULL, *prevcaps = NULL;
-  GstVideoFormat format;
-  GstStructure *structure;
-  const gchar *s;
+  GstVideoFormat format = GST_VIDEO_FORMAT_UNKNOWN;
   GstVtdec *vtdec;
   OSStatus err = noErr;
   GstCapsFeatures *features = NULL;
@@ -290,9 +358,30 @@ gst_vtdec_negotiate (GstVideoDecoder * decoder)
   gst_caps_unref (peercaps);
 
   caps = gst_caps_truncate (gst_caps_make_writable (caps));
-  structure = gst_caps_get_structure (caps, 0);
-  s = gst_structure_get_string (structure, "format");
-  format = gst_video_format_from_string (s);
+
+  /* Try to use whatever video format downstream prefers */
+  {
+    GstStructure *s = gst_caps_get_structure (caps, 0);
+
+    if (gst_structure_has_field_typed (s, "format", GST_TYPE_LIST)) {
+      GstStructure *is = gst_caps_get_structure (vtdec->input_state->caps, 0);
+      const char *name = gst_structure_get_name (is);
+      format = get_preferred_video_format (s,
+          g_strcmp0 (name, "video/x-prores") == 0);
+    }
+
+    if (format == GST_VIDEO_FORMAT_UNKNOWN) {
+      const char *fmt;
+      gst_structure_fixate_field (s, "format");
+      fmt = gst_structure_get_string (s, "format");
+      if (fmt)
+        format = gst_video_format_from_string (fmt);
+      else
+        /* If all fails, just use NV12 */
+        format = GST_VIDEO_FORMAT_NV12;
+    }
+  }
+
   features = gst_caps_get_features (caps, 0);
   if (features)
     features = gst_caps_features_copy (features);
@@ -383,7 +472,7 @@ gst_vtdec_negotiate (GstVideoDecoder * decoder)
       if (!vtdec->texture_cache) {
         vtdec->texture_cache =
             gst_video_texture_cache_gl_new (vtdec->ctxh->context);
-        setup_texture_cache (vtdec);
+        setup_texture_cache (vtdec, format);
       }
     }
 #if defined(APPLEMEDIA_MOLTENVK)
@@ -420,7 +509,7 @@ gst_vtdec_negotiate (GstVideoDecoder * decoder)
       if (!vtdec->texture_cache) {
         vtdec->texture_cache =
             gst_video_texture_cache_vulkan_new (vtdec->device);
-        setup_texture_cache (vtdec);
+        setup_texture_cache (vtdec, format);
       }
     }
 #endif
@@ -450,13 +539,27 @@ gst_vtdec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
   caps_name = gst_structure_get_name (structure);
   if (!strcmp (caps_name, "video/x-h264")) {
     cm_format = kCMVideoCodecType_H264;
+  } else if (!strcmp (caps_name, "video/x-h265")) {
+    cm_format = kCMVideoCodecType_HEVC;
   } else if (!strcmp (caps_name, "video/mpeg")) {
     cm_format = kCMVideoCodecType_MPEG2Video;
   } else if (!strcmp (caps_name, "image/jpeg")) {
     cm_format = kCMVideoCodecType_JPEG;
+  } else if (!strcmp (caps_name, "video/x-prores")) {
+    const char *variant = gst_structure_get_string (structure, "variant");
+
+    if (variant)
+      cm_format = gst_vtutil_codec_type_from_prores_variant (variant);
+
+    if (cm_format == GST_kCMVideoCodecType_Some_AppleProRes) {
+      GST_ERROR_OBJECT (vtdec, "Invalid ProRes variant %s", variant);
+      return FALSE;
+    }
   }
 
-  if (cm_format == kCMVideoCodecType_H264 && state->codec_data == NULL) {
+  if ((cm_format == kCMVideoCodecType_H264
+          || cm_format == kCMVideoCodecType_HEVC)
+      && state->codec_data == NULL) {
     GST_INFO_OBJECT (vtdec, "no codec data, wait for one");
     return TRUE;
   }
@@ -513,7 +616,7 @@ gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
 {
   OSStatus status;
   CMSampleBufferRef cm_sample_buffer = NULL;
-  VTDecodeFrameFlags input_flags, output_flags;
+  VTDecodeFrameFlags input_flags;
   GstVtdec *vtdec = GST_VTDEC (decoder);
   GstFlowReturn ret = GST_FLOW_OK;
   int decode_frame_number = frame->decode_frame_number;
@@ -534,7 +637,6 @@ gst_vtdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
    * reordering ourselves.
    */
   input_flags = kVTDecodeFrame_EnableAsynchronousDecompression;
-  output_flags = 0;
 
   cm_sample_buffer =
       cm_sample_buffer_from_gst_buffer (vtdec, frame->input_buffer);
@@ -584,11 +686,22 @@ gst_vtdec_create_session (GstVtdec * vtdec, GstVideoFormat format,
     case GST_VIDEO_FORMAT_NV12:
       cv_format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
       break;
-    case GST_VIDEO_FORMAT_UYVY:
-      cv_format = kCVPixelFormatType_422YpCbCr8;
+    case GST_VIDEO_FORMAT_AYUV64:
+/* This is fine for now because Apple only ships LE devices */
+#if G_BYTE_ORDER != G_LITTLE_ENDIAN
+#error "AYUV64 is NE but kCVPixelFormatType_4444AYpCbCr16 is LE"
+#endif
+      cv_format = kCVPixelFormatType_4444AYpCbCr16;
       break;
-    case GST_VIDEO_FORMAT_RGBA:
-      cv_format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    case GST_VIDEO_FORMAT_ARGB64_BE:
+      cv_format = kCVPixelFormatType_64ARGB;
+      break;
+    case GST_VIDEO_FORMAT_RGBA64_LE:
+      if (GST_VTUTIL_HAVE_64RGBALE)
+        cv_format = kCVPixelFormatType_64RGBALE;
+      else
+        /* Codepath will never be hit on macOS older than Big Sur (11.3) */
+        g_warn_if_reached ();
       break;
     default:
       g_warn_if_reached ();
@@ -683,7 +796,12 @@ create_format_description_from_codec_data (GstVtdec * vtdec,
   gst_buffer_map (codec_data, &map, GST_MAP_READ);
   atoms = CFDictionaryCreateMutable (NULL, 0, &kCFTypeDictionaryKeyCallBacks,
       &kCFTypeDictionaryValueCallBacks);
-  gst_vtutil_dict_set_data (atoms, CFSTR ("avcC"), map.data, map.size);
+
+  if (cm_format == kCMVideoCodecType_HEVC)
+    gst_vtutil_dict_set_data (atoms, CFSTR ("hvcC"), map.data, map.size);
+  else
+    gst_vtutil_dict_set_data (atoms, CFSTR ("avcC"), map.data, map.size);
+
   gst_vtutil_dict_set_object (extensions,
       CFSTR ("SampleDescriptionExtensionAtoms"), (CFTypeRef *) atoms);
   gst_buffer_unmap (codec_data, &map);
@@ -915,7 +1033,7 @@ gst_vtdec_push_frames_if_needed (GstVtdec * vtdec, gboolean drain,
     }
   }
 
-  if (drain)
+  if (drain || flush)
     VTDecompressionSessionWaitForAsynchronousFrames (vtdec->session);
 
   /* push a buffer if there are enough frames to guarantee that we push in PTS
@@ -929,12 +1047,16 @@ gst_vtdec_push_frames_if_needed (GstVtdec * vtdec, gboolean drain,
      * example) or we're draining/flushing
      */
     if (frame) {
-      if (flush || frame->flags & VTDEC_FRAME_FLAG_SKIP)
+      if (frame->flags & VTDEC_FRAME_FLAG_ERROR) {
         gst_video_decoder_release_frame (decoder, frame);
-      else if (frame->flags & VTDEC_FRAME_FLAG_DROP)
+        ret = GST_FLOW_ERROR;
+      } else if (flush || frame->flags & VTDEC_FRAME_FLAG_SKIP) {
+        gst_video_decoder_release_frame (decoder, frame);
+      } else if (frame->flags & VTDEC_FRAME_FLAG_DROP) {
         gst_video_decoder_drop_frame (decoder, frame);
-      else
+      } else {
         ret = gst_video_decoder_finish_frame (decoder, frame);
+      }
     }
 
     if (!frame || ret != GST_FLOW_OK)
@@ -942,54 +1064,6 @@ gst_vtdec_push_frames_if_needed (GstVtdec * vtdec, gboolean drain,
   }
 
   return ret;
-}
-
-static gboolean
-parse_h264_profile_and_level_from_codec_data (GstVtdec * vtdec,
-    GstBuffer * codec_data, int *profile, int *level)
-{
-  GstMapInfo map;
-  guint8 *data;
-  gint size;
-  gboolean ret = TRUE;
-
-  gst_buffer_map (codec_data, &map, GST_MAP_READ);
-  data = map.data;
-  size = map.size;
-
-  /* parse the avcC data */
-  if (size < 7)
-    goto avcc_too_small;
-
-  /* parse the version, this must be 1 */
-  if (data[0] != 1)
-    goto wrong_version;
-
-  /* AVCProfileIndication */
-  /* profile_compat */
-  /* AVCLevelIndication */
-  if (profile)
-    *profile = data[1];
-
-  if (level)
-    *level = data[3];
-
-out:
-  gst_buffer_unmap (codec_data, &map);
-
-  return ret;
-
-avcc_too_small:
-  GST_ELEMENT_ERROR (vtdec, STREAM, DECODE, (NULL),
-      ("invalid codec_data buffer length"));
-  ret = FALSE;
-  goto out;
-
-wrong_version:
-  GST_ELEMENT_ERROR (vtdec, STREAM, DECODE, (NULL),
-      ("wrong avcC version in codec_data"));
-  ret = FALSE;
-  goto out;
 }
 
 static int
@@ -1039,50 +1113,162 @@ gst_vtdec_compute_reorder_queue_length (GstVtdec * vtdec,
             &vtdec->reorder_queue_length)) {
       return FALSE;
     }
+  } else if (cm_format == kCMVideoCodecType_HEVC) {
+    if (!compute_hevc_decode_picture_buffer_length (vtdec, codec_data,
+            &vtdec->reorder_queue_length)) {
+      return FALSE;
+    }
   } else {
     vtdec->reorder_queue_length = 0;
   }
 
+  GST_DEBUG_OBJECT (vtdec, "Reorder queue length: %d",
+      vtdec->reorder_queue_length);
+  return TRUE;
+}
+
+static gboolean
+parse_h264_decoder_config_record (GstVtdec * vtdec, GstBuffer * codec_data,
+    GstH264DecoderConfigRecord ** config)
+{
+  GstH264NalParser *parser = gst_h264_nal_parser_new ();
+  GstMapInfo map;
+  gboolean ret = TRUE;
+
+  gst_buffer_map (codec_data, &map, GST_MAP_READ);
+
+  if (gst_h264_parser_parse_decoder_config_record (parser, map.data, map.size,
+          config) != GST_H264_PARSER_OK) {
+    GST_WARNING_OBJECT (vtdec, "Failed to parse codec-data");
+    ret = FALSE;
+  }
+
+  gst_h264_nal_parser_free (parser);
+  gst_buffer_unmap (codec_data, &map);
+  return ret;
+}
+
+static gboolean
+get_h264_dpb_size_from_sps (GstVtdec * vtdec, GstH264NalUnit * nalu,
+    gint * dpb_size)
+{
+  GstH264ParserResult result;
+  GstH264SPS sps;
+  gint width_mb, height_mb;
+  gint max_dpb_frames, max_dpb_size, max_dpb_mbs;
+
+  result = gst_h264_parse_sps (nalu, &sps);
+  if (result != GST_H264_PARSER_OK) {
+    GST_WARNING_OBJECT (vtdec, "Failed to parse SPS, result %d", result);
+    return FALSE;
+  }
+
+  max_dpb_mbs = get_dpb_max_mb_s_from_level (vtdec, sps.level_idc);
+  if (max_dpb_mbs == -1) {
+    GST_ELEMENT_ERROR (vtdec, STREAM, DECODE, (NULL),
+        ("invalid level found in SPS, could not compute max_dpb_mbs"));
+    gst_h264_sps_clear (&sps);
+    return FALSE;
+  }
+
+  /* This formula is specified in sections A.3.1.h and A.3.2.f of the 2009
+   * edition of the standard */
+  width_mb = sps.width / 16;
+  height_mb = sps.height / 16;
+  max_dpb_frames = MIN (max_dpb_mbs / (width_mb * height_mb),
+      GST_VTDEC_DPB_MAX_SIZE);
+
+  if (sps.vui_parameters_present_flag
+      && sps.vui_parameters.bitstream_restriction_flag)
+    max_dpb_frames = MAX (1, sps.vui_parameters.max_dec_frame_buffering);
+
+  /* Some non-conforming H264 streams may request a number of frames 
+   * larger than the calculated limit.
+   * See https://chromium-review.googlesource.com/c/chromium/src/+/760276/
+   */
+  max_dpb_size = MAX (max_dpb_frames, sps.num_ref_frames);
+  if (max_dpb_size > GST_VTDEC_DPB_MAX_SIZE) {
+    GST_WARNING_OBJECT (vtdec, "Too large calculated DPB size %d",
+        max_dpb_size);
+    max_dpb_size = GST_VTDEC_DPB_MAX_SIZE;
+  }
+
+  *dpb_size = max_dpb_size;
+
+  gst_h264_sps_clear (&sps);
   return TRUE;
 }
 
 static gboolean
 compute_h264_decode_picture_buffer_length (GstVtdec * vtdec,
-    GstBuffer * codec_data, int *length)
+    GstBuffer * codec_data, gint * length)
 {
-  int profile, level;
-  int dpb_mb_size = 16;
-  int max_dpb_size_frames = 16;
-  int max_dpb_mb_s = -1;
-  int width_in_mb_s = GST_ROUND_UP_16 (vtdec->video_info.width) / dpb_mb_size;
-  int height_in_mb_s = GST_ROUND_UP_16 (vtdec->video_info.height) / dpb_mb_size;
+  GstH264DecoderConfigRecord *config = NULL;
+  GstH264NalUnit *nalu;
+  guint8 profile, level;
+  gboolean ret = TRUE;
+  gint new_length;
+  guint i;
 
   *length = 0;
-
-  if (!parse_h264_profile_and_level_from_codec_data (vtdec, codec_data,
-          &profile, &level))
-    return FALSE;
 
   if (vtdec->video_info.width == 0 || vtdec->video_info.height == 0)
     return FALSE;
 
+  if (!parse_h264_decoder_config_record (vtdec, codec_data, &config))
+    return FALSE;
+
+  profile = config->profile_indication;
+  level = config->level_indication;
   GST_INFO_OBJECT (vtdec, "parsed profile %d, level %d", profile, level);
+
   if (profile == 66) {
     /* baseline or constrained-baseline, we don't need to reorder */
-    return TRUE;
+    goto out;
   }
 
-  max_dpb_mb_s = get_dpb_max_mb_s_from_level (vtdec, level);
-  if (max_dpb_mb_s == -1) {
-    GST_ELEMENT_ERROR (vtdec, STREAM, DECODE, (NULL),
-        ("invalid level in codec_data, could not compute max_dpb_mb_s"));
+  for (i = 0; i < config->sps->len; i++) {
+    nalu = &g_array_index (config->sps, GstH264NalUnit, i);
+
+    if (nalu->type != GST_H264_NAL_SPS)
+      continue;
+
+    if (!get_h264_dpb_size_from_sps (vtdec, nalu, &new_length))
+      GST_WARNING_OBJECT (vtdec, "Failed to get DPB size from SPS");
+    else
+      *length = MAX (*length, new_length);
+  }
+
+out:
+  gst_h264_decoder_config_record_free (config);
+  return ret;
+}
+
+static gboolean
+compute_hevc_decode_picture_buffer_length (GstVtdec * vtdec,
+    GstBuffer * codec_data, int *length)
+{
+  /* This value should be level dependent (table A.8)
+   * but let's assume the maximum possible one for simplicity. */
+  const gint max_luma_ps = 35651584;
+  const gint max_dpb_pic_buf = 6;
+  gint max_dbp_size, pic_size_samples_y;
+
+  if (vtdec->video_info.width == 0 || vtdec->video_info.height == 0)
     return FALSE;
-  }
 
-  /* this formula is specified in sections A.3.1.h and A.3.2.f of the 2009
-   * edition of the standard */
-  *length = MIN (floor (max_dpb_mb_s / (width_in_mb_s * height_in_mb_s)),
-      max_dpb_size_frames);
+  /* A.4.2 */
+  pic_size_samples_y = vtdec->video_info.width * vtdec->video_info.height;
+  if (pic_size_samples_y <= (max_luma_ps >> 2))
+    max_dbp_size = max_dpb_pic_buf * 4;
+  else if (pic_size_samples_y <= (max_luma_ps >> 1))
+    max_dbp_size = max_dpb_pic_buf * 2;
+  else if (pic_size_samples_y <= ((3 * max_luma_ps) >> 2))
+    max_dbp_size = (max_dpb_pic_buf * 4) / 3;
+  else
+    max_dbp_size = max_dpb_pic_buf;
+
+  *length = MIN (max_dbp_size, 16);
   return TRUE;
 }
 

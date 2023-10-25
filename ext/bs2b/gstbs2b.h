@@ -40,6 +40,7 @@ G_BEGIN_DECLS
 typedef struct _GstBs2b GstBs2b;
 typedef struct _GstBs2bClass GstBs2bClass;
 
+typedef void (*GstBs2bProcessFunc)(t_bs2bdp bs2bdp, void *sample, int n);
 
 struct _GstBs2b
 {
@@ -48,7 +49,7 @@ struct _GstBs2b
   /*< private > */
   GMutex bs2b_lock;
   t_bs2bdp bs2bdp;
-  void (*func) ();
+  GstBs2bProcessFunc func;
   guint bytes_per_sample;
 };
 
@@ -58,6 +59,8 @@ struct _GstBs2bClass
 };
 
 GType gst_bs2b_get_type (void);
+
+GST_ELEMENT_REGISTER_DECLARE (bs2b);
 
 G_END_DECLS
 #endif /* __GST_BS2B_H__ */

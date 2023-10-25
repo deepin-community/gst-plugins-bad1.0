@@ -52,7 +52,6 @@ G_BEGIN_DECLS
 #define GST_AV1_SUPERRES_DENOM_MIN             9
 #define GST_AV1_SUPERRES_DENOM_BITS            3
 #define GST_AV1_MAX_LOOP_FILTER                63
-#define GST_AV1_GM_ABS_ALPHA_BITS              12
 #define GST_AV1_GM_ABS_TRANS_BITS              12
 #define GST_AV1_GM_ABS_TRANS_ONLY_BITS         9
 #define GST_AV1_GM_ABS_ALPHA_BITS              12
@@ -60,6 +59,7 @@ G_BEGIN_DECLS
 #define GST_AV1_GM_TRANS_PREC_BITS             6
 #define GST_AV1_GM_TRANS_ONLY_PREC_BITS        3
 #define GST_AV1_WARPEDMODEL_PREC_BITS          16
+#define GST_AV1_WARP_PARAM_REDUCE_BITS         6
 #define GST_AV1_SELECT_SCREEN_CONTENT_TOOLS    2
 #define GST_AV1_SELECT_INTEGER_MV              2
 #define GST_AV1_RESTORATION_TILESIZE_MAX       256
@@ -79,6 +79,11 @@ G_BEGIN_DECLS
 #define GST_AV1_MAX_NUM_CR_POINTS              16
 #define GST_AV1_MAX_NUM_POS_LUMA               25
 #define GST_AV1_MAX_NUM_PLANES                 3
+
+#define GST_AV1_DIV_LUT_PREC_BITS              14
+#define GST_AV1_DIV_LUT_BITS                   8
+#define GST_AV1_DIV_LUT_NUM                    (1 << GST_AV1_DIV_LUT_BITS)
+
 
 typedef struct _GstAV1Parser GstAV1Parser;
 
@@ -137,13 +142,22 @@ typedef enum {
  * @GST_AV1_PROFILE_0: 8-bit and 10-bit 4:2:0 and 4:0:0 only.
  * @GST_AV1_PROFILE_1: 8-bit and 10-bit 4:4:4.
  * @GST_AV1_PROFILE_2: 8-bit and 10-bit 4:2:2, 12-bit 4:0:0 4:2:2 and 4:4:4
+ * @GST_AV1_PROFILE_UNDEFINED: unknow AV1 profile (Since: 1.20)
  *
  * Defines the AV1 profiles
+ */
+/**
+ * GST_AV1_PROFILE_UNDEFINED:
+ *
+ * unknow AV1 profile
+ *
+ * Since: 1.20
  */
 typedef enum {
   GST_AV1_PROFILE_0 = 0,
   GST_AV1_PROFILE_1 = 1,
   GST_AV1_PROFILE_2 = 2,
+  GST_AV1_PROFILE_UNDEFINED,
 } GstAV1Profile;
 
 /**
@@ -1087,8 +1101,8 @@ struct _GstAV1LoopFilterParams {
   gboolean loop_filter_delta_enabled;
   gboolean loop_filter_delta_update;
 
-  guint8 loop_filter_ref_deltas[GST_AV1_TOTAL_REFS_PER_FRAME];
-  guint8 loop_filter_mode_deltas[2];
+  gint8 loop_filter_ref_deltas[GST_AV1_TOTAL_REFS_PER_FRAME];
+  gint8 loop_filter_mode_deltas[2];
 
   gboolean delta_lf_present;
   guint8 delta_lf_res;
@@ -1258,6 +1272,14 @@ struct _GstAV1LoopRestorationParams {
  * @gm_params: is set equal to SavedGmParams[ frame_to_show_map_idx ][ ref ][ j ] for
  *   ref = LAST_FRAME..ALTREF_FRAME, for j = 0..5.
  * @gm_type: specifying the type of global motion.
+ * @invalid: whether this global motion parameters is invalid. (Since: 1.20)
+ */
+/**
+ * _GstAV1GlobalMotionParams.invalid:
+ *
+ * whether this global motion parameters is invalid.
+ *
+ * Since: 1.20
  */
 struct _GstAV1GlobalMotionParams {
   gboolean is_global[GST_AV1_NUM_REF_FRAMES];
@@ -1266,6 +1288,7 @@ struct _GstAV1GlobalMotionParams {
   gint32 gm_params[GST_AV1_NUM_REF_FRAMES][6];
 
   GstAV1WarpModelType gm_type[GST_AV1_NUM_REF_FRAMES]; /* GmType */
+  gboolean invalid[GST_AV1_NUM_REF_FRAMES];
 };
 
 /**
@@ -1370,10 +1393,10 @@ struct _GstAV1FilmGrainParams {
   guint8 grain_scale_shift;
   guint8 cb_mult;
   guint8 cb_luma_mult;
-  guint8 cb_offset;
+  guint16 cb_offset;
   guint8 cr_mult;
   guint8 cr_luma_mult;
-  guint8 cr_offset;
+  guint16 cr_offset;
   gboolean overlap_flag;
   gboolean clip_to_restricted_range;
 };
@@ -1398,7 +1421,7 @@ struct _GstAV1FilmGrainParams {
  *   of bitstream conformance that whenever @display_frame_id is read, the value matches
  *   @ref_frame_id[ @frame_to_show_map_idx ] (the value of @current_frame_id at the time that the
  *   frame indexed by @frame_to_show_map_idx was stored), and that
- *   @ref_valid[ @frame_to_show_map_idx ] is equjal to 1. It is a requirement of bitstream
+ *   @ref_valid[ @frame_to_show_map_idx ] is equal to 1. It is a requirement of bitstream
  *   conformance that the number of bits needed to read @display_frame_id does not exceed 16.
  *   This is equivalent to the constraint that idLen <= 16
  * @frame_type: specifies the type of the frame.
@@ -1516,7 +1539,7 @@ struct _GstAV1FilmGrainParams {
  */
 struct _GstAV1FrameHeaderOBU {
   gboolean show_existing_frame;
-  guint8 frame_to_show_map_idx;
+  gint8 frame_to_show_map_idx;
   guint32 frame_presentation_time;
   guint32 tu_presentation_delay;
   guint32 display_frame_id;
@@ -1537,9 +1560,9 @@ struct _GstAV1FrameHeaderOBU {
   guint32 ref_order_hint[GST_AV1_NUM_REF_FRAMES];
   gboolean allow_intrabc;
   gboolean frame_refs_short_signaling;
-  guint8 last_frame_idx;
-  guint8 gold_frame_idx;
-  guint8 ref_frame_idx[GST_AV1_REFS_PER_FRAME];
+  gint8 last_frame_idx;
+  gint8 gold_frame_idx;
+  gint8 ref_frame_idx[GST_AV1_REFS_PER_FRAME];
   gboolean allow_high_precision_mv;
   gboolean is_motion_mode_switchable;
   gboolean use_ref_frame_mvs;
@@ -1636,7 +1659,7 @@ struct _GstAV1TileListOBU {
   guint8 output_frame_height_in_tiles_minus_1;
   guint16 tile_count_minus_1;
   struct {
-    guint8 anchor_frame_idx;
+    gint8 anchor_frame_idx;
     guint8 anchor_tile_row;
     guint8 anchor_tile_col;
     guint16 tile_data_size_minus_1;
@@ -1659,6 +1682,10 @@ struct _GstAV1TileListOBU {
  *   It is a requirement of bitstream conformance that the value of tg_end is greater
  *   than or equal to tg_start. It is a requirement of bitstream conformance that the
  *   value of tg_end for the last tile group in each frame is equal to num_tiles-1.
+ * @tile_offset: Offset from the OBU data, the real data start of this tile.
+ * @tg_size: Data size of this tile.
+ * @tile_row: Tile index in row.
+ * @tile_col: Tile index in column.
  * @mi_row_start: start position in mi rows
  * @mi_row_end: end position in mi rows
  * @mi_col_start: start position in mi cols
@@ -1670,6 +1697,10 @@ struct _GstAV1TileGroupOBU {
   guint8 tg_start;
   guint8 tg_end;
   struct {
+    guint32 tile_offset; /* Tile data offset from the OBU data. */
+    guint32 tile_size; /* Data size of this tile */
+    guint32 tile_row; /* tileRow */
+    guint32 tile_col; /* tileCol */
     /* global varialbes */
     guint32 mi_row_start; /* MiRowStart */
     guint32 mi_row_end; /* MiRowEnd */
@@ -1746,6 +1777,10 @@ void
 gst_av1_parser_reset (GstAV1Parser * parser, gboolean annex_b);
 
 GST_CODEC_PARSERS_API
+void
+gst_av1_parser_reset_annex_b (GstAV1Parser * parser);
+
+GST_CODEC_PARSERS_API
 GstAV1ParserResult
 gst_av1_parser_identify_one_obu (GstAV1Parser * parser, const guint8 * data,
     guint32 size, GstAV1OBU * obu, guint32 * consumed);
@@ -1787,13 +1822,13 @@ gst_av1_parser_parse_frame_obu (GstAV1Parser * parser, GstAV1OBU * obu,
 
 GST_CODEC_PARSERS_API
 GstAV1ParserResult
-gst_av1_parser_reference_frame_loading (GstAV1Parser * parser,
+gst_av1_parser_reference_frame_update (GstAV1Parser * parser,
     GstAV1FrameHeaderOBU * frame_header);
 
 GST_CODEC_PARSERS_API
 GstAV1ParserResult
-gst_av1_parser_reference_frame_update (GstAV1Parser * parser,
-    GstAV1FrameHeaderOBU * frame_header);
+gst_av1_parser_set_operating_point (GstAV1Parser * parser,
+    gint32 operating_point);
 
 GST_CODEC_PARSERS_API
 GstAV1Parser * gst_av1_parser_new (void);

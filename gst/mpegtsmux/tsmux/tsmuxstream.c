@@ -1,10 +1,9 @@
 /*
  * Copyright 2006 BBC and Fluendo S.A.
  *
- * This library is licensed under 4 different licenses and you
+ * This library is licensed under 3 different licenses and you
  * can choose to use it under the terms of any one of them. The
- * four licenses are the MPL 1.1, the LGPL, the GPL and the MIT
- * license.
+ * three licenses are the MPL 1.1, the LGPL, and the MIT license.
  *
  * MPL:
  *
@@ -35,22 +34,6 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  *
- * GPL:
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.
- *
  * MIT:
  *
  * Unless otherwise indicated, Source Code is licensed under MIT license.
@@ -75,6 +58,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  *
+ * SPDX-License-Identifier: MPL-1.1 OR MIT OR LGPL-2.0-or-later
  */
 
 #ifdef HAVE_CONFIG_H
@@ -133,7 +117,7 @@ tsmux_stream_new (guint16 pid, guint stream_type)
   stream->pes_payload_size = 0;
   stream->cur_pes_payload_size = 0;
   stream->pes_bytes_written = 0;
-  stream->program_array_index = -1;
+  stream->pmt_index = -1;
 
   switch (stream_type) {
     case TSMUX_ST_VIDEO_MPEG1:
@@ -719,7 +703,7 @@ tsmux_stream_write_pes_header (TsMuxStream * stream, guint8 * data)
  *
  * Submit @len bytes of @data into @stream. @pts and @dts can be set to the
  * timestamp (against a 90Hz clock) of the first access unit in @data. A
- * timestamp of GST_CLOCK_STIME_NNOE for @pts or @dts means unknown.
+ * timestamp of GST_CLOCK_STIME_NONE for @pts or @dts means unknown.
  *
  * @user_data will be passed to the release function as set with
  * tsmux_stream_set_buffer_release_func() when @data can be freed.

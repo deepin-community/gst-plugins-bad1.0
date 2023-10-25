@@ -975,7 +975,15 @@ gst_vulkan_instance_open (GstVulkanInstance * instance, GError ** error)
   if (gst_vulkan_error_to_g_error (err, error,
           "vkEnumeratePhysicalDevices") < 0)
     goto error;
-  g_assert (instance->n_physical_devices > 0);
+
+  if (instance->n_physical_devices == 0) {
+    GST_WARNING_OBJECT (instance, "No available physical device");
+    g_set_error_literal (error,
+        GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_NOT_FOUND,
+        "No available physical device");
+    goto error;
+  }
+
   instance->physical_devices =
       g_new0 (VkPhysicalDevice, instance->n_physical_devices);
   err =
@@ -1063,7 +1071,7 @@ error:
  *
  * Performs `vkGetInstanceProcAddr()` with @instance and @name
  *
- * Returns: the function pointer for @name or %NULL
+ * Returns: (nullable): the function pointer for @name or %NULL
  *
  * Since: 1.18
  */
@@ -1087,6 +1095,7 @@ gst_vulkan_instance_get_proc_address (GstVulkanInstance * instance,
 /**
  * gst_vulkan_instance_create_device:
  * @instance: a #GstVulkanInstance
+ * @error: (optional): a #GError
  *
  * Returns: (transfer full): a new #GstVulkanDevice
  *
@@ -1292,9 +1301,9 @@ gst_vulkan_instance_check_version (GstVulkanInstance * instance,
 /**
  * gst_vulkan_instance_get_version:
  * @instance: a #GstVulkanInstance
- * @major: major version
- * @minor: minor version
- * @patch: patch version
+ * @major: (out): major version
+ * @minor: (out): minor version
+ * @patch: (out): patch version
  *
  * Retrieve the vulkan instance configured version.  Only returns the supported
  * API version by the instance without taking into account the requested API

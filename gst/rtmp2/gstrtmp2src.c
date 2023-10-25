@@ -36,6 +36,7 @@
 #include "config.h"
 #endif
 
+#include "gstrtmp2elements.h"
 #include "gstrtmp2src.h"
 
 #include "gstrtmp2locationhandler.h"
@@ -157,6 +158,8 @@ G_DEFINE_TYPE_WITH_CODE (GstRtmp2Src, gst_rtmp2_src, GST_TYPE_PUSH_SRC,
     G_IMPLEMENT_INTERFACE (GST_TYPE_URI_HANDLER,
         gst_rtmp2_src_uri_handler_init);
     G_IMPLEMENT_INTERFACE (GST_TYPE_RTMP_LOCATION_HANDLER, NULL));
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (rtmp2src, "rtmp2src",
+    GST_RANK_PRIMARY + 1, GST_TYPE_RTMP2_SRC, rtmp2_element_init (plugin));
 
 static void
 gst_rtmp2_src_class_init (GstRtmp2SrcClass * klass)
@@ -680,6 +683,8 @@ gst_rtmp2_src_create (GstBaseSrc * src, guint64 offset, guint size,
     self->sent_header = TRUE;
   }
 
+  GST_BUFFER_DTS (buffer) = self->last_ts;
+
   *outbuf = buffer;
 
   gst_buffer_unref (message);
@@ -912,13 +917,15 @@ out:
 }
 
 static void
-error_callback (GstRtmpConnection * connection, GstRtmp2Src * self)
+error_callback (GstRtmpConnection * connection, const GError * error,
+    GstRtmp2Src * self)
 {
   g_mutex_lock (&self->lock);
   if (self->cancellable) {
     g_cancellable_cancel (self->cancellable);
   } else if (self->loop) {
-    GST_INFO_OBJECT (self, "Connection error");
+    GST_INFO_OBJECT (self, "Connection error: %s %d %s",
+        g_quark_to_string (error->domain), error->code, error->message);
     stop_task (self);
   }
   g_mutex_unlock (&self->lock);
@@ -947,26 +954,23 @@ send_connect_error (GstRtmp2Src * self, GError * error)
   }
 
   if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-    GST_DEBUG_OBJECT (self, "Connection was cancelled (%s)",
-        GST_STR_NULL (error->message));
+    GST_DEBUG_OBJECT (self, "Connection was cancelled: %s", error->message);
     return;
   }
 
-  GST_ERROR_OBJECT (self, "Failed to connect (%s:%d): %s",
-      g_quark_to_string (error->domain), error->code,
-      GST_STR_NULL (error->message));
+  GST_ERROR_OBJECT (self, "Failed to connect: %s %d %s",
+      g_quark_to_string (error->domain), error->code, error->message);
 
   if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED)) {
     GST_ELEMENT_ERROR (self, RESOURCE, NOT_AUTHORIZED,
-        ("Not authorized to connect"), ("%s", GST_STR_NULL (error->message)));
+        ("Not authorized to connect: %s", error->message), (NULL));
   } else if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CONNECTION_REFUSED)) {
     GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ,
-        ("Could not connect"), ("%s", GST_STR_NULL (error->message)));
+        ("Connection refused: %s", error->message), (NULL));
   } else {
     GST_ELEMENT_ERROR (self, RESOURCE, FAILED,
-        ("Failed to connect"),
-        ("error %s:%d: %s", g_quark_to_string (error->domain), error->code,
-            GST_STR_NULL (error->message)));
+        ("Failed to connect: %s", error->message),
+        ("domain %s, code %d", g_quark_to_string (error->domain), error->code));
   }
 }
 

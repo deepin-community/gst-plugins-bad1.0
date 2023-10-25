@@ -32,6 +32,7 @@
 
 //#include <gst/video/videooverlay.h>
 
+#include "gstvulkanelements.h"
 #include "vksink.h"
 
 GST_DEBUG_CATEGORY (gst_debug_vulkan_sink);
@@ -108,6 +109,8 @@ G_DEFINE_TYPE_WITH_CODE (GstVulkanSink, gst_vulkan_sink,
         gst_vulkan_sink_video_overlay_init);
     G_IMPLEMENT_INTERFACE (GST_TYPE_NAVIGATION,
         gst_vulkan_sink_navigation_interface_init));
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (vulkansink, "vulkansink", GST_RANK_NONE,
+    GST_TYPE_VULKAN_SINK, vulkan_element_init (plugin));
 
 static void
 gst_vulkan_sink_class_init (GstVulkanSinkClass * klass)
@@ -143,7 +146,7 @@ gst_vulkan_sink_class_init (GstVulkanSinkClass * klass)
           GST_TYPE_VULKAN_DEVICE, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_metadata (element_class, "Vulkan video sink",
-      "Sink/Video", "A videosink based on OpenGL",
+      "Sink/Video", "A videosink based on Vulkan",
       "Matthew Waters <matthew@centricular.com>");
 
   gst_element_class_add_static_pad_template (element_class,
@@ -629,69 +632,91 @@ _display_size_to_stream_size (GstVulkanSink * vk_sink,
 
 static void
 gst_vulkan_sink_navigation_send_event (GstNavigation * navigation,
-    GstStructure * structure)
+    GstEvent * event)
 {
   GstVulkanSink *vk_sink = GST_VULKAN_SINK (navigation);
   GstVideoRectangle display_rect;
-  GstEvent *event = NULL;
+  gboolean handled;
   gdouble x, y;
 
   if (!vk_sink->swapper || !vk_sink->swapper->window) {
-    gst_structure_free (structure);
+    gst_event_unref (event);
     return;
   }
+
+  event = gst_event_make_writable (event);
 
   gst_vulkan_swapper_get_surface_rectangles (vk_sink->swapper, NULL, NULL,
       &display_rect);
 
   /* Converting pointer coordinates to the non scaled geometry */
   if (display_rect.w != 0 && display_rect.h != 0
-      && gst_structure_get_double (structure, "pointer_x", &x)
-      && gst_structure_get_double (structure, "pointer_y", &y)) {
+      && gst_navigation_event_get_coordinates (event, &x, &y)) {
     gdouble stream_x, stream_y;
 
     _display_size_to_stream_size (vk_sink, &display_rect, x, y, &stream_x,
         &stream_y);
-
-    gst_structure_set (structure, "pointer_x", G_TYPE_DOUBLE,
-        stream_x, "pointer_y", G_TYPE_DOUBLE, stream_y, NULL);
+    gst_navigation_event_set_coordinates (event, stream_x, stream_y);
   }
 
-  event = gst_event_new_navigation (structure);
-  if (event) {
-    gboolean handled;
+  gst_event_ref (event);
+  handled = gst_pad_push_event (GST_VIDEO_SINK_PAD (vk_sink), event);
 
-    gst_event_ref (event);
-    handled = gst_pad_push_event (GST_VIDEO_SINK_PAD (vk_sink), event);
+  if (!handled)
+    gst_element_post_message ((GstElement *) vk_sink,
+        gst_navigation_message_new_event ((GstObject *) vk_sink, event));
 
-    if (!handled)
-      gst_element_post_message ((GstElement *) vk_sink,
-          gst_navigation_message_new_event ((GstObject *) vk_sink, event));
-
-    gst_event_unref (event);
-  }
+  gst_event_unref (event);
 }
 
 static void
 gst_vulkan_sink_navigation_interface_init (GstNavigationInterface * iface)
 {
-  iface->send_event = gst_vulkan_sink_navigation_send_event;
+  iface->send_event_simple = gst_vulkan_sink_navigation_send_event;
 }
 
 static void
 gst_vulkan_sink_key_event_cb (GstVulkanWindow * window, char *event_name, char
     *key_string, GstVulkanSink * vk_sink)
 {
+  GstEvent *event = NULL;
+
   GST_DEBUG_OBJECT (vk_sink, "event %s key %s pressed", event_name, key_string);
-  gst_navigation_send_key_event (GST_NAVIGATION (vk_sink),
-      event_name, key_string);
+  /* FIXME: Add support for modifiers */
+  if (0 == g_strcmp0 ("key-press", event_name))
+    event =
+        gst_navigation_event_new_key_press (key_string,
+        GST_NAVIGATION_MODIFIER_NONE);
+  else if (0 == g_strcmp0 ("key-release", event_name))
+    event =
+        gst_navigation_event_new_key_release (key_string,
+        GST_NAVIGATION_MODIFIER_NONE);
+
+  if (event)
+    gst_navigation_send_event_simple (GST_NAVIGATION (vk_sink), event);
 }
 
 static void
 gst_vulkan_sink_mouse_event_cb (GstVulkanWindow * window, char *event_name,
     int button, double posx, double posy, GstVulkanSink * vk_sink)
 {
+  GstEvent *event = NULL;
+
+  /* FIXME: Add support for modifiers */
   GST_DEBUG_OBJECT (vk_sink, "event %s at %g, %g", event_name, posx, posy);
-  gst_navigation_send_mouse_event (GST_NAVIGATION (vk_sink),
-      event_name, button, posx, posy);
+  if (0 == g_strcmp0 ("mouse-button-press", event_name))
+    event =
+        gst_navigation_event_new_mouse_button_press (button, posx, posy,
+        GST_NAVIGATION_MODIFIER_NONE);
+  else if (0 == g_strcmp0 ("mouse-button-release", event_name))
+    event =
+        gst_navigation_event_new_mouse_button_release (button, posx, posy,
+        GST_NAVIGATION_MODIFIER_NONE);
+  else if (0 == g_strcmp0 ("mouse-move", event_name))
+    event =
+        gst_navigation_event_new_mouse_move (posx, posy,
+        GST_NAVIGATION_MODIFIER_NONE);
+
+  if (event)
+    gst_navigation_send_event_simple (GST_NAVIGATION (vk_sink), event);
 }

@@ -31,14 +31,28 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+/**
+ * SECTION: element-msdkvp9dec
+ * @title: msdkvp9dec
+ * @short_description: Intel MSDK VP9 decoderr
+ *
+ * VP9 video decoder based on Intel MFX
+ *
+ * ## Example launch line
+ * ```
+ * gst-launch-1.0 filesrc location=sample.webm ! matroskademux ! msdkvp9dec ! glimagesink
+ * ```
+ *
+ * Since: 1.16
+ *
+ */
+
 #ifdef HAVE_CONFIG_H
 #  include <config.h>
 #endif
 
 #include "gstmsdkvp9dec.h"
 #include "gstmsdkvideomemory.h"
-
-#include <mfxvp9.h>
 
 GST_DEBUG_CATEGORY_EXTERN (gst_msdkvp9dec_debug);
 #define GST_CAT_DEFAULT gst_msdkvp9dec_debug
@@ -171,7 +185,7 @@ gst_msdkvp9dec_class_init (GstMsdkVP9DecClass * klass)
   gst_element_class_set_static_metadata (element_class,
       "Intel MSDK VP9 decoder",
       "Codec/Decoder/Video/Hardware",
-      "VP9 video decoder based on Intel Media SDK",
+      "VP9 video decoder based on " MFX_API_SDK,
       "Sreerenj Balachandran <sreerenj.balachandran@intel.com>");
 
   gst_msdkdec_prop_install_output_oder_property (gobject_class);

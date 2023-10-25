@@ -25,8 +25,6 @@
 
 #include <gst/gst.h>
 
-#include "gstjpegformat.h"
-
 G_BEGIN_DECLS
 
 #define GST_TYPE_JIF_MUX \
@@ -60,6 +58,8 @@ struct _GstJifMuxClass {
 };
 
 GType gst_jif_mux_get_type (void);
+
+GST_ELEMENT_REGISTER_DECLARE (jifmux);
 
 G_END_DECLS
 

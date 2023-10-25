@@ -57,6 +57,16 @@ struct _GstVulkanFullScreenQuadPrivate
 
   GstVulkanHandle *vert;
   GstVulkanHandle *frag;
+
+  VkBool32 blend_enable;
+  VkBlendFactor src_blend_factor;
+  VkBlendFactor src_alpha_blend_factor;
+  VkBlendFactor dst_blend_factor;
+  VkBlendFactor dst_alpha_blend_factor;
+  VkBlendOp colour_blend_op;
+  VkBlendOp alpha_blend_op;
+
+  gboolean enable_clear;
 };
 
 G_DEFINE_TYPE_WITH_CODE (GstVulkanFullScreenQuad, gst_vulkan_full_screen_quad,
@@ -278,6 +288,7 @@ create_pipeline_layout (GstVulkanFullScreenQuad * self, GError ** error)
 static gboolean
 create_render_pass (GstVulkanFullScreenQuad * self, GError ** error)
 {
+  GstVulkanFullScreenQuadPrivate *priv = GET_PRIV (self);
   VkAttachmentDescription color_attachments[GST_VIDEO_MAX_PLANES];
   VkAttachmentReference color_attachment_refs[GST_VIDEO_MAX_PLANES];
   VkRenderPassCreateInfo render_pass_info;
@@ -291,7 +302,7 @@ create_render_pass (GstVulkanFullScreenQuad * self, GError ** error)
     color_attachments[i] = (VkAttachmentDescription) {
         .format = gst_vulkan_format_from_video_info (&self->out_info, i),
         .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .loadOp = priv->enable_clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
         .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -468,19 +479,43 @@ create_pipeline (GstVulkanFullScreenQuad * self, GError ** error)
 
   color_blend_attachments[0] = (VkPipelineColorBlendAttachmentState) {
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-      .blendEnable = VK_FALSE
+      .srcColorBlendFactor = priv->src_blend_factor,
+      .dstColorBlendFactor = priv->dst_blend_factor,
+      .colorBlendOp = priv->colour_blend_op,
+      .srcAlphaBlendFactor = priv->src_alpha_blend_factor,
+      .dstAlphaBlendFactor = priv->dst_alpha_blend_factor,
+      .alphaBlendOp = priv->alpha_blend_op,
+      .blendEnable = priv->blend_enable
   };
   color_blend_attachments[1] = (VkPipelineColorBlendAttachmentState) {
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-      .blendEnable = VK_FALSE
+      .srcColorBlendFactor = priv->src_blend_factor,
+      .dstColorBlendFactor = priv->dst_blend_factor,
+      .colorBlendOp = priv->colour_blend_op,
+      .srcAlphaBlendFactor = priv->src_alpha_blend_factor,
+      .dstAlphaBlendFactor = priv->dst_alpha_blend_factor,
+      .alphaBlendOp = priv->alpha_blend_op,
+      .blendEnable = priv->blend_enable
   };
   color_blend_attachments[2] = (VkPipelineColorBlendAttachmentState) {
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-      .blendEnable = VK_FALSE
+      .srcColorBlendFactor = priv->src_blend_factor,
+      .dstColorBlendFactor = priv->dst_blend_factor,
+      .colorBlendOp = priv->colour_blend_op,
+      .srcAlphaBlendFactor = priv->src_alpha_blend_factor,
+      .dstAlphaBlendFactor = priv->dst_alpha_blend_factor,
+      .alphaBlendOp = priv->alpha_blend_op,
+      .blendEnable = priv->blend_enable
   };
   color_blend_attachments[3] = (VkPipelineColorBlendAttachmentState) {
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-      .blendEnable = VK_FALSE
+      .srcColorBlendFactor = priv->src_blend_factor,
+      .dstColorBlendFactor = priv->dst_blend_factor,
+      .colorBlendOp = priv->colour_blend_op,
+      .srcAlphaBlendFactor = priv->src_alpha_blend_factor,
+      .dstAlphaBlendFactor = priv->dst_alpha_blend_factor,
+      .alphaBlendOp = priv->alpha_blend_op,
+      .blendEnable = priv->blend_enable
   };
 
   color_blending = (VkPipelineColorBlendStateCreateInfo) {
@@ -768,7 +803,17 @@ destroy_pipeline (GstVulkanFullScreenQuad * self)
 void
 gst_vulkan_full_screen_quad_init (GstVulkanFullScreenQuad * self)
 {
+  GstVulkanFullScreenQuadPrivate *priv = GET_PRIV (self);
+
   self->trash_list = gst_vulkan_trash_fence_list_new ();
+
+  priv->src_blend_factor = VK_BLEND_FACTOR_ONE;
+  priv->src_alpha_blend_factor = VK_BLEND_FACTOR_ONE;
+  priv->dst_blend_factor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+  priv->dst_alpha_blend_factor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+  priv->colour_blend_op = VK_BLEND_OP_ADD;
+  priv->alpha_blend_op = VK_BLEND_OP_ADD;
+  priv->enable_clear = TRUE;
 }
 
 /**
@@ -783,11 +828,16 @@ GstVulkanFullScreenQuad *
 gst_vulkan_full_screen_quad_new (GstVulkanQueue * queue)
 {
   GstVulkanFullScreenQuad *self;
+  GError *error = NULL;
 
   g_return_val_if_fail (GST_IS_VULKAN_QUEUE (queue), NULL);
 
   self = g_object_new (GST_TYPE_VULKAN_FULL_SCREEN_QUAD, NULL);
   self->queue = gst_object_ref (queue);
+  self->cmd_pool = gst_vulkan_queue_create_command_pool (queue, &error);
+  if (!self->cmd_pool)
+    GST_WARNING_OBJECT (self, "Failed to create command pool: %s",
+        error->message);
 
   gst_object_ref_sink (self);
 
@@ -1175,6 +1225,134 @@ error:
   gst_clear_mini_object ((GstMiniObject **) & cmd);
   gst_clear_mini_object ((GstMiniObject **) & fence);
   return FALSE;
+}
+
+/**
+ * gst_vulkan_full_screen_quad_enable_blend:
+ * @self: the #GstVulkanFullScreenQuad
+ * @enable_blend: whether to enable blending
+ *
+ * Enables blending of the input image to the output image.
+ *
+ * See also: gst_vulkan_full_screen_quad_set_blend_operation() and
+ * gst_vulkan_full_screen_quad_set_blend_factors().
+ *
+ * Since: 1.22
+ */
+void
+gst_vulkan_full_screen_quad_enable_blend (GstVulkanFullScreenQuad * self,
+    gboolean enable_blend)
+{
+  GstVulkanFullScreenQuadPrivate *priv;
+
+  g_return_if_fail (GST_IS_VULKAN_FULL_SCREEN_QUAD (self));
+
+  priv = GET_PRIV (self);
+
+  if (priv->blend_enable == VK_TRUE && enable_blend)
+    return;
+  if (priv->blend_enable == VK_FALSE && !enable_blend)
+    return;
+  priv->blend_enable = enable_blend ? VK_TRUE : VK_FALSE;
+
+  clear_graphics_pipeline (self);
+}
+
+/**
+ * gst_vulkan_full_screen_quad_set_blend_factors:
+ * @self: the #GstVulkanFullScreenQuad
+ * @src_blend_factor: the `VkBlendFactor` for the source image for the colour
+ *                    components (RGB)
+ * @src_alpha_blend_factor: the `VkBlendFactor` for the source image for the
+ *                          alpha component.
+ * @dst_blend_factor: the `VkBlendFactor` for the destination image for the
+ *                    colour components (RGB)
+ * @dst_alpha_blend_factor: the `VkBlendFactor` for the destination image for
+ *                          the alpha component.
+ *
+ * You need to enable blend with gst_vulkan_full_screen_quad_enable_blend().
+ *
+ * See also: gst_vulkan_full_screen_quad_set_blend_operation().
+ *
+ * Since: 1.22
+ */
+void
+gst_vulkan_full_screen_quad_set_blend_factors (GstVulkanFullScreenQuad * self,
+    VkBlendFactor src_blend_factor, VkBlendFactor dst_blend_factor,
+    VkBlendFactor src_alpha_blend_factor, VkBlendFactor dst_alpha_blend_factor)
+{
+  GstVulkanFullScreenQuadPrivate *priv;
+
+  g_return_if_fail (GST_IS_VULKAN_FULL_SCREEN_QUAD (self));
+
+  priv = GET_PRIV (self);
+
+  if (priv->src_blend_factor == src_blend_factor
+      && priv->src_alpha_blend_factor == src_alpha_blend_factor
+      && priv->dst_blend_factor == dst_blend_factor
+      && priv->dst_alpha_blend_factor == dst_alpha_blend_factor)
+    return;
+
+  priv->src_blend_factor = src_blend_factor;
+  priv->src_alpha_blend_factor = src_alpha_blend_factor;
+  priv->dst_blend_factor = dst_blend_factor;
+  priv->dst_alpha_blend_factor = dst_alpha_blend_factor;
+
+  clear_graphics_pipeline (self);
+}
+
+/**
+ * gst_vulkan_full_screen_quad_set_blend_operation:
+ * @self: the #GstVulkanFullScreenQuad
+ * @colour_blend_op: the `VkBlendOp` to use for blending colour (RGB) values
+ * @alpha_blend_op: the `VkBlendOp` to use for blending alpha values
+ *
+ * You need to enable blend with gst_vulkan_full_screen_quad_enable_blend().
+ *
+ * See also: gst_vulkan_full_screen_quad_set_blend_factors().
+ *
+ * Since: 1.22
+ */
+void
+gst_vulkan_full_screen_quad_set_blend_operation (GstVulkanFullScreenQuad * self,
+    VkBlendOp colour_blend_op, VkBlendOp alpha_blend_op)
+{
+  GstVulkanFullScreenQuadPrivate *priv;
+
+  g_return_if_fail (GST_IS_VULKAN_FULL_SCREEN_QUAD (self));
+
+  priv = GET_PRIV (self);
+
+  priv->colour_blend_op = colour_blend_op;
+  priv->alpha_blend_op = alpha_blend_op;
+
+  clear_graphics_pipeline (self);
+}
+
+/**
+ * gst_vulkan_full_screen_quad_enable_clear:
+ * @self: the #GstVulkanFullScreenQuad
+ * @enable_clear: whether to clear the framebuffer on load
+ *
+ * Since: 1.22
+ */
+void
+gst_vulkan_full_screen_quad_enable_clear (GstVulkanFullScreenQuad * self,
+    gboolean enable_clear)
+{
+  GstVulkanFullScreenQuadPrivate *priv;
+
+  g_return_if_fail (GST_IS_VULKAN_FULL_SCREEN_QUAD (self));
+
+  priv = GET_PRIV (self);
+
+  if (priv->enable_clear == enable_clear)
+    return;
+
+  priv->enable_clear = enable_clear;
+
+  clear_graphics_pipeline (self);
+  clear_render_pass (self);
 }
 
 /**

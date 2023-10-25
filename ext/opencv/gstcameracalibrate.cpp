@@ -157,8 +157,13 @@ camera_calibration_pattern_get_type (void)
   return camera_calibration_pattern_type;
 }
 
-G_DEFINE_TYPE (GstCameraCalibrate, gst_camera_calibrate,
-    GST_TYPE_OPENCV_VIDEO_FILTER);
+G_DEFINE_TYPE_WITH_CODE (GstCameraCalibrate, gst_camera_calibrate,
+    GST_TYPE_OPENCV_VIDEO_FILTER,
+    GST_DEBUG_CATEGORY_INIT (gst_camera_calibrate_debug, "cameracalibrate", 0,
+        "Performs camera calibration");
+    );
+GST_ELEMENT_REGISTER_DEFINE (cameracalibrate, "cameracalibrate", GST_RANK_NONE,
+    GST_TYPE_CAMERA_CALIBRATE);
 
 static void gst_camera_calibrate_dispose (GObject * object);
 static void gst_camera_calibrate_set_property (GObject * object, guint prop_id,
@@ -204,13 +209,13 @@ gst_camera_calibrate_class_init (GstCameraCalibrateClass * klass)
 
   g_object_class_install_property (gobject_class, PROP_BOARD_WIDTH,
       g_param_spec_int ("board-width", "Board Width",
-          "The board width in number of items",
+          "The board width in number of items (e.g. number of squares for chessboard)",
           1, G_MAXINT, DEFAULT_BOARD_WIDTH,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
   g_object_class_install_property (gobject_class, PROP_BOARD_HEIGHT,
       g_param_spec_int ("board-height", "Board Height",
-          "The board height in number of items",
+          "The board height in number of items (e.g. number of squares for chessboard)",
           1, G_MAXINT, DEFAULT_BOARD_WIDTH,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
@@ -276,7 +281,8 @@ gst_camera_calibrate_class_init (GstCameraCalibrateClass * klass)
   gst_element_class_set_static_metadata (element_class,
       "cameracalibrate",
       "Filter/Effect/Video",
-      "Performs camera calibration",
+      "Performs camera calibration by having it point at a chessboard pattern "
+      "using upstream/downstream cameraundistort",
       "Philippe Renon <philippe_renon@yahoo.fr>");
 
   /* add sink and source pad templates */
@@ -289,7 +295,8 @@ gst_camera_calibrate_class_init (GstCameraCalibrateClass * klass)
   templ = gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS, caps);
   gst_element_class_add_pad_template (element_class, templ);
 
-  gst_type_mark_as_plugin_api (GST_TYPE_CAMERA_CALIBRATION_PATTERN, (GstPluginAPIFlags) 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_CAMERA_CALIBRATION_PATTERN,
+      (GstPluginAPIFlags) 0);
 }
 
 /* initialize the new element
@@ -324,8 +331,8 @@ gst_camera_calibrate_init (GstCameraCalibrate * calib)
     calib->flags =
         cv::fisheye::CALIB_FIX_SKEW | cv::fisheye::CALIB_RECOMPUTE_EXTRINSIC |
         /*cv::fisheye::CALIB_FIX_K1 | */
-        cv::fisheye::CALIB_FIX_K2 | cv::fisheye::CALIB_FIX_K3 | cv::
-        fisheye::CALIB_FIX_K4;
+        cv::fisheye::CALIB_FIX_K2 | cv::fisheye::CALIB_FIX_K3 | cv::fisheye::
+        CALIB_FIX_K4;
   }
 
   calib->mode = CAPTURING;      //DETECTION;
@@ -751,19 +758,4 @@ camera_calibrate_calibrate (GstCameraCalibrate * calib,
   /* + ". avg re projection error = " + totalAvgErr); */
 
   return ok;
-}
-
-/* entry point to initialize the plug-in
- * initialize the plug-in itself
- * register the element factories and other features
- */
-gboolean
-gst_camera_calibrate_plugin_init (GstPlugin * plugin)
-{
-  /* debug category for filtering log messages */
-  GST_DEBUG_CATEGORY_INIT (gst_camera_calibrate_debug, "cameracalibrate",
-      0, "Performs camera calibration");
-
-  return gst_element_register (plugin, "cameracalibrate", GST_RANK_NONE,
-      GST_TYPE_CAMERA_CALIBRATE);
 }

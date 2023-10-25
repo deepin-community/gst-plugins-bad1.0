@@ -24,19 +24,23 @@
 #include "transportstream.h"
 #include "transportsendbin.h"
 #include "transportreceivebin.h"
-#include "gstwebrtcice.h"
 #include "gstwebrtcbin.h"
 #include "utils.h"
+#include "gst/webrtc/webrtc-priv.h"
+
+#define GST_CAT_DEFAULT transport_stream_debug
+GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 
 #define transport_stream_parent_class parent_class
-G_DEFINE_TYPE (TransportStream, transport_stream, GST_TYPE_OBJECT);
+G_DEFINE_TYPE_WITH_CODE (TransportStream, transport_stream, GST_TYPE_OBJECT,
+    GST_DEBUG_CATEGORY_INIT (GST_CAT_DEFAULT, "webrtctransportstream", 0,
+        "webrtctransportstream"););
 
 enum
 {
   PROP_0,
   PROP_WEBRTC,
   PROP_SESSION_ID,
-  PROP_RTCP_MUX,
   PROP_DTLS_CLIENT,
 };
 
@@ -55,13 +59,18 @@ transport_stream_get_caps_for_pt (TransportStream * stream, guint pt)
 }
 
 int
-transport_stream_get_pt (TransportStream * stream, const gchar * encoding_name)
+transport_stream_get_pt (TransportStream * stream, const gchar * encoding_name,
+    guint media_idx)
 {
   guint i;
-  gint ret = 0;
+  gint ret = -1;
 
   for (i = 0; i < stream->ptmap->len; i++) {
     PtMapItem *item = &g_array_index (stream->ptmap, PtMapItem, i);
+
+    if (media_idx != -1 && media_idx != item->media_idx)
+      continue;
+
     if (!gst_caps_is_empty (item->caps)) {
       GstStructure *s = gst_caps_get_structure (item->caps, 0);
       if (!g_strcmp0 (gst_structure_get_string (s, "encoding-name"),
@@ -124,9 +133,6 @@ transport_stream_set_property (GObject * object, guint prop_id,
     case PROP_SESSION_ID:
       stream->session_id = g_value_get_uint (value);
       break;
-    case PROP_RTCP_MUX:
-      stream->rtcp_mux = g_value_get_boolean (value);
-      break;
     case PROP_DTLS_CLIENT:
       stream->dtls_client = g_value_get_boolean (value);
       break;
@@ -148,9 +154,6 @@ transport_stream_get_property (GObject * object, guint prop_id,
     case PROP_SESSION_ID:
       g_value_set_uint (value, stream->session_id);
       break;
-    case PROP_RTCP_MUX:
-      g_value_set_boolean (value, stream->rtcp_mux);
-      break;
     case PROP_DTLS_CLIENT:
       g_value_set_boolean (value, stream->dtls_client);
       break;
@@ -166,29 +169,14 @@ transport_stream_dispose (GObject * object)
 {
   TransportStream *stream = TRANSPORT_STREAM (object);
 
-  if (stream->send_bin)
-    gst_object_unref (stream->send_bin);
-  stream->send_bin = NULL;
-
-  if (stream->receive_bin)
-    gst_object_unref (stream->receive_bin);
-  stream->receive_bin = NULL;
-
-  if (stream->transport)
-    gst_object_unref (stream->transport);
-  stream->transport = NULL;
-
-  if (stream->rtcp_transport)
-    gst_object_unref (stream->rtcp_transport);
-  stream->rtcp_transport = NULL;
-
-  if (stream->rtxsend)
-    gst_object_unref (stream->rtxsend);
-  stream->rtxsend = NULL;
-
-  if (stream->rtxreceive)
-    gst_object_unref (stream->rtxreceive);
-  stream->rtxreceive = NULL;
+  gst_clear_object (&stream->send_bin);
+  gst_clear_object (&stream->receive_bin);
+  gst_clear_object (&stream->transport);
+  gst_clear_object (&stream->rtxsend);
+  gst_clear_object (&stream->rtxreceive);
+  gst_clear_object (&stream->reddec);
+  g_list_free_full (stream->fecdecs, (GDestroyNotify) gst_object_unref);
+  stream->fecdecs = NULL;
 
   GST_OBJECT_PARENT (object) = NULL;
 
@@ -201,7 +189,12 @@ transport_stream_finalize (GObject * object)
   TransportStream *stream = TRANSPORT_STREAM (object);
 
   g_array_free (stream->ptmap, TRUE);
-  g_array_free (stream->remote_ssrcmap, TRUE);
+  g_ptr_array_free (stream->ssrcmap, TRUE);
+
+  gst_clear_object (&stream->rtxsend_stream_id);
+  gst_clear_object (&stream->rtxsend_repaired_stream_id);
+  gst_clear_object (&stream->rtxreceive_stream_id);
+  gst_clear_object (&stream->rtxreceive_repaired_stream_id);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -213,19 +206,12 @@ transport_stream_constructed (GObject * object)
   GstWebRTCBin *webrtc;
   GstWebRTCICETransport *ice_trans;
 
-  stream->transport = gst_webrtc_dtls_transport_new (stream->session_id, FALSE);
-  stream->rtcp_transport =
-      gst_webrtc_dtls_transport_new (stream->session_id, TRUE);
+  stream->transport = gst_webrtc_dtls_transport_new (stream->session_id);
 
   webrtc = GST_WEBRTC_BIN (gst_object_get_parent (GST_OBJECT (object)));
 
   g_object_bind_property (stream->transport, "client", stream, "dtls-client",
       G_BINDING_BIDIRECTIONAL);
-  g_object_bind_property (stream->rtcp_transport, "client", stream,
-      "dtls-client", G_BINDING_BIDIRECTIONAL);
-
-  g_object_bind_property (stream->transport, "certificate",
-      stream->rtcp_transport, "certificate", G_BINDING_BIDIRECTIONAL);
 
   /* Need to go full Java and have a transport manager?
    * Or make the caller set the ICE transport up? */
@@ -240,12 +226,6 @@ transport_stream_constructed (GObject * object)
       gst_webrtc_ice_find_transport (webrtc->priv->ice, stream->stream,
       GST_WEBRTC_ICE_COMPONENT_RTP);
   gst_webrtc_dtls_transport_set_transport (stream->transport, ice_trans);
-  gst_object_unref (ice_trans);
-
-  ice_trans =
-      gst_webrtc_ice_find_transport (webrtc->priv->ice, stream->stream,
-      GST_WEBRTC_ICE_COMPONENT_RTCP);
-  gst_webrtc_dtls_transport_set_transport (stream->rtcp_transport, ice_trans);
   gst_object_unref (ice_trans);
 
   stream->send_bin = g_object_new (transport_send_bin_get_type (), "stream",
@@ -288,12 +268,6 @@ transport_stream_class_init (TransportStreamClass * klass)
           G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class,
-      PROP_RTCP_MUX,
-      g_param_spec_boolean ("rtcp-mux", "RTCP Mux",
-          "Whether RTCP packets are muxed with RTP packets",
-          FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
-
-  g_object_class_install_property (gobject_class,
       PROP_DTLS_CLIENT,
       g_param_spec_boolean ("dtls-client", "DTLS client",
           "Whether we take the client role in DTLS negotiation",
@@ -307,12 +281,96 @@ clear_ptmap_item (PtMapItem * item)
     gst_caps_unref (item->caps);
 }
 
+static SsrcMapItem *
+ssrcmap_item_new (GstWebRTCRTPTransceiverDirection direction, guint32 ssrc,
+    guint media_idx)
+{
+  SsrcMapItem *ssrc_item = g_new0 (SsrcMapItem, 1);
+
+  ssrc_item->direction = direction;
+  ssrc_item->media_idx = media_idx;
+  ssrc_item->ssrc = ssrc;
+  g_weak_ref_init (&ssrc_item->rtpjitterbuffer, NULL);
+
+  return ssrc_item;
+}
+
+static void
+ssrcmap_item_free (SsrcMapItem * item)
+{
+  g_weak_ref_clear (&item->rtpjitterbuffer);
+  g_clear_pointer (&item->mid, g_free);
+  g_clear_pointer (&item->rid, g_free);
+  g_free (item);
+}
+
+SsrcMapItem *
+transport_stream_find_ssrc_map_item (TransportStream * stream,
+    gconstpointer data, FindSsrcMapFunc func)
+{
+  int i;
+
+  for (i = 0; i < stream->ssrcmap->len; i++) {
+    SsrcMapItem *item = g_ptr_array_index (stream->ssrcmap, i);
+
+    if (func (item, data))
+      return item;
+  }
+
+  return NULL;
+}
+
+void
+transport_stream_filter_ssrc_map_item (TransportStream * stream,
+    gconstpointer data, FindSsrcMapFunc func)
+{
+  int i;
+
+  for (i = 0; i < stream->ssrcmap->len;) {
+    SsrcMapItem *item = g_ptr_array_index (stream->ssrcmap, i);
+
+    if (!func (item, data)) {
+      GST_TRACE_OBJECT (stream, "removing ssrc %u", item->ssrc);
+      g_ptr_array_remove_index_fast (stream->ssrcmap, i);
+    } else {
+      i++;
+    }
+  }
+}
+
+SsrcMapItem *
+transport_stream_add_ssrc_map_item (TransportStream * stream,
+    GstWebRTCRTPTransceiverDirection direction, guint32 ssrc, guint media_idx)
+{
+  SsrcMapItem *ret = NULL;
+
+  g_return_val_if_fail (direction ==
+      GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_RECVONLY
+      || direction == GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDONLY, NULL);
+  g_return_val_if_fail (ssrc != 0, NULL);
+
+  GST_INFO_OBJECT (stream, "Adding mapping for rtp session %u media_idx %u "
+      "direction %s ssrc %u", stream->session_id, media_idx,
+      gst_webrtc_rtp_transceiver_direction_to_string (direction), ssrc);
+
+  /* XXX: duplicates? */
+  ret = ssrcmap_item_new (direction, ssrc, media_idx);
+
+  g_ptr_array_add (stream->ssrcmap, ret);
+
+  return ret;
+}
+
 static void
 transport_stream_init (TransportStream * stream)
 {
   stream->ptmap = g_array_new (FALSE, TRUE, sizeof (PtMapItem));
   g_array_set_clear_func (stream->ptmap, (GDestroyNotify) clear_ptmap_item);
-  stream->remote_ssrcmap = g_array_new (FALSE, TRUE, sizeof (SsrcMapItem));
+  stream->ssrcmap = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) ssrcmap_item_free);
+
+  stream->rtphdrext_id_stream_id = -1;
+  stream->rtphdrext_id_repaired_stream_id = -1;
 }
 
 TransportStream *

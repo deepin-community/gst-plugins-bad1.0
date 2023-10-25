@@ -24,14 +24,14 @@
 
 #include "gstvacaps.h"
 
+#include <gst/va/gstvavideoformat.h>
 #include <va/va_drmcommon.h>
 
-#include "gstvadisplay.h"
+#include "gstvadisplay_priv.h"
 #include "gstvaprofile.h"
-#include "gstvavideoformat.h"
 
-GST_DEBUG_CATEGORY_EXTERN (gst_va_display_debug);
-#define GST_CAT_DEFAULT gst_va_display_debug
+GST_DEBUG_CATEGORY_EXTERN (gstva_debug);
+#define GST_CAT_DEFAULT gstva_debug
 
 static const guint va_rt_format_list[] = {
 #define R(name) G_PASTE (VA_RT_FORMAT_, name)
@@ -66,9 +66,7 @@ gst_va_get_surface_attribs (GstVaDisplay * display, VAConfigID config,
 
   dpy = gst_va_display_get_va_dpy (display);
 
-  gst_va_display_lock (display);
   status = vaQuerySurfaceAttributes (dpy, config, NULL, attrib_count);
-  gst_va_display_unlock (display);
   if (status != VA_STATUS_SUCCESS) {
     GST_ERROR_OBJECT (display, "vaQuerySurfaceAttributes: %s",
         vaErrorStr (status));
@@ -77,9 +75,7 @@ gst_va_get_surface_attribs (GstVaDisplay * display, VAConfigID config,
 
   attribs = g_new (VASurfaceAttrib, *attrib_count);
 
-  gst_va_display_lock (display);
   status = vaQuerySurfaceAttributes (dpy, config, attribs, attrib_count);
-  gst_va_display_unlock (display);
   if (status != VA_STATUS_SUCCESS) {
     GST_ERROR_OBJECT (display, "vaQuerySurfaceAttributes: %s",
         vaErrorStr (status));
@@ -93,13 +89,27 @@ bail:
   return NULL;
 }
 
-static gboolean
-_gst_caps_set_format_array (GstCaps * caps, GArray * formats)
+static inline void
+_value_list_append_string (GValue * list, const gchar * str)
+{
+  GValue item = G_VALUE_INIT;
+
+  g_value_init (&item, G_TYPE_STRING);
+  g_value_set_string (&item, str);
+  gst_value_list_append_value (list, &item);
+  g_value_unset (&item);
+}
+
+gboolean
+gst_caps_set_format_array (GstCaps * caps, GArray * formats)
 {
   GstVideoFormat fmt;
   GValue v_formats = G_VALUE_INIT;
   const gchar *format;
   guint i;
+
+  g_return_val_if_fail (GST_IS_CAPS (caps), FALSE);
+  g_return_val_if_fail (formats, FALSE);
 
   if (formats->len == 1) {
     fmt = g_array_index (formats, GstVideoFormat, 0);
@@ -116,8 +126,6 @@ _gst_caps_set_format_array (GstCaps * caps, GArray * formats)
     gst_value_list_init (&v_formats, formats->len);
 
     for (i = 0; i < formats->len; i++) {
-      GValue item = G_VALUE_INIT;
-
       fmt = g_array_index (formats, GstVideoFormat, i);
       if (fmt == GST_VIDEO_FORMAT_UNKNOWN)
         continue;
@@ -125,10 +133,7 @@ _gst_caps_set_format_array (GstCaps * caps, GArray * formats)
       if (!format)
         continue;
 
-      g_value_init (&item, G_TYPE_STRING);
-      g_value_set_string (&item, format);
-      gst_value_list_append_value (&v_formats, &item);
-      g_value_unset (&item);
+      _value_list_append_string (&v_formats, format);
     }
   } else {
     return FALSE;
@@ -140,11 +145,56 @@ _gst_caps_set_format_array (GstCaps * caps, GArray * formats)
   return TRUE;
 }
 
+/* Fix raw frames ill reported by drivers.
+ *
+ * Mesa Gallium reports P010 and P016 for H264 encoder:
+ * https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/19443
+ *
+ * Intel i965: reports I420 and YV12
+ * XXX: add issue or pr
+ */
+static gboolean
+fix_raw_formats (GstVaDisplay * display, VAConfigID config, GArray * formats)
+{
+  VADisplay dpy;
+  VAStatus status;
+  VAProfile profile;
+  VAEntrypoint entrypoint;
+  VAConfigAttrib *attribs;
+  GstVideoFormat format;
+  int num;
+
+  if (!(GST_VA_DISPLAY_IS_IMPLEMENTATION (display, INTEL_I965) ||
+          GST_VA_DISPLAY_IS_IMPLEMENTATION (display, MESA_GALLIUM)))
+    return TRUE;
+
+  dpy = gst_va_display_get_va_dpy (display);
+  attribs = g_new (VAConfigAttrib, vaMaxNumConfigAttributes (dpy));
+  status = vaQueryConfigAttributes (dpy, config, &profile, &entrypoint, attribs,
+      &num);
+  g_free (attribs);
+
+  if (status != VA_STATUS_SUCCESS) {
+    GST_ERROR_OBJECT (display, "vaQueryConfigAttributes: %s",
+        vaErrorStr (status));
+    return FALSE;
+  }
+
+  if (gst_va_profile_codec (profile) != H264
+      || entrypoint != VAEntrypointEncSlice)
+    return TRUE;
+
+  formats = g_array_set_size (formats, 0);
+  format = GST_VIDEO_FORMAT_NV12;
+  g_array_append_val (formats, format);
+  return TRUE;
+}
+
 GstCaps *
 gst_va_create_raw_caps_from_config (GstVaDisplay * display, VAConfigID config)
 {
   GArray *formats;
-  GstCaps *caps, *base_caps, *feature_caps;
+  GstCaps *caps = NULL, *base_caps, *feature_caps;
   GstCapsFeatures *features;
   GstVideoFormat format;
   VASurfaceAttrib *attribs;
@@ -188,79 +238,39 @@ gst_va_create_raw_caps_from_config (GstVaDisplay * display, VAConfigID config)
 
   /* if driver doesn't report surface formats for current
    * chroma. Gallium AMD bug for 4:2:2 */
-  if (formats->len == 0) {
-    caps = NULL;
+  if (formats->len == 0)
     goto bail;
-  }
+
+  if (!fix_raw_formats (display, config, formats))
+    goto bail;
 
   base_caps = gst_caps_new_simple ("video/x-raw", "width", GST_TYPE_INT_RANGE,
       min_width, max_width, "height", GST_TYPE_INT_RANGE, min_height,
       max_height, NULL);
 
-  _gst_caps_set_format_array (base_caps, formats);
+  if (!gst_caps_set_format_array (base_caps, formats)) {
+    gst_caps_unref (base_caps);
+    goto bail;
+  }
 
   caps = gst_caps_new_empty ();
 
   if (mem_type & VA_SURFACE_ATTRIB_MEM_TYPE_VA) {
     feature_caps = gst_caps_copy (base_caps);
-    features = gst_caps_features_from_string ("memory:VAMemory");
+    features = gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_VA);
     gst_caps_set_features_simple (feature_caps, features);
     caps = gst_caps_merge (caps, feature_caps);
   }
   if (mem_type & VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME
       || mem_type & VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
     feature_caps = gst_caps_copy (base_caps);
-    features = gst_caps_features_from_string ("memory:DMABuf");
+    features = gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_DMABUF);
     gst_caps_set_features_simple (feature_caps, features);
     caps = gst_caps_merge (caps, feature_caps);
   }
+
   /* raw caps */
-  /* XXX(victor): assumption -- drivers can only download to image
-   * formats with same chroma of surface's format
-   */
-  {
-    GstCaps *raw_caps;
-    GArray *image_formats = gst_va_display_get_image_formats (display);
-
-    if (!image_formats) {
-      raw_caps = gst_caps_copy (base_caps);
-    } else {
-      GArray *raw_formats = g_array_new (FALSE, FALSE, sizeof (GstVideoFormat));
-      guint j, surface_chroma, image_chroma;
-      GstVideoFormat image_format;
-
-      raw_caps =
-          gst_caps_new_simple ("video/x-raw", "width", GST_TYPE_INT_RANGE,
-          min_width, max_width, "height", GST_TYPE_INT_RANGE, min_height,
-          max_height, NULL);
-
-      for (i = 0; i < formats->len; i++) {
-        format = g_array_index (formats, GstVideoFormat, i);
-        surface_chroma = gst_va_chroma_from_video_format (format);
-        if (surface_chroma == 0)
-          continue;
-
-        g_array_append_val (raw_formats, format);
-
-        for (j = 0; j < image_formats->len; j++) {
-          image_format = g_array_index (image_formats, GstVideoFormat, j);
-          image_chroma = gst_va_chroma_from_video_format (image_format);
-          if (image_format != format && surface_chroma == image_chroma)
-            g_array_append_val (raw_formats, image_format);
-        }
-      }
-
-      if (!_gst_caps_set_format_array (raw_caps, raw_formats)) {
-        gst_caps_unref (raw_caps);
-        raw_caps = gst_caps_copy (base_caps);
-      }
-
-      g_array_unref (raw_formats);
-      g_array_unref (image_formats);
-    }
-
-    caps = gst_caps_merge (caps, raw_caps);
-  }
+  caps = gst_caps_merge (caps, gst_caps_copy (base_caps));
 
   gst_caps_unref (base_caps);
 
@@ -286,9 +296,7 @@ gst_va_create_raw_caps (GstVaDisplay * display, VAProfile profile,
 
   dpy = gst_va_display_get_va_dpy (display);
 
-  gst_va_display_lock (display);
   status = vaCreateConfig (dpy, profile, entrypoint, &attrib, 1, &config);
-  gst_va_display_unlock (display);
   if (status != VA_STATUS_SUCCESS) {
     GST_ERROR_OBJECT (display, "vaCreateConfig: %s", vaErrorStr (status));
     return NULL;
@@ -296,9 +304,7 @@ gst_va_create_raw_caps (GstVaDisplay * display, VAProfile profile,
 
   caps = gst_va_create_raw_caps_from_config (display, config);
 
-  gst_va_display_lock (display);
   status = vaDestroyConfig (dpy, config);
-  gst_va_display_unlock (display);
   if (status != VA_STATUS_SUCCESS) {
     GST_ERROR_OBJECT (display, "vaDestroyConfig: %s", vaErrorStr (status));
     return NULL;
@@ -307,16 +313,155 @@ gst_va_create_raw_caps (GstVaDisplay * display, VAProfile profile,
   return caps;
 }
 
-static GstCaps *
+/* the purpose of this function is to find broken configurations in
+ * JPEG decoders: if the driver doesn't expose a pixel format for a
+ * config with a specific sampling, that sampling is not valid */
+static inline gboolean
+_config_has_pixel_formats (GstVaDisplay * display, VAProfile profile,
+    VAEntrypoint entrypoint, guint32 rt_format)
+{
+  guint i, fourcc, count;
+  gboolean found = FALSE;
+  VAConfigAttrib attrs = {
+    .type = VAConfigAttribRTFormat,
+    .value = rt_format,
+  };
+  VAConfigID config;
+  VADisplay dpy = gst_va_display_get_va_dpy (display);
+  VASurfaceAttrib *attr_list;
+  VAStatus status;
+
+  status = vaCreateConfig (dpy, profile, entrypoint, &attrs, 1, &config);
+  if (status != VA_STATUS_SUCCESS) {
+    GST_ERROR_OBJECT (display, "Failed to create JPEG config");
+    return FALSE;
+  }
+  attr_list = gst_va_get_surface_attribs (display, config, &count);
+  if (!attr_list)
+    goto bail;
+
+  /* XXX: JPEG decoders handle RGB16 and RGB32 chromas, but they use
+   * RGBP pixel format, which its chroma is RGBP (not 16 nor 32). So
+   * if the requested chroma is 16 or 32 it's locally overloaded as
+   * RGBP. */
+  if (rt_format == VA_RT_FORMAT_RGB16 || rt_format == VA_RT_FORMAT_RGB32)
+    rt_format = VA_RT_FORMAT_RGBP;
+
+  for (i = 0; i < count; i++) {
+    if (attr_list[i].type == VASurfaceAttribPixelFormat) {
+      fourcc = attr_list[i].value.value.i;
+      /* ignore pixel formats without requested chroma */
+      found = (gst_va_chroma_from_va_fourcc (fourcc) == rt_format);
+      if (found)
+        break;
+    }
+  }
+  g_free (attr_list);
+
+bail:
+  status = vaDestroyConfig (dpy, config);
+  if (status != VA_STATUS_SUCCESS)
+    GST_WARNING_OBJECT (display, "Failed to destroy JPEG config");
+
+  return found;
+}
+
+static void
+_add_jpeg_fields (GstVaDisplay * display, GstCaps * caps, VAProfile profile,
+    VAEntrypoint entrypoint, guint32 rt_formats)
+{
+  guint i, size;
+  GValue colorspace = G_VALUE_INIT, sampling = G_VALUE_INIT;
+  gboolean rgb, gray, yuv;
+
+  rgb = gray = yuv = FALSE;
+
+  gst_value_list_init (&colorspace, 3);
+  gst_value_list_init (&sampling, 3);
+
+  for (i = 0; rt_formats && i < G_N_ELEMENTS (va_rt_format_list); i++) {
+    if (rt_formats & va_rt_format_list[i]) {
+      if (!_config_has_pixel_formats (display, profile, entrypoint,
+              va_rt_format_list[i]))
+        continue;
+
+#define APPEND_YUV G_STMT_START \
+        if (!yuv) { _value_list_append_string (&colorspace, "sYUV"); yuv = TRUE; } \
+      G_STMT_END
+
+      switch (va_rt_format_list[i]) {
+        case VA_RT_FORMAT_YUV420:
+          APPEND_YUV;
+          _value_list_append_string (&sampling, "YCbCr-4:2:0");
+          break;
+        case VA_RT_FORMAT_YUV422:
+          APPEND_YUV;
+          _value_list_append_string (&sampling, "YCbCr-4:2:2");
+          break;
+        case VA_RT_FORMAT_YUV444:
+          APPEND_YUV;
+          _value_list_append_string (&sampling, "YCbCr-4:4:4");
+          break;
+        case VA_RT_FORMAT_YUV411:
+          APPEND_YUV;
+          _value_list_append_string (&sampling, "YCbCr-4:1:1");
+          break;
+        case VA_RT_FORMAT_YUV400:
+          if (!gray) {
+            _value_list_append_string (&colorspace, "GRAY");
+            _value_list_append_string (&sampling, "GRAYSCALE");
+            gray = TRUE;
+          }
+          break;
+        case VA_RT_FORMAT_RGBP:
+        case VA_RT_FORMAT_RGB16:
+        case VA_RT_FORMAT_RGB32:
+          if (!rgb) {
+            _value_list_append_string (&colorspace, "sRGB");
+            _value_list_append_string (&sampling, "RGB");
+            _value_list_append_string (&sampling, "BGR");
+            rgb = TRUE;
+          }
+          break;
+        default:
+          break;
+      }
+#undef APPEND_YUV
+    }
+  }
+
+  size = gst_value_list_get_size (&colorspace);
+  if (size == 1) {
+    gst_caps_set_value (caps, "colorspace",
+        gst_value_list_get_value (&colorspace, 0));
+  } else if (size > 1) {
+    gst_caps_set_value (caps, "colorspace", &colorspace);
+  }
+
+  size = gst_value_list_get_size (&sampling);
+  if (size == 1) {
+    gst_caps_set_value (caps, "sampling",
+        gst_value_list_get_value (&sampling, 0));
+  } else if (size > 1) {
+    gst_caps_set_value (caps, "sampling", &sampling);
+  }
+
+  g_value_unset (&colorspace);
+  g_value_unset (&sampling);
+}
+
+GstCaps *
 gst_va_create_coded_caps (GstVaDisplay * display, VAProfile profile,
     VAEntrypoint entrypoint, guint32 * rt_formats_ptr)
 {
   GstCaps *caps;
+  /* *INDENT-OFF* */
   VAConfigAttrib attribs[] = {
-    {.type = VAConfigAttribMaxPictureWidth,},
-    {.type = VAConfigAttribMaxPictureHeight,},
-    {.type = VAConfigAttribRTFormat,},
+    { .type = VAConfigAttribMaxPictureWidth, },
+    { .type = VAConfigAttribMaxPictureHeight, },
+    { .type = VAConfigAttribRTFormat, },
   };
+  /* *INDENT-ON* */
   VADisplay dpy;
   VAStatus status;
   guint32 value, rt_formats = 0;
@@ -324,10 +469,8 @@ gst_va_create_coded_caps (GstVaDisplay * display, VAProfile profile,
 
   dpy = gst_va_display_get_va_dpy (display);
 
-  gst_va_display_lock (display);
   status = vaGetConfigAttributes (dpy, profile, entrypoint, attribs,
       G_N_ELEMENTS (attribs));
-  gst_va_display_unlock (display);
   if (status != VA_STATUS_SUCCESS) {
     GST_ERROR_OBJECT (display, "vaGetConfigAttributes: %s",
         vaErrorStr (status));
@@ -362,6 +505,9 @@ gst_va_create_coded_caps (GstVaDisplay * display, VAProfile profile,
   if (!caps)
     return NULL;
 
+  if (rt_formats > 0 && gst_va_profile_codec (profile) == JPEG)
+    _add_jpeg_fields (display, caps, profile, entrypoint, rt_formats);
+
   if (max_width == -1 || max_height == -1)
     return caps;
 
@@ -369,6 +515,49 @@ gst_va_create_coded_caps (GstVaDisplay * display, VAProfile profile,
       "height", GST_TYPE_INT_RANGE, 1, max_height, NULL);
 
   return caps;
+}
+
+static GstCaps *
+_regroup_raw_caps (GstCaps * caps)
+{
+  GstCaps *sys_caps, *va_caps, *dma_caps, *tmp;
+  guint size, i;
+
+  if (gst_caps_is_any (caps) || gst_caps_is_empty (caps))
+    return caps;
+
+  size = gst_caps_get_size (caps);
+  if (size <= 1)
+    return caps;
+
+  /* We need to simplify caps by features. */
+  sys_caps = gst_caps_new_empty ();
+  va_caps = gst_caps_new_empty ();
+  dma_caps = gst_caps_new_empty ();
+  for (i = 0; i < size; i++) {
+    GstCapsFeatures *ft;
+
+    tmp = gst_caps_copy_nth (caps, i);
+    ft = gst_caps_get_features (tmp, 0);
+    if (gst_caps_features_contains (ft, GST_CAPS_FEATURE_MEMORY_DMABUF)) {
+      dma_caps = gst_caps_merge (dma_caps, tmp);
+    } else if (gst_caps_features_contains (ft, GST_CAPS_FEATURE_MEMORY_VA)) {
+      va_caps = gst_caps_merge (va_caps, tmp);
+    } else {
+      sys_caps = gst_caps_merge (sys_caps, tmp);
+    }
+  }
+
+  sys_caps = gst_caps_simplify (sys_caps);
+  va_caps = gst_caps_simplify (va_caps);
+  dma_caps = gst_caps_simplify (dma_caps);
+
+  va_caps = gst_caps_merge (va_caps, dma_caps);
+  va_caps = gst_caps_merge (va_caps, sys_caps);
+
+  gst_caps_unref (caps);
+
+  return va_caps;
 }
 
 gboolean
@@ -458,7 +647,7 @@ gst_va_caps_from_profiles (GstVaDisplay * display, GArray * profiles,
     gst_caps_replace (&codedcaps, NULL);
 
   if ((ret = codedcaps && rawcaps)) {
-    rawcaps = gst_caps_simplify (rawcaps);
+    rawcaps = _regroup_raw_caps (rawcaps);
     codedcaps = gst_caps_simplify (codedcaps);
 
     if (rawcaps_ptr)
@@ -473,4 +662,34 @@ gst_va_caps_from_profiles (GstVaDisplay * display, GArray * profiles,
     gst_caps_unref (rawcaps);
 
   return ret;
+}
+
+static inline gboolean
+_caps_is (GstCaps * caps, const gchar * feature)
+{
+  GstCapsFeatures *features;
+
+  if (!gst_caps_is_fixed (caps))
+    return FALSE;
+
+  features = gst_caps_get_features (caps, 0);
+  return gst_caps_features_contains (features, feature);
+}
+
+gboolean
+gst_caps_is_dmabuf (GstCaps * caps)
+{
+  return _caps_is (caps, GST_CAPS_FEATURE_MEMORY_DMABUF);
+}
+
+gboolean
+gst_caps_is_vamemory (GstCaps * caps)
+{
+  return _caps_is (caps, GST_CAPS_FEATURE_MEMORY_VA);
+}
+
+gboolean
+gst_caps_is_raw (GstCaps * caps)
+{
+  return _caps_is (caps, GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY);
 }

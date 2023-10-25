@@ -32,9 +32,25 @@
 
 #include <va/va.h>
 #include <va/va_drmcommon.h>
+#include <unistd.h>
 #include "gstmsdkallocator.h"
 #include "gstmsdkallocator_libva.h"
 #include "msdk_libva.h"
+
+#include <gst/va/gstvaallocator.h>
+
+#define GST_MSDK_FRAME_SURFACE gst_msdk_frame_surface_quark_get ()
+static GQuark
+gst_msdk_frame_surface_quark_get (void)
+{
+  static gsize g_quark;
+
+  if (g_once_init_enter (&g_quark)) {
+    gsize quark = (gsize) g_quark_from_static_string ("GstMsdkFrameSurface");
+    g_once_init_leave (&g_quark, quark);
+  }
+  return g_quark;
+}
 
 mfxStatus
 gst_msdk_frame_alloc (mfxHDL pthis, mfxFrameAllocRequest * req,
@@ -150,6 +166,12 @@ gst_msdk_frame_alloc (mfxHDL pthis, mfxFrameAllocRequest * req,
       format = VA_RT_FORMAT_YUV444_12;
 #endif
 
+#if (MFX_VERSION >= 2004)
+    if (format == VA_RT_FORMAT_YUV444 && (va_fourcc == VA_FOURCC_RGBP
+            || va_fourcc == VA_FOURCC_BGRP))
+      format = VA_RT_FORMAT_RGBP;
+#endif
+
     va_status = vaCreateSurfaces (gst_msdk_context_get_handle (context),
         format,
         req->Info.Width, req->Info.Height, surfaces, surfaces_num, attribs,
@@ -164,36 +186,36 @@ gst_msdk_frame_alloc (mfxHDL pthis, mfxFrameAllocRequest * req,
     for (i = 0; i < surfaces_num; i++) {
       /* Get dmabuf handle if MFX_MEMTYPE_EXPORT_FRAME */
       if (req->Type & MFX_MEMTYPE_EXPORT_FRAME) {
-        msdk_mids[i].info.mem_type = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME;
+        VADRMPRIMESurfaceDescriptor va_desc = { 0 };
+        uint32_t export_flags = VA_EXPORT_SURFACE_SEPARATE_LAYERS |
+            VA_EXPORT_SURFACE_READ_WRITE;
+
         va_status =
-            vaDeriveImage (gst_msdk_context_get_handle (context), surfaces[i],
-            &msdk_mids[i].image);
+            vaExportSurfaceHandle (gst_msdk_context_get_handle (context),
+            surfaces[i], VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2, export_flags,
+            &va_desc);
+
         status = gst_msdk_get_mfx_status_from_va_status (va_status);
 
         if (MFX_ERR_NONE != status) {
-          GST_ERROR ("failed to derive image");
+          GST_ERROR ("Failed to export surface");
           return status;
         }
 
-        va_status =
-            vaAcquireBufferHandle (gst_msdk_context_get_handle (context),
-            msdk_mids[i].image.buf, &msdk_mids[i].info);
-        status = gst_msdk_get_mfx_status_from_va_status (va_status);
+        g_assert (va_desc.num_objects);
 
-        if (MFX_ERR_NONE != status) {
-          GST_ERROR ("failed to get dmabuf handle");
-          va_status = vaDestroyImage (gst_msdk_context_get_handle (context),
-              msdk_mids[i].image.image_id);
-          if (va_status == VA_STATUS_SUCCESS) {
-            msdk_mids[i].image.image_id = VA_INVALID_ID;
-            msdk_mids[i].image.buf = VA_INVALID_ID;
-          }
+        /* This plugin supports single object only */
+        if (va_desc.num_objects > 1) {
+          GST_ERROR ("Can not support multiple objects");
+          return MFX_ERR_UNSUPPORTED;
         }
-      } else {
-        /* useful to check the image mapping state later */
-        msdk_mids[i].image.image_id = VA_INVALID_ID;
-        msdk_mids[i].image.buf = VA_INVALID_ID;
+
+        msdk_mids[i].desc = va_desc;
       }
+
+      /* Don't use image for DMABuf */
+      msdk_mids[i].image.image_id = VA_INVALID_ID;
+      msdk_mids[i].image.buf = VA_INVALID_ID;
 
       msdk_mids[i].surface = &surfaces[i];
       mids[i] = (mfxMemId *) & msdk_mids[i];
@@ -225,6 +247,11 @@ gst_msdk_frame_alloc (mfxHDL pthis, mfxFrameAllocRequest * req,
       surfaces[i] = coded_buf;
       msdk_mids[i].surface = &surfaces[i];
       msdk_mids[i].fourcc = fourcc;
+
+      /* Don't use image for P208 */
+      msdk_mids[i].image.image_id = VA_INVALID_ID;
+      msdk_mids[i].image.buf = VA_INVALID_ID;
+
       mids[i] = (mfxMemId *) & msdk_mids[i];
     }
   }
@@ -271,9 +298,12 @@ gst_msdk_frame_free (mfxHDL pthis, mfxFrameAllocResponse * resp)
     for (i = 0; i < resp->NumFrameActual; i++) {
       GstMsdkMemoryID *mem = resp->mids[i];
 
-      /* Release dmabuf handle if used */
-      if (mem->info.mem_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME)
-        vaReleaseBufferHandle (dpy, mem->image.buf);
+      /* Release prime fd if used */
+      if (mem->desc.num_objects) {
+        g_assert (mem->desc.num_objects == 1);
+        close (mem->desc.objects[0].fd);
+        mem->desc.num_objects = 0;
+      }
 
       if (mem->image.image_id != VA_INVALID_ID &&
           vaDestroyImage (dpy, mem->image.image_id) == VA_STATUS_SUCCESS) {
@@ -316,7 +346,7 @@ gst_msdk_frame_lock (mfxHDL pthis, mfxMemId mid, mfxFrameData * data)
   va_surface = mem_id->surface;
   dpy = gst_msdk_context_get_handle (context);
 
-  if (mem_id->info.mem_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME) {
+  if (mem_id->desc.num_objects) {
     GST_WARNING ("Couldn't map the buffer since dmabuf is already in use");
     return MFX_ERR_LOCK_MEMORY;
   }
@@ -428,6 +458,21 @@ gst_msdk_frame_lock (mfxHDL pthis, mfxMemId mid, mfxFrameData * data)
         data->A = data->R + 3;
         break;
 
+#if (MFX_VERSION >= 2004)
+      case VA_FOURCC_RGBP:
+        data->Pitch = mem_id->image.pitches[0];
+        data->R = buf + mem_id->image.offsets[0];
+        data->G = buf + mem_id->image.offsets[1];
+        data->B = buf + mem_id->image.offsets[2];
+        break;
+      case VA_FOURCC_BGRP:
+        data->Pitch = mem_id->image.pitches[0];
+        data->B = buf + mem_id->image.offsets[0];
+        data->G = buf + mem_id->image.offsets[1];
+        data->R = buf + mem_id->image.offsets[2];
+        break;
+#endif
+
       default:
         g_assert_not_reached ();
         break;
@@ -455,6 +500,8 @@ gst_msdk_frame_unlock (mfxHDL pthis, mfxMemId mid, mfxFrameData * ptr)
 
   mem_id = (GstMsdkMemoryID *) mid;
   dpy = gst_msdk_context_get_handle (context);
+
+  g_assert (mem_id->desc.num_objects == 0);
 
   if (mem_id->fourcc != MFX_FOURCC_P8) {
     vaUnmapBuffer (dpy, mem_id->image.buf);
@@ -510,10 +557,13 @@ gst_msdk_get_dmabuf_info_from_surface (mfxFrameSurface1 * surface,
   g_return_val_if_fail (surface, FALSE);
 
   mem_id = (GstMsdkMemoryID *) surface->Data.MemId;
+
+  g_assert (mem_id->desc.num_objects == 1);
+
   if (handle)
-    *handle = mem_id->info.handle;
+    *handle = mem_id->desc.objects[0].fd;
   if (size)
-    *size = mem_id->info.mem_size;
+    *size = mem_id->desc.objects[0].size;
 
   return TRUE;
 }
@@ -606,6 +656,16 @@ gst_msdk_export_dmabuf_to_vasurface (GstMsdkContext * context,
       va_fourcc = VA_FOURCC_Y416;
       break;
 #endif
+#if (MFX_VERSION >= 2004)
+    case GST_VIDEO_FORMAT_RGBP:
+      va_chroma = VA_RT_FORMAT_RGBP;
+      va_fourcc = VA_FOURCC_RGBP;
+      break;
+    case GST_VIDEO_FORMAT_BGRP:
+      va_chroma = VA_RT_FORMAT_RGBP;
+      va_fourcc = VA_FOURCC_BGRP;
+      break;
+#endif
     default:
       goto error_unsupported_format;
   }
@@ -657,6 +717,107 @@ error_create_surface:
     GST_ERROR ("Failed to create the VASurface from DRM_PRIME FD");
     return FALSE;
   }
+}
+
+static VASurfaceID
+_get_va_surface (GstBuffer * buf, GstVideoInfo * info,
+    GstMsdkContext * msdk_context)
+{
+  VASurfaceID va_surface = VA_INVALID_ID;
+
+  if (!info) {
+    va_surface = gst_va_buffer_get_surface (buf);
+  } else {
+    /* Update offset/stride/size if there is VideoMeta attached to
+     * the dma buffer, which is then used to get vasurface */
+    GstMemory *mem;
+    gint i, fd;
+    GstVideoMeta *vmeta;
+
+    vmeta = gst_buffer_get_video_meta (buf);
+    if (vmeta) {
+      if (GST_VIDEO_INFO_FORMAT (info) != vmeta->format ||
+          GST_VIDEO_INFO_WIDTH (info) != vmeta->width ||
+          GST_VIDEO_INFO_HEIGHT (info) != vmeta->height ||
+          GST_VIDEO_INFO_N_PLANES (info) != vmeta->n_planes) {
+        GST_ERROR ("VideoMeta attached to buffer is not matching"
+            "the negotiated width/height/format");
+        return va_surface;
+      }
+      for (i = 0; i < GST_VIDEO_INFO_N_PLANES (info); ++i) {
+        GST_VIDEO_INFO_PLANE_OFFSET (info, i) = vmeta->offset[i];
+        GST_VIDEO_INFO_PLANE_STRIDE (info, i) = vmeta->stride[i];
+      }
+      GST_VIDEO_INFO_SIZE (info) = gst_buffer_get_size (buf);
+    }
+
+    mem = gst_buffer_peek_memory (buf, 0);
+    fd = gst_dmabuf_memory_get_fd (mem);
+    if (fd < 0)
+      return va_surface;
+    /* export dmabuf to vasurface */
+    if (!gst_msdk_export_dmabuf_to_vasurface (msdk_context, info, fd,
+            &va_surface))
+      return VA_INVALID_ID;
+  }
+
+  return va_surface;
+}
+
+/* Currently parameter map_flag is not useful on Linux */
+GstMsdkSurface *
+gst_msdk_import_to_msdk_surface (GstBuffer * buf, GstMsdkContext * msdk_context,
+    GstVideoInfo * vinfo, guint map_flag)
+{
+  VASurfaceID va_surface = VA_INVALID_ID;
+  GstMemory *mem = NULL;
+  mfxFrameInfo frame_info = { 0, };
+  GstMsdkSurface *msdk_surface = NULL;
+  mfxFrameSurface1 *mfx_surface = NULL;
+  GstMsdkMemoryID *msdk_mid = NULL;
+
+  mem = gst_buffer_peek_memory (buf, 0);
+  msdk_surface = g_slice_new0 (GstMsdkSurface);
+
+  /* If buffer has qdata pointing to mfxFrameSurface1, directly extract it */
+  if ((mfx_surface = gst_mini_object_get_qdata (GST_MINI_OBJECT_CAST (mem),
+              GST_MSDK_FRAME_SURFACE))) {
+    msdk_surface->surface = mfx_surface;
+    msdk_surface->from_qdata = TRUE;
+    return msdk_surface;
+  }
+
+  if (gst_msdk_is_va_mem (mem)) {
+    va_surface = _get_va_surface (buf, NULL, NULL);
+  } else if (gst_is_dmabuf_memory (mem)) {
+    /* For dma memory, videoinfo is used with dma fd to create va surface. */
+    GstVideoInfo info = *vinfo;
+    va_surface = _get_va_surface (buf, &info, msdk_context);
+  }
+
+  if (va_surface == VA_INVALID_ID) {
+    g_slice_free (GstMsdkSurface, msdk_surface);
+    return NULL;
+  }
+
+  mfx_surface = g_slice_new0 (mfxFrameSurface1);
+  msdk_mid = g_slice_new0 (GstMsdkMemoryID);
+
+  msdk_mid->surface = g_slice_new0 (VASurfaceID);
+  *msdk_mid->surface = va_surface;
+
+  mfx_surface->Data.MemId = (mfxMemId) msdk_mid;
+
+  gst_msdk_set_mfx_frame_info_from_video_info (&frame_info, vinfo);
+  mfx_surface->Info = frame_info;
+
+  /* Set mfxFrameSurface1 as qdata in buffer */
+  gst_mini_object_set_qdata (GST_MINI_OBJECT_CAST (mem),
+      GST_MSDK_FRAME_SURFACE, mfx_surface, NULL);
+
+  msdk_surface->surface = mfx_surface;
+
+  return msdk_surface;
 }
 
 /**

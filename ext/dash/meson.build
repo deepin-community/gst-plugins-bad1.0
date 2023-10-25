@@ -35,7 +35,7 @@ dash_sources = [
 
 xml2_dep = dependency('libxml-2.0',
   version : '>= 2.8',
-  fallback : ['libxml2', 'xml2lib_dep'],
+  fallback : 'libxml2',
   required : get_option('dash')
 )
 
@@ -51,6 +51,5 @@ if xml2_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
-  pkgconfig.generate(gstdashdemux, install_dir : plugins_pkgconfig_install_dir)
   plugins += [gstdashdemux]
 endif

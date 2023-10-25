@@ -1,4 +1,6 @@
 gsttranscoder_plugin = library('gsttranscode',
+  'gsttranscodeelement.c',
+  'gsttranscodeplugin.c',
   'gsttranscodebin.c',
   'gst-cpu-throttling-clock.c',
   'gsturitranscodebin.c',
@@ -9,5 +11,4 @@ gsttranscoder_plugin = library('gsttranscode',
   install_dir : plugins_install_dir,
 )
 
-pkgconfig.generate(gsttranscoder_plugin, install_dir : plugins_pkgconfig_install_dir)
 plugins += [gsttranscoder_plugin]

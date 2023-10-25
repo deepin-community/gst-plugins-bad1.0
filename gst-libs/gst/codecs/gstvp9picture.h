@@ -21,7 +21,8 @@
 #define __GST_VP9_PICTURE_H__
 
 #include <gst/codecs/codecs-prelude.h>
-#include <gst/codecparsers/gstvp9parser.h>
+#include <gst/codecs/gstvp9statefulparser.h>
+#include <gst/video/video.h>
 
 G_BEGIN_DECLS
 
@@ -34,22 +35,20 @@ typedef struct _GstVp9Picture GstVp9Picture;
 
 struct _GstVp9Picture
 {
+  /*< private >*/
   GstMiniObject parent;
 
-  GstClockTime pts;
   /* From GstVideoCodecFrame */
   guint32 system_frame_number;
 
-  GstVp9FrameHdr frame_hdr;
-
-  /* copied from parser */
-  gint subsampling_x;
-  gint subsampling_y;
-  guint bit_depth;
+  GstVp9FrameHeader frame_hdr;
 
   /* raw data and size (does not have ownership) */
   const guint8 * data;
   gsize size;
+
+  /* decoder input state if this picture is discont point */
+  GstVideoCodecState *discont_state;
 
   gpointer user_data;
   GDestroyNotify notify;
@@ -82,7 +81,7 @@ gst_vp9_picture_replace (GstVp9Picture ** old_picture,
 }
 
 static inline void
-gst_vp9_picture_clear (GstVp9Picture ** picture)
+gst_clear_vp9_picture (GstVp9Picture ** picture)
 {
   if (picture && *picture) {
     gst_vp9_picture_unref (*picture);

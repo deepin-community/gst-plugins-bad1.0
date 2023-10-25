@@ -22,6 +22,7 @@
 #include "config.h"
 #endif
 
+#include <gst/base/base.h>
 #include <gst/video/video.h>
 #include "gstmfsourcereader.h"
 #include <string.h>
@@ -30,14 +31,12 @@
 #include <vector>
 #include <algorithm>
 
+/* *INDENT-OFF* */
 using namespace Microsoft::WRL;
-
-G_BEGIN_DECLS
+/* *INDENT-ON* */
 
 GST_DEBUG_CATEGORY_EXTERN (gst_mf_source_object_debug);
 #define GST_CAT_DEFAULT gst_mf_source_object_debug
-
-G_END_DECLS
 
 typedef struct _GstMFStreamMediaType
 {
@@ -71,8 +70,9 @@ struct _GstMFSourceReader
   GMainLoop *loop;
 
   /* protected by lock */
-  GQueue *queue;
+  GstQueueArray *queue;
 
+  IMFActivate *activate;
   IMFMediaSource *source;
   IMFSourceReader *reader;
 
@@ -86,20 +86,28 @@ struct _GstMFSourceReader
   gboolean flushing;
 };
 
+typedef struct _GstMFSourceReaderSample
+{
+  IMFSample *sample;
+  GstClockTime clock_time;
+} GstMFSourceReaderSample;
+
 static void gst_mf_source_reader_constructed (GObject * object);
 static void gst_mf_source_reader_finalize (GObject * object);
 
 static gboolean gst_mf_source_reader_start (GstMFSourceObject * object);
-static gboolean gst_mf_source_reader_stop  (GstMFSourceObject * object);
+static gboolean gst_mf_source_reader_stop (GstMFSourceObject * object);
 static GstFlowReturn gst_mf_source_reader_fill (GstMFSourceObject * object,
     GstBuffer * buffer);
 static GstFlowReturn gst_mf_source_reader_create (GstMFSourceObject * object,
     GstBuffer ** buffer);
 static gboolean gst_mf_source_reader_unlock (GstMFSourceObject * object);
 static gboolean gst_mf_source_reader_unlock_stop (GstMFSourceObject * object);
-static GstCaps * gst_mf_source_reader_get_caps (GstMFSourceObject * object);
+static GstCaps *gst_mf_source_reader_get_caps (GstMFSourceObject * object);
 static gboolean gst_mf_source_reader_set_caps (GstMFSourceObject * object,
     GstCaps * caps);
+static void
+gst_mf_source_reader_sample_clear (GstMFSourceReaderSample * reader_sample);
 
 static gboolean gst_mf_source_reader_open (GstMFSourceReader * object,
     IMFActivate * activate);
@@ -136,7 +144,10 @@ gst_mf_source_reader_class_init (GstMFSourceReaderClass * klass)
 static void
 gst_mf_source_reader_init (GstMFSourceReader * self)
 {
-  self->queue = g_queue_new ();
+  self->queue =
+      gst_queue_array_new_for_struct (sizeof (GstMFSourceReaderSample), 2);
+  gst_queue_array_set_clear_func (self->queue,
+      (GDestroyNotify) gst_mf_source_reader_sample_clear);
   g_mutex_init (&self->lock);
   g_cond_init (&self->cond);
 }
@@ -156,6 +167,8 @@ gst_mf_source_reader_constructed (GObject * object)
   while (!g_main_loop_is_running (self->loop))
     g_cond_wait (&self->cond, &self->lock);
   g_mutex_unlock (&self->lock);
+
+  G_OBJECT_CLASS (parent_class)->constructed (object);
 }
 
 static gboolean
@@ -164,11 +177,11 @@ gst_mf_enum_media_type_from_source_reader (IMFSourceReader * source_reader,
 {
   gint i, j;
   HRESULT hr;
-  GList *list = NULL;
-  std::vector<std::string> unhandled_caps;
+  GList *list = nullptr;
+  std::vector < std::string > unhandled_caps;
 
-  g_return_val_if_fail (source_reader != NULL, FALSE);
-  g_return_val_if_fail (media_types != NULL, FALSE);
+  g_return_val_if_fail (source_reader != nullptr, FALSE);
+  g_return_val_if_fail (media_types != nullptr, FALSE);
 
   {
     /* Retrive only the first video stream. non-first video stream might be
@@ -179,13 +192,13 @@ gst_mf_enum_media_type_from_source_reader (IMFSourceReader * source_reader,
      */
     i = MF_SOURCE_READER_FIRST_VIDEO_STREAM;
     for (j = 0;; j++) {
-      ComPtr<IMFMediaType> media_type;
+      ComPtr < IMFMediaType > media_type;
 
       hr = source_reader->GetNativeMediaType (i, j, &media_type);
 
       if (SUCCEEDED (hr)) {
         GstMFStreamMediaType *mtype;
-        GstCaps *caps = NULL;
+        GstCaps *caps = nullptr;
         GstStructure *s;
         std::string name;
 
@@ -199,10 +212,10 @@ gst_mf_enum_media_type_from_source_reader (IMFSourceReader * source_reader,
         name = gst_structure_get_name (s);
         if (name != "video/x-raw" && name != "image/jpeg") {
           auto it =
-              std::find(unhandled_caps.begin(), unhandled_caps.end(), name);
-          if (it == unhandled_caps.end()) {
-            GST_FIXME ("Skip not supported format %s", name.c_str());
-            unhandled_caps.push_back(name);
+              std::find (unhandled_caps.begin (), unhandled_caps.end (), name);
+          if (it == unhandled_caps.end ()) {
+            GST_FIXME ("Skip not supported format %s", name.c_str ());
+            unhandled_caps.push_back (name);
           }
           gst_caps_unref (caps);
           continue;
@@ -233,16 +246,19 @@ gst_mf_enum_media_type_from_source_reader (IMFSourceReader * source_reader,
   }
 
 done:
+  if (!list)
+    return FALSE;
+
   list = g_list_reverse (list);
   *media_types = list;
 
-  return ! !list;
+  return TRUE;
 }
 
 static void
 gst_mf_stream_media_type_free (GstMFStreamMediaType * media_type)
 {
-  g_return_if_fail (media_type != NULL);
+  g_return_if_fail (media_type != nullptr);
 
   if (media_type->media_type)
     media_type->media_type->Release ();
@@ -269,11 +285,11 @@ gst_mf_source_reader_open (GstMFSourceReader * self, IMFActivate * activate)
 {
   GList *iter;
   HRESULT hr;
-  ComPtr<IMFSourceReader> reader;
-  ComPtr<IMFMediaSource> source;
-  ComPtr<IMFAttributes> attr;
+  ComPtr < IMFSourceReader > reader;
+  ComPtr < IMFMediaSource > source;
+  ComPtr < IMFAttributes > attr;
 
-  hr = activate->ActivateObject (IID_IMFMediaSource, (void **) &source);
+  hr = activate->ActivateObject (IID_PPV_ARGS (&source));
   if (!gst_mf_result (hr))
     return FALSE;
 
@@ -297,6 +313,8 @@ gst_mf_source_reader_open (GstMFSourceReader * self, IMFActivate * activate)
     return FALSE;
   }
 
+  self->activate = activate;
+  activate->AddRef ();
   self->source = source.Detach ();
   self->reader = reader.Detach ();
 
@@ -322,21 +340,27 @@ gst_mf_source_reader_close (GstMFSourceReader * self)
 {
   gst_clear_caps (&self->supported_caps);
 
+  if (self->activate) {
+    self->activate->ShutdownObject ();
+    self->activate->Release ();
+    self->activate = nullptr;
+  }
+
   if (self->media_types) {
     g_list_free_full (self->media_types,
         (GDestroyNotify) gst_mf_stream_media_type_free);
-    self->media_types = NULL;
+    self->media_types = nullptr;
   }
 
   if (self->reader) {
     self->reader->Release ();
-    self->reader = NULL;
+    self->reader = nullptr;
   }
 
   if (self->source) {
     self->source->Shutdown ();
     self->source->Release ();
-    self->source = NULL;
+    self->source = nullptr;
   }
 
   return TRUE;
@@ -352,7 +376,7 @@ gst_mf_source_reader_finalize (GObject * object)
   g_main_loop_unref (self->loop);
   g_main_context_unref (self->context);
 
-  g_queue_free (self->queue);
+  gst_queue_array_free (self->queue);
   gst_clear_caps (&self->supported_caps);
   g_mutex_clear (&self->lock);
   g_cond_clear (&self->cond);
@@ -412,11 +436,22 @@ gst_mf_source_reader_start (GstMFSourceObject * object)
     return FALSE;
 
   hr = self->reader->SetCurrentMediaType (type->stream_index,
-      NULL, type->media_type);
+      nullptr, type->media_type);
   if (!gst_mf_result (hr))
     return FALSE;
 
   return TRUE;
+}
+
+static GstMFSourceReaderSample *
+gst_mf_source_reader_sample_new (IMFSample * sample, GstClockTime timestamp)
+{
+  GstMFSourceReaderSample *reader_sample = g_new0 (GstMFSourceReaderSample, 1);
+
+  reader_sample->sample = sample;
+  reader_sample->clock_time = timestamp;
+
+  return reader_sample;
 }
 
 static gboolean
@@ -424,10 +459,7 @@ gst_mf_source_reader_stop (GstMFSourceObject * object)
 {
   GstMFSourceReader *self = GST_MF_SOURCE_READER (object);
 
-  while (!g_queue_is_empty (self->queue)) {
-    IMFMediaBuffer *buffer = (IMFMediaBuffer *) g_queue_pop_head (self->queue);
-    buffer->Release ();
-  }
+  gst_queue_array_clear (self->queue);
 
   return TRUE;
 }
@@ -436,47 +468,55 @@ static GstFlowReturn
 gst_mf_source_reader_read_sample (GstMFSourceReader * self)
 {
   HRESULT hr;
-  DWORD count = 0, i;
   DWORD stream_flags = 0;
   GstMFStreamMediaType *type = self->cur_type;
-  ComPtr<IMFSample> sample;
+  IMFSample *sample = nullptr;
+  GstMFSourceReaderSample reader_sample;
 
-  hr = self->reader->ReadSample (type->stream_index, 0, NULL, &stream_flags,
-    NULL, &sample);
+  hr = self->reader->ReadSample (type->stream_index, 0, nullptr, &stream_flags,
+      nullptr, &sample);
 
-  if (!gst_mf_result (hr))
+  if (!gst_mf_result (hr)) {
+    GST_ERROR_OBJECT (self, "Failed to read sample");
     return GST_FLOW_ERROR;
-
-  if ((stream_flags & MF_SOURCE_READERF_ERROR) == MF_SOURCE_READERF_ERROR)
-    return GST_FLOW_ERROR;
-
-  if (!sample)
-    return GST_FLOW_OK;
-
-  hr = sample->GetBufferCount (&count);
-  if (!gst_mf_result (hr) || !count)
-    return GST_FLOW_OK;
-
-  for (i = 0; i < count; i++) {
-    IMFMediaBuffer *buffer = NULL;
-
-    hr = sample->GetBufferByIndex (i, &buffer);
-    if (!gst_mf_result (hr) || !buffer)
-      continue;
-
-    g_queue_push_tail (self->queue, buffer);
   }
+
+  if ((stream_flags & MF_SOURCE_READERF_ERROR) == MF_SOURCE_READERF_ERROR) {
+    GST_ERROR_OBJECT (self, "Error while reading sample, sample flags 0x%x",
+        stream_flags);
+    return GST_FLOW_ERROR;
+  }
+
+  if (!sample) {
+    GST_WARNING_OBJECT (self, "Empty sample");
+    return GST_FLOW_OK;
+  }
+
+  reader_sample.sample = sample;
+  reader_sample.clock_time =
+      gst_mf_source_object_get_running_time (GST_MF_SOURCE_OBJECT (self));
+
+  gst_queue_array_push_tail_struct (self->queue, &reader_sample);
 
   return GST_FLOW_OK;
 }
 
 static GstFlowReturn
 gst_mf_source_reader_get_media_buffer (GstMFSourceReader * self,
-    IMFMediaBuffer ** media_buffer)
+    IMFMediaBuffer ** buffer, GstClockTime * timestamp, GstClockTime * duration)
 {
   GstFlowReturn ret = GST_FLOW_OK;
+  IMFSample *sample = nullptr;
+  HRESULT hr;
+  DWORD count = 0;
+  LONGLONG mf_timestamp;
+  GstMFSourceReaderSample *reader_sample = nullptr;
 
-  while (g_queue_is_empty (self->queue)) {
+  *buffer = nullptr;
+  *timestamp = GST_CLOCK_TIME_NONE;
+  *duration = GST_CLOCK_TIME_NONE;
+
+  while (gst_queue_array_is_empty (self->queue)) {
     ret = gst_mf_source_reader_read_sample (self);
     if (ret != GST_FLOW_OK)
       return ret;
@@ -489,7 +529,37 @@ gst_mf_source_reader_get_media_buffer (GstMFSourceReader * self,
     g_mutex_unlock (&self->lock);
   }
 
-  *media_buffer = (IMFMediaBuffer *) g_queue_pop_head (self->queue);
+  reader_sample =
+      (GstMFSourceReaderSample *) gst_queue_array_pop_head_struct (self->queue);
+  sample = reader_sample->sample;
+  g_assert (sample);
+
+  hr = sample->GetBufferCount (&count);
+  if (!gst_mf_result (hr) || count == 0) {
+    GST_WARNING_OBJECT (self, "Empty IMFSample, read again");
+    goto done;
+  }
+
+  /* XXX: read the first buffer and ignore the others for now */
+  hr = sample->GetBufferByIndex (0, buffer);
+  if (!gst_mf_result (hr)) {
+    GST_WARNING_OBJECT (self, "Couldn't get IMFMediaBuffer from sample");
+    goto done;
+  }
+
+  hr = sample->GetSampleDuration (&mf_timestamp);
+  if (!gst_mf_result (hr)) {
+    GST_WARNING_OBJECT (self, "Couldn't get sample duration");
+    *duration = GST_CLOCK_TIME_NONE;
+  } else {
+    /* Media Foundation uses 100 nano seconds unit */
+    *duration = mf_timestamp * 100;
+  }
+
+  *timestamp = reader_sample->clock_time;
+
+done:
+  gst_mf_source_reader_sample_clear (reader_sample);
 
   return GST_FLOW_OK;
 }
@@ -499,17 +569,23 @@ gst_mf_source_reader_fill (GstMFSourceObject * object, GstBuffer * buffer)
 {
   GstMFSourceReader *self = GST_MF_SOURCE_READER (object);
   GstFlowReturn ret = GST_FLOW_OK;
-  ComPtr<IMFMediaBuffer> media_buffer;
+  ComPtr < IMFMediaBuffer > media_buffer;
   GstVideoFrame frame;
   BYTE *data;
   gint i, j;
   HRESULT hr;
+  GstClockTime timestamp = GST_CLOCK_TIME_NONE;
+  GstClockTime duration = GST_CLOCK_TIME_NONE;
 
-  ret = gst_mf_source_reader_get_media_buffer (self, &media_buffer);
+  do {
+    ret = gst_mf_source_reader_get_media_buffer (self,
+        media_buffer.ReleaseAndGetAddressOf (), &timestamp, &duration);
+  } while (ret == GST_FLOW_OK && !media_buffer);
+
   if (ret != GST_FLOW_OK)
     return ret;
 
-  hr = media_buffer->Lock (&data, NULL, NULL);
+  hr = media_buffer->Lock (&data, nullptr, nullptr);
   if (!gst_mf_result (hr)) {
     GST_ERROR_OBJECT (self, "Failed to lock media buffer");
     return GST_FLOW_ERROR;
@@ -568,6 +644,10 @@ gst_mf_source_reader_fill (GstMFSourceObject * object, GstBuffer * buffer)
   gst_video_frame_unmap (&frame);
   media_buffer->Unlock ();
 
+  GST_BUFFER_PTS (buffer) = timestamp;
+  GST_BUFFER_DTS (buffer) = GST_CLOCK_TIME_NONE;
+  GST_BUFFER_DURATION (buffer) = duration;
+
   return GST_FLOW_OK;
 }
 
@@ -576,18 +656,24 @@ gst_mf_source_reader_create (GstMFSourceObject * object, GstBuffer ** buffer)
 {
   GstMFSourceReader *self = GST_MF_SOURCE_READER (object);
   GstFlowReturn ret = GST_FLOW_OK;
-  ComPtr<IMFMediaBuffer> media_buffer;
+  ComPtr < IMFMediaBuffer > media_buffer;
   HRESULT hr;
   BYTE *data;
   DWORD len = 0;
   GstBuffer *buf;
   GstMapInfo info;
+  GstClockTime timestamp = GST_CLOCK_TIME_NONE;
+  GstClockTime duration = GST_CLOCK_TIME_NONE;
 
-  ret = gst_mf_source_reader_get_media_buffer (self, &media_buffer);
+  do {
+    ret = gst_mf_source_reader_get_media_buffer (self,
+        media_buffer.ReleaseAndGetAddressOf (), &timestamp, &duration);
+  } while (ret == GST_FLOW_OK && !media_buffer);
+
   if (ret != GST_FLOW_OK)
     return ret;
 
-  hr = media_buffer->Lock (&data, NULL, &len);
+  hr = media_buffer->Lock (&data, nullptr, &len);
   if (!gst_mf_result (hr) || len == 0) {
     GST_ERROR_OBJECT (self, "Failed to lock media buffer");
     return GST_FLOW_ERROR;
@@ -605,6 +691,11 @@ gst_mf_source_reader_create (GstMFSourceObject * object, GstBuffer ** buffer)
   gst_buffer_unmap (buf, &info);
 
   media_buffer->Unlock ();
+
+  GST_BUFFER_PTS (buf) = timestamp;
+  /* Set DTS since this is compressed format */
+  GST_BUFFER_DTS (buf) = timestamp;
+  GST_BUFFER_DURATION (buf) = duration;
 
   *buffer = buf;
 
@@ -643,7 +734,7 @@ gst_mf_source_reader_get_caps (GstMFSourceObject * object)
   if (self->supported_caps)
     return gst_caps_ref (self->supported_caps);
 
-  return NULL;
+  return nullptr;
 }
 
 static gboolean
@@ -651,7 +742,7 @@ gst_mf_source_reader_set_caps (GstMFSourceObject * object, GstCaps * caps)
 {
   GstMFSourceReader *self = GST_MF_SOURCE_READER (object);
   GList *iter;
-  GstMFStreamMediaType *best_type = NULL;
+  GstMFStreamMediaType *best_type = nullptr;
 
   for (iter = self->media_types; iter; iter = g_list_next (iter)) {
     GstMFStreamMediaType *minfo = (GstMFStreamMediaType *) iter->data;
@@ -692,17 +783,17 @@ gst_mf_source_reader_thread_func (GstMFSourceReader * self)
 {
   GstMFSourceObject *object = GST_MF_SOURCE_OBJECT (self);
   GSource *source;
-  GList *activate_list = NULL;
-  GstMFDeviceActivate *target = NULL;
+  GList *activate_list = nullptr;
+  GstMFDeviceActivate *target = nullptr;
   GList *iter;
 
-  CoInitializeEx (NULL, COINIT_MULTITHREADED);
+  CoInitializeEx (nullptr, COINIT_MULTITHREADED);
 
   g_main_context_push_thread_default (self->context);
 
   source = g_idle_source_new ();
   g_source_set_callback (source,
-      (GSourceFunc) gst_mf_source_reader_main_loop_running_cb, self, NULL);
+      (GSourceFunc) gst_mf_source_reader_main_loop_running_cb, self, nullptr);
   g_source_attach (source, self->context);
   g_source_unref (source);
 
@@ -775,7 +866,7 @@ run_loop:
 
   CoUninitialize ();
 
-  return NULL;
+  return nullptr;
 }
 
 static gboolean
@@ -783,9 +874,9 @@ gst_mf_source_enum_device_activate (GstMFSourceReader * self,
     GstMFSourceType source_type, GList ** device_sources)
 {
   HRESULT hr;
-  GList *ret = NULL;
-  ComPtr<IMFAttributes> attr;
-  IMFActivate **devices = NULL;
+  GList *ret = nullptr;
+  ComPtr < IMFAttributes > attr;
+  IMFActivate **devices = nullptr;
   UINT32 i, count = 0;
 
   hr = MFCreateAttributes (&attr, 1);
@@ -818,9 +909,9 @@ gst_mf_source_enum_device_activate (GstMFSourceReader * self,
 
     switch (source_type) {
       case GST_MF_SOURCE_TYPE_VIDEO:
-        hr = activate->GetAllocatedString (
-            MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
-            &name, &name_len);
+        hr = activate->GetAllocatedString
+            (MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &name,
+            &name_len);
         break;
       default:
         g_assert_not_reached ();
@@ -833,7 +924,7 @@ gst_mf_source_enum_device_activate (GstMFSourceReader * self,
 
     if (gst_mf_result (hr)) {
       entry->path = g_utf16_to_utf8 ((const gunichar2 *) name,
-          -1, NULL, NULL, NULL);
+          -1, nullptr, nullptr, nullptr);
       CoTaskMemFree (name);
     }
 
@@ -841,7 +932,7 @@ gst_mf_source_enum_device_activate (GstMFSourceReader * self,
         &name, &name_len);
     if (gst_mf_result (hr)) {
       entry->name = g_utf16_to_utf8 ((const gunichar2 *) name,
-          -1, NULL, NULL, NULL);
+          -1, nullptr, nullptr, nullptr);
       CoTaskMemFree (name);
     }
 
@@ -849,18 +940,20 @@ gst_mf_source_enum_device_activate (GstMFSourceReader * self,
   }
 
 done:
-  ret = g_list_reverse (ret);
   CoTaskMemFree (devices);
 
-  *device_sources = ret;
+  if (!ret)
+    return FALSE;
 
-  return ! !ret;
+  *device_sources = g_list_reverse (ret);
+
+  return TRUE;
 }
 
 static void
 gst_mf_device_activate_free (GstMFDeviceActivate * activate)
 {
-  g_return_if_fail (activate != NULL);
+  g_return_if_fail (activate != nullptr);
 
   if (activate->handle)
     activate->handle->Release ();
@@ -870,6 +963,19 @@ gst_mf_device_activate_free (GstMFDeviceActivate * activate)
   g_free (activate);
 }
 
+static void
+gst_mf_source_reader_sample_clear (GstMFSourceReaderSample * reader_sample)
+{
+  if (!reader_sample)
+    return;
+
+  if (reader_sample->sample)
+    reader_sample->sample->Release ();
+
+  reader_sample->sample = nullptr;
+  reader_sample->clock_time = GST_CLOCK_TIME_NONE;
+}
+
 GstMFSourceObject *
 gst_mf_source_reader_new (GstMFSourceType type, gint device_index,
     const gchar * device_name, const gchar * device_path)
@@ -877,18 +983,18 @@ gst_mf_source_reader_new (GstMFSourceType type, gint device_index,
   GstMFSourceObject *self;
 
   /* TODO: add more type */
-  g_return_val_if_fail (type == GST_MF_SOURCE_TYPE_VIDEO, NULL);
+  g_return_val_if_fail (type == GST_MF_SOURCE_TYPE_VIDEO, nullptr);
 
   self = (GstMFSourceObject *) g_object_new (GST_TYPE_MF_SOURCE_READER,
       "source-type", type, "device-index", device_index, "device-name",
-      device_name, "device-path", device_path, NULL);
+      device_name, "device-path", device_path, nullptr);
 
   gst_object_ref_sink (self);
 
   if (!self->opened) {
-    GST_WARNING_OBJECT (self, "Couldn't open device");
+    GST_DEBUG_OBJECT (self, "Couldn't open device");
     gst_object_unref (self);
-    return NULL;
+    return nullptr;
   }
 
   return self;

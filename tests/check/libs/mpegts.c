@@ -16,6 +16,9 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include <gst/check/gstcheck.h>
 #include <gst/mpegts/mpegts.h>
@@ -67,6 +70,16 @@ static const guint8 stt_data_check[] = {
   0x00, 0x00, 0x23, 0xb4, 0xe6, 0x5C, 0x0c,
   0xc0, 0x00, 0xc4, 0x86, 0x56, 0xa5
 };
+
+static gboolean
+_has_iso6937_iconv (void)
+{
+  gboolean supported;
+  GIConv test = g_iconv_open ("iso6937", "utf-8");
+  supported = (test != (GIConv) - 1);
+  g_iconv_close (test);
+  return supported;
+}
 
 GST_START_TEST (test_scte_sit)
 {
@@ -394,10 +407,12 @@ GST_START_TEST (test_mpegts_nit)
 
   fail_if (data == NULL);
 
-  for (i = 0; i < data_size; i++) {
-    if (data[i] != nit_data_check[i])
-      fail ("0x%X != 0x%X in byte %d of NIT section", data[i],
-          nit_data_check[i], i);
+  if (_has_iso6937_iconv ()) {
+    for (i = 0; i < data_size; i++) {
+      if (data[i] != nit_data_check[i])
+        fail ("0x%X != 0x%X in byte %d of NIT section", data[i],
+            nit_data_check[i], i);
+    }
   }
 
   /* Check assertion on bad CRC. Reset parsed data, and make the CRC corrupt */
@@ -483,10 +498,12 @@ GST_START_TEST (test_mpegts_sdt)
 
   fail_if (data == NULL);
 
-  for (i = 0; i < data_size; i++) {
-    if (data[i] != sdt_data_check[i])
-      fail ("0x%X != 0x%X in byte %d of SDT section", data[i],
-          sdt_data_check[i], i);
+  if (_has_iso6937_iconv ()) {
+    for (i = 0; i < data_size; i++) {
+      if (data[i] != sdt_data_check[i])
+        fail ("0x%X != 0x%X in byte %d of SDT section", data[i],
+            sdt_data_check[i], i);
+    }
   }
 
   /* Check assertion on bad CRC. Reset parsed data, and make the CRC corrupt */
@@ -509,7 +526,7 @@ GST_START_TEST (test_mpegts_atsc_stt)
   guint8 *data;
   GstDateTime *dt;
 
-  data = g_memdup (stt_data_check, 20);
+  data = g_memdup2 (stt_data_check, 20);
 
   section = gst_mpegts_section_new (0x1ffb, data, 20);
   stt = gst_mpegts_section_get_atsc_stt (section);
@@ -591,13 +608,16 @@ GST_START_TEST (test_mpegts_dvb_descriptors)
   /* Check creation of descriptor */
   desc = gst_mpegts_descriptor_from_dvb_network_name ("Name");
   fail_if (desc == NULL);
-  fail_unless (desc->length == 4);
+  if (_has_iso6937_iconv ())
+    fail_unless (desc->length == 4);
   fail_unless (desc->tag == 0x40);
 
-  for (i = 0; i < 6; i++) {
-    if (desc->data[i] != network_name_descriptor[i])
-      fail ("0x%X != 0x%X in byte %d of network name descriptor",
-          desc->data[i], network_name_descriptor[i], i);
+  if (_has_iso6937_iconv ()) {
+    for (i = 0; i < 6; i++) {
+      if (desc->data[i] != network_name_descriptor[i])
+        fail ("0x%X != 0x%X in byte %d of network name descriptor",
+            desc->data[i], network_name_descriptor[i], i);
+    }
   }
 
   /* Check parsing of descriptor */
@@ -620,13 +640,16 @@ GST_START_TEST (test_mpegts_dvb_descriptors)
   desc = gst_mpegts_descriptor_from_dvb_service
       (GST_DVB_SERVICE_DIGITAL_TELEVISION, "Name", "Provider");
   fail_if (desc == NULL);
-  fail_unless (desc->length == 15);
+  if (_has_iso6937_iconv ())
+    fail_unless (desc->length == 15);
   fail_unless (desc->tag == 0x48);
 
-  for (i = 0; i < 17; i++) {
-    if (desc->data[i] != service_descriptor[i])
-      fail ("0x%X != 0x%X in byte %d of service descriptor",
-          desc->data[i], service_descriptor[i], i);
+  if (_has_iso6937_iconv ()) {
+    for (i = 0; i < 17; i++) {
+      if (desc->data[i] != service_descriptor[i])
+        fail ("0x%X != 0x%X in byte %d of service descriptor",
+            desc->data[i], service_descriptor[i], i);
+    }
   }
 
   /* Check parsing of descriptor with data */

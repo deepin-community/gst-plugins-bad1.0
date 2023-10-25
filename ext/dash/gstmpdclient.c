@@ -79,7 +79,7 @@ gst_mpd_client_get_adaptation_set_with_id (GList * adaptation_sets, guint id)
   return NULL;
 }
 
-static GstMPDNode *
+GstMPDRepresentationNode *
 gst_mpd_client_get_representation_with_id (GList * representations,
     gchar * rep_id)
 {
@@ -89,8 +89,21 @@ gst_mpd_client_get_representation_with_id (GList * representations,
   for (list = g_list_first (representations); list; list = g_list_next (list)) {
     representation = (GstMPDRepresentationNode *) list->data;
     if (!g_strcmp0 (representation->id, rep_id))
-      return GST_MPD_NODE (representation);
+      return GST_MPD_REPRESENTATION_NODE (representation);
   }
+  return NULL;
+}
+
+static GstMPDNode *
+gst_mpd_client_get_representation_with_id_filter (GList * representations,
+    gchar * rep_id)
+{
+  GstMPDRepresentationNode *representation =
+      gst_mpd_client_get_representation_with_id (representations, rep_id);
+
+  if (representation != NULL)
+    return GST_MPD_NODE (representation);
+
   return NULL;
 }
 
@@ -1692,7 +1705,10 @@ gst_mpd_client_stream_seek (GstMPDClient * client, GstActiveStream * stream,
         GstClockTime chunk_time;
 
         selectedChunk = segment;
-        repeat_index = (ts - segment->start) / segment->duration;
+        repeat_index =
+            ((ts - segment->start) +
+            ((GstMediaSegment *) stream->segments->pdata[0])->start) /
+            segment->duration;
 
         chunk_time = segment->start + segment->duration * repeat_index;
 
@@ -1752,7 +1768,7 @@ gst_mpd_client_stream_seek (GstMPDClient * client, GstActiveStream * stream,
 
     g_return_val_if_fail (GST_MPD_MULT_SEGMENT_BASE_NODE
         (stream->cur_seg_template)->SegmentTimeline == NULL, FALSE);
-    if (!GST_CLOCK_TIME_IS_VALID (duration)) {
+    if (!GST_CLOCK_TIME_IS_VALID (duration) || duration == 0) {
       return FALSE;
     }
 
@@ -2025,9 +2041,7 @@ gst_mpd_client_get_next_fragment (GstMPDClient * client,
 
     GST_DEBUG ("currentChunk->SegmentURL = %p", currentChunk->SegmentURL);
     if (currentChunk->SegmentURL != NULL) {
-      mediaURL =
-          g_strdup (gst_mpdparser_get_mediaURL (stream,
-              currentChunk->SegmentURL));
+      mediaURL = gst_mpdparser_get_mediaURL (stream, currentChunk->SegmentURL);
       indexURL = g_strdup (currentChunk->SegmentURL->index);
     } else if (stream->cur_seg_template != NULL) {
       mediaURL =
@@ -2299,9 +2313,8 @@ gst_mpd_client_get_next_header (GstMPDClient * client, gchar ** uri,
   *uri = NULL;
   if (stream->cur_segment_base) {
     if (stream->cur_segment_base->Initialization) {
-      *uri =
-          g_strdup (gst_mpdparser_get_initializationURL (stream,
-              stream->cur_segment_base->Initialization));
+      *uri = gst_mpdparser_get_initializationURL (stream,
+          stream->cur_segment_base->Initialization);
       if (stream->cur_segment_base->Initialization->range) {
         *range_start =
             stream->cur_segment_base->Initialization->range->first_byte_pos;
@@ -2309,9 +2322,8 @@ gst_mpd_client_get_next_header (GstMPDClient * client, gchar ** uri,
             stream->cur_segment_base->Initialization->range->last_byte_pos;
       }
     } else if (stream->cur_segment_base->indexRange) {
-      *uri =
-          g_strdup (gst_mpdparser_get_initializationURL (stream,
-              stream->cur_segment_base->Initialization));
+      *uri = gst_mpdparser_get_initializationURL (stream,
+          stream->cur_segment_base->Initialization);
       *range_start = 0;
       *range_end = stream->cur_segment_base->indexRange->first_byte_pos - 1;
     }
@@ -2346,9 +2358,8 @@ gst_mpd_client_get_next_header_index (GstMPDClient * client, gchar ** uri,
   GST_DEBUG ("Looking for current representation index");
   *uri = NULL;
   if (stream->cur_segment_base && stream->cur_segment_base->indexRange) {
-    *uri =
-        g_strdup (gst_mpdparser_get_initializationURL (stream,
-            stream->cur_segment_base->RepresentationIndex));
+    *uri = gst_mpdparser_get_initializationURL (stream,
+        stream->cur_segment_base->RepresentationIndex);
     *range_start = stream->cur_segment_base->indexRange->first_byte_pos;
     *range_end = stream->cur_segment_base->indexRange->last_byte_pos;
   } else if (stream->cur_seg_template && stream->cur_seg_template->index) {
@@ -3243,8 +3254,8 @@ gst_mpd_client_set_representation_node (GstMPDClient * client,
       (period_node->AdaptationSets, adaptation_set_id));
   g_return_val_if_fail (adap_set_node != NULL, NULL);
   rep_node =
-      GST_MPD_REPRESENTATION_NODE (gst_mpd_client_get_representation_with_id
-      (adap_set_node->Representations, representation_id));
+      gst_mpd_client_get_representation_with_id (adap_set_node->Representations,
+      representation_id);
   if (!rep_node) {
     rep_node = gst_mpd_representation_node_new ();
     if (representation_id)
@@ -3252,7 +3263,8 @@ gst_mpd_client_set_representation_node (GstMPDClient * client,
     else
       rep_node->id =
           _generate_new_string_id (adap_set_node->Representations,
-          "representation_%.2d", gst_mpd_client_get_representation_with_id);
+          "representation_%.2d",
+          gst_mpd_client_get_representation_with_id_filter);
     GST_DEBUG_OBJECT (client, "Add a new representation with id %s",
         rep_node->id);
     adap_set_node->Representations =
@@ -3289,8 +3301,8 @@ gst_mpd_client_set_segment_list (GstMPDClient * client,
   g_return_val_if_fail (adaptation_set != NULL, FALSE);
 
   representation =
-      GST_MPD_REPRESENTATION_NODE (gst_mpd_client_get_representation_with_id
-      (adaptation_set->Representations, rep_id));
+      gst_mpd_client_get_representation_with_id
+      (adaptation_set->Representations, rep_id);
   if (!representation->SegmentList) {
     representation->SegmentList = gst_mpd_segment_list_node_new ();
   }
@@ -3326,8 +3338,8 @@ gst_mpd_client_set_segment_template (GstMPDClient * client,
   g_return_val_if_fail (adaptation_set != NULL, FALSE);
 
   representation =
-      GST_MPD_REPRESENTATION_NODE (gst_mpd_client_get_representation_with_id
-      (adaptation_set->Representations, rep_id));
+      gst_mpd_client_get_representation_with_id
+      (adaptation_set->Representations, rep_id);
   if (!representation->SegmentTemplate) {
     representation->SegmentTemplate = gst_mpd_segment_template_node_new ();
   }
@@ -3365,8 +3377,8 @@ gst_mpd_client_add_segment_url (GstMPDClient * client,
   g_return_val_if_fail (adaptation_set != NULL, FALSE);
 
   representation =
-      GST_MPD_REPRESENTATION_NODE (gst_mpd_client_get_representation_with_id
-      (adaptation_set->Representations, rep_id));
+      gst_mpd_client_get_representation_with_id
+      (adaptation_set->Representations, rep_id);
 
   if (!representation->SegmentList) {
     representation->SegmentList = gst_mpd_segment_list_node_new ();

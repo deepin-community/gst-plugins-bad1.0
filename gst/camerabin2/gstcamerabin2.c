@@ -146,7 +146,7 @@
 
 #include <gst/basecamerabinsrc/gstbasecamerasrc.h>
 #include "gstcamerabin2.h"
-#include <gst/gst-i18n-plugin.h>
+#include <glib/gi18n-lib.h>
 #include <gst/pbutils/pbutils.h>
 #include <gst/glib-compat-private.h>
 
@@ -310,6 +310,11 @@ gst_camera_bin2_get_type (void)
 
   return gst_camera_bin_type;
 }
+
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (camerabin, "camerabin", GST_RANK_NONE,
+    gst_camera_bin2_get_type (), GST_DEBUG_CATEGORY_INIT (gst_camera_bin_debug,
+        "camerabin", 0, "CameraBin");
+    );
 
 /* GObject class functions */
 static void gst_camera_bin_set_property (GObject * object, guint prop_id,
@@ -2389,13 +2394,4 @@ gst_camera_bin_get_property (GObject * object, guint prop_id,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
-}
-
-gboolean
-gst_camera_bin2_plugin_init (GstPlugin * plugin)
-{
-  GST_DEBUG_CATEGORY_INIT (gst_camera_bin_debug, "camerabin", 0, "CameraBin");
-
-  return gst_element_register (plugin, "camerabin", GST_RANK_NONE,
-      gst_camera_bin2_get_type ());
 }
