@@ -96,8 +96,10 @@ struct _GstTimeCodeStamper
   GstClockTime last_tc_running_time;
   GstVideoTimeCode *rtc_tc;
 
-  /* Internal state */
-  GstVideoInfo vinfo; /* protected by object lock, changed only from video streaming thread */
+  /* Internal state, protected by object lock, changed only from video streaming thread */
+  gint fps_n;
+  gint fps_d;
+  GstVideoInterlaceMode interlace_mode;
 
   /* Seek handling, protected by the object lock */
   guint32 prev_seek_seqnum;
@@ -161,6 +163,7 @@ struct _GstTimeCodeStamperClass
 };
 
 GType gst_timecodestamper_get_type (void);
+GST_ELEMENT_REGISTER_DECLARE (timecodestamper);
 
 GType gst_timecodestamper_source_get_type (void);
 GType gst_timecodestamper_set_get_type (void);

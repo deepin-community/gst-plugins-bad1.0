@@ -51,8 +51,9 @@ struct _GstDecklinkVideoSink
 
   GstDecklinkModeEnum mode;
   gint device_number;
+  gint64 persistent_id;
   GstDecklinkVideoFormat video_format;
-  BMDDuplexMode duplex_mode;
+  GstDecklinkProfileId profile_id;
   BMDTimecodeFormat timecode_format;
   BMDKeyerMode keyer_mode;
   gint keyer_level;
@@ -75,6 +76,7 @@ struct _GstDecklinkVideoSink
   guint16 cdp_hdr_sequence_cntr;
 
   gint afd_bar_line;
+  GstDecklinkMappingFormat mapping_format;
 };
 
 struct _GstDecklinkVideoSinkClass
@@ -83,6 +85,8 @@ struct _GstDecklinkVideoSinkClass
 };
 
 GType gst_decklink_video_sink_get_type (void);
+
+GST_ELEMENT_REGISTER_DECLARE (decklinkvideosink);
 
 void gst_decklink_video_sink_convert_to_internal_clock (GstDecklinkVideoSink * self,
     GstClockTime * timestamp, GstClockTime * duration);

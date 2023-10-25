@@ -31,31 +31,18 @@
 #include <config.h>
 #endif
 
-#include <gst/gst.h>
-#include <wels/codec_api.h>
-#include <wels/codec_ver.h>
-#include <string.h>
-#include "gstopenh264dec.h"
-#include "gstopenh264enc.h"
+#include "gstopenh264elements.h"
+
 
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  /* g_stCodecVersion is the version detected at build time as defined in the
-   * headers and WelsGetCodecVersion() is the version detected at runtime.
-   * This is a safeguard to avoid crashes since OpenH264  has been changing
-   * ABI without changing the SONAME.
-   */
-  OpenH264Version libver = WelsGetCodecVersion ();
-  if (memcmp (&libver, &g_stCodecVersion, sizeof (libver)) == 0) {
-    gst_element_register (plugin, "openh264dec", GST_RANK_MARGINAL,
-        GST_TYPE_OPENH264DEC);
-    gst_element_register (plugin, "openh264enc", GST_RANK_MARGINAL,
-        GST_TYPE_OPENH264ENC);
-  } else {
-    GST_ERROR ("Incorrect library version loaded, expecting %s", g_strCodecVer);
-  }
-  return TRUE;
+  gboolean ret = FALSE;
+
+  ret |= GST_ELEMENT_REGISTER (openh264dec, plugin);
+  ret |= GST_ELEMENT_REGISTER (openh264enc, plugin);
+
+  return ret;
 }
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,

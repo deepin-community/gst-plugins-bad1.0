@@ -83,6 +83,10 @@ enum
   GST_MSDKENC_PROP_MBBRC,
   GST_MSDKENC_PROP_ADAPTIVE_I,
   GST_MSDKENC_PROP_ADAPTIVE_B,
+  GST_MSDKENC_PROP_EXT_CODING_PROPS,
+  GST_MSDKENC_PROP_LOWDELAY_BRC,
+  GST_MSDKENC_PROP_MAX_FRAME_SIZE_I,
+  GST_MSDKENC_PROP_MAX_FRAME_SIZE_P,
   GST_MSDKENC_PROP_MAX,
 };
 
@@ -132,6 +136,8 @@ struct _GstMsdkEnc
   GstVideoInfo aligned_info;
   gboolean use_video_memory;
   gboolean use_dmabuf;
+  gboolean use_va;
+  gboolean use_d3d11;
   gboolean initialized;
 
   /* element properties */
@@ -157,6 +163,11 @@ struct _GstMsdkEnc
   gint16 mbbrc;
   gint16 adaptive_i;
   gint16 adaptive_b;
+  guint max_frame_size_i;
+  guint max_frame_size_p;
+  gint16 lowdelay_brc;
+
+  GstStructure *ext_coding_props;
 
   gboolean reconfig;
 
@@ -183,6 +194,9 @@ struct _GstMsdkEncClass
 
   /* Allow sub class set extra frame parameters */
   void (*set_extra_params) (GstMsdkEnc * encoder, GstVideoCodecFrame * frame);
+
+  guint qp_max;
+  guint qp_min;
 };
 
 struct _MsdkEncTask

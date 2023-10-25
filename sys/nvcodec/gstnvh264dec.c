@@ -70,12 +70,28 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+/**
+ * SECTION:element-nvh264sldec
+ * @title: nvh264sldec
+ *
+ * GstCodecs based NVIDIA H.264 video decoder
+ *
+ * ## Example launch line
+ * ```
+ * gst-launch-1.0 filesrc location=/path/to/h264/file ! parsebin ! nvh264sldec ! videoconvert ! autovideosink
+ * ```
+ *
+ * Since: 1.18
+ *
+ */
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
+#include <gst/cuda/gstcudautils.h>
+
 #include "gstnvh264dec.h"
-#include "gstcudautils.h"
 #include "gstnvdecoder.h"
 
 #include <string.h>
@@ -83,17 +99,11 @@
 GST_DEBUG_CATEGORY_STATIC (gst_nv_h264_dec_debug);
 #define GST_CAT_DEFAULT gst_nv_h264_dec_debug
 
-struct _GstNvH264Dec
+typedef struct _GstNvH264Dec
 {
   GstH264Decoder parent;
 
-  GstVideoCodecState *output_state;
-
-  const GstH264SPS *last_sps;
-  const GstH264PPS *last_pps;
-
   GstCudaContext *context;
-  CUstream cuda_stream;
   GstNvDecoder *decoder;
   CUVIDPICPARAMS params;
 
@@ -113,26 +123,34 @@ struct _GstNvH264Dec
   guint bitdepth;
   guint chroma_format_idc;
   gint max_dpb_size;
-  GstVideoFormat out_format;
 
-  /* For OpenGL interop. */
-  GstObject *gl_display;
-  GstObject *gl_context;
-  GstObject *other_gl_context;
+  gboolean interlaced;
 
-  GstNvDecoderOutputType output_type;
-};
+  GArray *ref_list;
+} GstNvH264Dec;
 
-struct _GstNvH264DecClass
+typedef struct _GstNvH264DecClass
 {
   GstH264DecoderClass parent_class;
   guint cuda_device_id;
+} GstNvH264DecClass;
+
+enum
+{
+  PROP_0,
+  PROP_CUDA_DEVICE_ID,
 };
 
-#define gst_nv_h264_dec_parent_class parent_class
-G_DEFINE_TYPE (GstNvH264Dec, gst_nv_h264_dec, GST_TYPE_H264_DECODER);
+static GTypeClass *parent_class = NULL;
 
-static void gst_nv_h264_decoder_finalize (GObject * object);
+#define GST_NV_H264_DEC(object) ((GstNvH264Dec *) (object))
+#define GST_NV_H264_DEC_GET_CLASS(object) \
+    (G_TYPE_INSTANCE_GET_CLASS ((object),G_TYPE_FROM_INSTANCE (object),GstNvH264DecClass))
+
+static void gst_nv_h264_decoder_dispose (GObject * object);
+static void gst_nv_h264_dec_get_property (GObject * object, guint prop_id,
+    GValue * value, GParamSpec * pspec);
+
 static void gst_nv_h264_dec_set_context (GstElement * element,
     GstContext * context);
 static gboolean gst_nv_h264_dec_open (GstVideoDecoder * decoder);
@@ -144,37 +162,64 @@ static gboolean gst_nv_h264_dec_src_query (GstVideoDecoder * decoder,
     GstQuery * query);
 
 /* GstH264Decoder */
-static gboolean gst_nv_h264_dec_new_sequence (GstH264Decoder * decoder,
+static GstFlowReturn gst_nv_h264_dec_new_sequence (GstH264Decoder * decoder,
     const GstH264SPS * sps, gint max_dpb_size);
-static gboolean gst_nv_h264_dec_new_picture (GstH264Decoder * decoder,
+static GstFlowReturn gst_nv_h264_dec_new_picture (GstH264Decoder * decoder,
     GstVideoCodecFrame * frame, GstH264Picture * picture);
+static GstFlowReturn
+gst_nv_h264_dec_new_field_picture (GstH264Decoder * decoder,
+    GstH264Picture * first_field, GstH264Picture * second_field);
 static GstFlowReturn gst_nv_h264_dec_output_picture (GstH264Decoder *
     decoder, GstVideoCodecFrame * frame, GstH264Picture * picture);
-static gboolean gst_nv_h264_dec_start_picture (GstH264Decoder * decoder,
+static GstFlowReturn gst_nv_h264_dec_start_picture (GstH264Decoder * decoder,
     GstH264Picture * picture, GstH264Slice * slice, GstH264Dpb * dpb);
-static gboolean gst_nv_h264_dec_decode_slice (GstH264Decoder * decoder,
+static GstFlowReturn gst_nv_h264_dec_decode_slice (GstH264Decoder * decoder,
     GstH264Picture * picture, GstH264Slice * slice, GArray * ref_pic_list0,
     GArray * ref_pic_list1);
-static gboolean gst_nv_h264_dec_end_picture (GstH264Decoder * decoder,
+static GstFlowReturn gst_nv_h264_dec_end_picture (GstH264Decoder * decoder,
     GstH264Picture * picture);
+static guint
+gst_nv_h264_dec_get_preferred_output_delay (GstH264Decoder * decoder,
+    gboolean live);
 
 static void
-gst_nv_h264_dec_class_init (GstNvH264DecClass * klass)
+gst_nv_h264_dec_class_init (GstNvH264DecClass * klass,
+    GstNvDecoderClassData * cdata)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   GstElementClass *element_class = GST_ELEMENT_CLASS (klass);
   GstVideoDecoderClass *decoder_class = GST_VIDEO_DECODER_CLASS (klass);
   GstH264DecoderClass *h264decoder_class = GST_H264_DECODER_CLASS (klass);
 
-  /**
-   * GstNvH264Dec
-   *
-   * Since: 1.18
-   */
+  object_class->dispose = gst_nv_h264_decoder_dispose;
+  object_class->get_property = gst_nv_h264_dec_get_property;
 
-  object_class->finalize = gst_nv_h264_decoder_finalize;
+  /**
+   * GstNvH264SLDec:cuda-device-id:
+   *
+   * Assigned CUDA device id
+   *
+   * Since: 1.22
+   */
+  g_object_class_install_property (object_class, PROP_CUDA_DEVICE_ID,
+      g_param_spec_uint ("cuda-device-id", "CUDA device id",
+          "Assigned CUDA device id", 0, G_MAXINT, 0,
+          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
   element_class->set_context = GST_DEBUG_FUNCPTR (gst_nv_h264_dec_set_context);
+
+  parent_class = (GTypeClass *) g_type_class_peek_parent (klass);
+  gst_element_class_set_static_metadata (element_class,
+      "NVDEC H.264 Stateless Decoder",
+      "Codec/Decoder/Video/Hardware",
+      "NVIDIA H.264 video decoder", "Seungha Yang <seungha@centricular.com>");
+
+  gst_element_class_add_pad_template (element_class,
+      gst_pad_template_new ("sink", GST_PAD_SINK, GST_PAD_ALWAYS,
+          cdata->sink_caps));
+  gst_element_class_add_pad_template (element_class,
+      gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
+          cdata->src_caps));
 
   decoder_class->open = GST_DEBUG_FUNCPTR (gst_nv_h264_dec_open);
   decoder_class->close = GST_DEBUG_FUNCPTR (gst_nv_h264_dec_close);
@@ -187,6 +232,8 @@ gst_nv_h264_dec_class_init (GstNvH264DecClass * klass)
       GST_DEBUG_FUNCPTR (gst_nv_h264_dec_new_sequence);
   h264decoder_class->new_picture =
       GST_DEBUG_FUNCPTR (gst_nv_h264_dec_new_picture);
+  h264decoder_class->new_field_picture =
+      GST_DEBUG_FUNCPTR (gst_nv_h264_dec_new_field_picture);
   h264decoder_class->output_picture =
       GST_DEBUG_FUNCPTR (gst_nv_h264_dec_output_picture);
   h264decoder_class->start_picture =
@@ -195,27 +242,49 @@ gst_nv_h264_dec_class_init (GstNvH264DecClass * klass)
       GST_DEBUG_FUNCPTR (gst_nv_h264_dec_decode_slice);
   h264decoder_class->end_picture =
       GST_DEBUG_FUNCPTR (gst_nv_h264_dec_end_picture);
+  h264decoder_class->get_preferred_output_delay =
+      GST_DEBUG_FUNCPTR (gst_nv_h264_dec_get_preferred_output_delay);
 
-  GST_DEBUG_CATEGORY_INIT (gst_nv_h264_dec_debug,
-      "nvh264dec", 0, "Nvidia H.264 Decoder");
+  klass->cuda_device_id = cdata->cuda_device_id;
 
-  gst_type_mark_as_plugin_api (GST_TYPE_NV_H264_DEC, 0);
+  gst_caps_unref (cdata->sink_caps);
+  gst_caps_unref (cdata->src_caps);
+  g_free (cdata);
 }
 
 static void
 gst_nv_h264_dec_init (GstNvH264Dec * self)
 {
+  self->ref_list = g_array_sized_new (FALSE, TRUE,
+      sizeof (GstH264Picture *), 16);
+  g_array_set_clear_func (self->ref_list,
+      (GDestroyNotify) gst_clear_h264_picture);
 }
 
 static void
-gst_nv_h264_decoder_finalize (GObject * object)
+gst_nv_h264_decoder_dispose (GObject * object)
 {
   GstNvH264Dec *self = GST_NV_H264_DEC (object);
 
-  g_free (self->bitstream_buffer);
-  g_free (self->slice_offsets);
+  g_clear_pointer (&self->ref_list, g_array_unref);
 
-  G_OBJECT_CLASS (parent_class)->finalize (object);
+  G_OBJECT_CLASS (parent_class)->dispose (object);
+}
+
+static void
+gst_nv_h264_dec_get_property (GObject * object, guint prop_id, GValue * value,
+    GParamSpec * pspec)
+{
+  GstNvH264DecClass *klass = GST_NV_H264_DEC_GET_CLASS (object);
+
+  switch (prop_id) {
+    case PROP_CUDA_DEVICE_ID:
+      g_value_set_uint (value, klass->cuda_device_id);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
 }
 
 static void
@@ -227,9 +296,15 @@ gst_nv_h264_dec_set_context (GstElement * element, GstContext * context)
   GST_DEBUG_OBJECT (self, "set context %s",
       gst_context_get_context_type (context));
 
-  gst_nv_decoder_set_context (element, context, klass->cuda_device_id,
-      &self->context, &self->gl_display, &self->other_gl_context);
+  if (gst_cuda_handle_set_context (element, context, klass->cuda_device_id,
+          &self->context)) {
+    goto done;
+  }
 
+  if (self->decoder)
+    gst_nv_decoder_handle_set_context (self->decoder, element, context);
+
+done:
   GST_ELEMENT_CLASS (parent_class)->set_context (element, context);
 }
 
@@ -243,8 +318,8 @@ gst_d3d11_h264_dec_reset (GstNvH264Dec * self)
   self->coded_height = 0;
   self->bitdepth = 0;
   self->chroma_format_idc = 0;
-  self->out_format = GST_VIDEO_FORMAT_UNKNOWN;
   self->max_dpb_size = 0;
+  self->interlaced = FALSE;
 }
 
 static gboolean
@@ -253,10 +328,17 @@ gst_nv_h264_dec_open (GstVideoDecoder * decoder)
   GstNvH264Dec *self = GST_NV_H264_DEC (decoder);
   GstNvH264DecClass *klass = GST_NV_H264_DEC_GET_CLASS (self);
 
-  if (!gst_nv_decoder_ensure_element_data (GST_ELEMENT (self),
-          klass->cuda_device_id, &self->context, &self->cuda_stream,
-          &self->gl_display, &self->other_gl_context)) {
+  if (!gst_cuda_ensure_element_context (GST_ELEMENT (self),
+          klass->cuda_device_id, &self->context)) {
     GST_ERROR_OBJECT (self, "Required element data is unavailable");
+    return FALSE;
+  }
+
+  self->decoder = gst_nv_decoder_new (self->context);
+  if (!self->decoder) {
+    GST_ERROR_OBJECT (self, "Failed to create decoder object");
+    gst_clear_object (&self->context);
+
     return FALSE;
   }
 
@@ -270,21 +352,14 @@ gst_nv_h264_dec_close (GstVideoDecoder * decoder)
 {
   GstNvH264Dec *self = GST_NV_H264_DEC (decoder);
 
-  g_clear_pointer (&self->output_state, gst_video_codec_state_unref);
   gst_clear_object (&self->decoder);
-
-  if (self->context && self->cuda_stream) {
-    if (gst_cuda_context_push (self->context)) {
-      gst_cuda_result (CuStreamDestroy (self->cuda_stream));
-      gst_cuda_context_pop (NULL);
-    }
-  }
-
-  gst_clear_object (&self->gl_context);
-  gst_clear_object (&self->other_gl_context);
-  gst_clear_object (&self->gl_display);
   gst_clear_object (&self->context);
-  self->cuda_stream = NULL;
+
+  g_clear_pointer (&self->bitstream_buffer, g_free);
+  g_clear_pointer (&self->slice_offsets, g_free);
+
+  self->bitstream_buffer_alloc_size = 0;
+  self->slice_offsets_alloc_len = 0;
 
   return TRUE;
 }
@@ -297,9 +372,7 @@ gst_nv_h264_dec_negotiate (GstVideoDecoder * decoder)
 
   GST_DEBUG_OBJECT (self, "negotiate");
 
-  gst_nv_decoder_negotiate (decoder, h264dec->input_state, self->out_format,
-      self->width, self->height, self->gl_display, self->other_gl_context,
-      &self->gl_context, &self->output_state, &self->output_type);
+  gst_nv_decoder_negotiate (self->decoder, decoder, h264dec->input_state);
 
   /* TODO: add support D3D11 memory */
 
@@ -311,8 +384,10 @@ gst_nv_h264_dec_decide_allocation (GstVideoDecoder * decoder, GstQuery * query)
 {
   GstNvH264Dec *self = GST_NV_H264_DEC (decoder);
 
-  gst_nv_decoder_decide_allocation (decoder, query,
-      self->gl_context, self->output_type);
+  if (!gst_nv_decoder_decide_allocation (self->decoder, decoder, query)) {
+    GST_WARNING_OBJECT (self, "Failed to handle decide allocation");
+    return FALSE;
+  }
 
   return GST_VIDEO_DECODER_CLASS (parent_class)->decide_allocation
       (decoder, query);
@@ -325,9 +400,11 @@ gst_nv_h264_dec_src_query (GstVideoDecoder * decoder, GstQuery * query)
 
   switch (GST_QUERY_TYPE (query)) {
     case GST_QUERY_CONTEXT:
-      if (gst_nv_decoder_handle_context_query (GST_ELEMENT (self), query,
-              self->context, self->gl_display, self->gl_context,
-              self->other_gl_context)) {
+      if (gst_cuda_handle_context_query (GST_ELEMENT (decoder), query,
+              self->context)) {
+        return TRUE;
+      } else if (self->decoder &&
+          gst_nv_decoder_handle_context_query (self->decoder, decoder, query)) {
         return TRUE;
       }
       break;
@@ -338,13 +415,14 @@ gst_nv_h264_dec_src_query (GstVideoDecoder * decoder, GstQuery * query)
   return GST_VIDEO_DECODER_CLASS (parent_class)->src_query (decoder, query);
 }
 
-static gboolean
+static GstFlowReturn
 gst_nv_h264_dec_new_sequence (GstH264Decoder * decoder, const GstH264SPS * sps,
     gint max_dpb_size)
 {
   GstNvH264Dec *self = GST_NV_H264_DEC (decoder);
   gint crop_width, crop_height;
   gboolean modified = FALSE;
+  gboolean interlaced;
 
   GST_LOG_OBJECT (self, "new sequence");
 
@@ -379,67 +457,67 @@ gst_nv_h264_dec_new_sequence (GstH264Decoder * decoder, const GstH264SPS * sps,
     modified = TRUE;
   }
 
+  interlaced = !sps->frame_mbs_only_flag;
+  if (self->interlaced != interlaced) {
+    GST_INFO_OBJECT (self, "interlaced sequence changed");
+    self->interlaced = interlaced;
+    modified = TRUE;
+  }
+
   if (self->max_dpb_size < max_dpb_size) {
     GST_INFO_OBJECT (self, "Requires larger DPB size (%d -> %d)",
         self->max_dpb_size, max_dpb_size);
     modified = TRUE;
   }
 
-  if (modified || !self->decoder) {
+  if (modified || !gst_nv_decoder_is_configured (self->decoder)) {
     GstVideoInfo info;
-
-    self->out_format = GST_VIDEO_FORMAT_UNKNOWN;
+    GstVideoFormat out_format = GST_VIDEO_FORMAT_UNKNOWN;
 
     if (self->bitdepth == 8) {
       if (self->chroma_format_idc == 1)
-        self->out_format = GST_VIDEO_FORMAT_NV12;
+        out_format = GST_VIDEO_FORMAT_NV12;
       else {
         GST_FIXME_OBJECT (self, "Could not support 8bits non-4:2:0 format");
       }
     } else if (self->bitdepth == 10) {
       if (self->chroma_format_idc == 1)
-        self->out_format = GST_VIDEO_FORMAT_P010_10LE;
+        out_format = GST_VIDEO_FORMAT_P010_10LE;
       else {
         GST_FIXME_OBJECT (self, "Could not support 10bits non-4:2:0 format");
       }
     }
 
-    if (self->out_format == GST_VIDEO_FORMAT_UNKNOWN) {
+    if (out_format == GST_VIDEO_FORMAT_UNKNOWN) {
       GST_ERROR_OBJECT (self, "Could not support bitdepth/chroma format");
-      return FALSE;
+      return GST_FLOW_NOT_NEGOTIATED;
     }
 
-    gst_clear_object (&self->decoder);
-
-    gst_video_info_set_format (&info,
-        self->out_format, self->width, self->height);
+    gst_video_info_set_format (&info, out_format, self->width, self->height);
+    if (self->interlaced)
+      GST_VIDEO_INFO_INTERLACE_MODE (&info) = GST_VIDEO_INTERLACE_MODE_MIXED;
 
     self->max_dpb_size = max_dpb_size;
     /* FIXME: add support cudaVideoCodec_H264_SVC and cudaVideoCodec_H264_MVC */
-    self->decoder = gst_nv_decoder_new (self->context, cudaVideoCodec_H264,
-        &info,
-        /* Additional 2 buffers for margin */
-        max_dpb_size + 2);
-
-    if (!self->decoder) {
-      GST_ERROR_OBJECT (self, "Failed to create decoder");
-      return FALSE;
+    if (!gst_nv_decoder_configure (self->decoder,
+            cudaVideoCodec_H264, &info, self->coded_width, self->coded_height,
+            self->bitdepth, max_dpb_size, FALSE)) {
+      GST_ERROR_OBJECT (self, "Failed to configure decoder");
+      return GST_FLOW_NOT_NEGOTIATED;
     }
 
     if (!gst_video_decoder_negotiate (GST_VIDEO_DECODER (self))) {
       GST_ERROR_OBJECT (self, "Failed to negotiate with downstream");
-      return FALSE;
+      return GST_FLOW_NOT_NEGOTIATED;
     }
 
-    self->last_sps = NULL;
-    self->last_pps = NULL;
     memset (&self->params, 0, sizeof (CUVIDPICPARAMS));
   }
 
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
-static gboolean
+static GstFlowReturn
 gst_nv_h264_dec_new_picture (GstH264Decoder * decoder,
     GstVideoCodecFrame * frame, GstH264Picture * picture)
 {
@@ -449,16 +527,37 @@ gst_nv_h264_dec_new_picture (GstH264Decoder * decoder,
   nv_frame = gst_nv_decoder_new_frame (self->decoder);
   if (!nv_frame) {
     GST_ERROR_OBJECT (self, "No available decoder frame");
-    return FALSE;
+    return GST_FLOW_ERROR;
   }
 
   GST_LOG_OBJECT (self,
       "New decoder frame %p (index %d)", nv_frame, nv_frame->index);
 
   gst_h264_picture_set_user_data (picture,
-      nv_frame, (GDestroyNotify) gst_nv_decoder_frame_free);
+      nv_frame, (GDestroyNotify) gst_nv_decoder_frame_unref);
 
-  return TRUE;
+  return GST_FLOW_OK;
+}
+
+static GstFlowReturn
+gst_nv_h264_dec_new_field_picture (GstH264Decoder * decoder,
+    GstH264Picture * first_field, GstH264Picture * second_field)
+{
+  GstNvDecoderFrame *nv_frame;
+
+  nv_frame = (GstNvDecoderFrame *)
+      gst_h264_picture_get_user_data (first_field);
+  if (!nv_frame) {
+    GST_ERROR_OBJECT (decoder,
+        "No decoder frame in the first picture %p", first_field);
+    return GST_FLOW_ERROR;
+  }
+
+  gst_h264_picture_set_user_data (second_field,
+      gst_nv_decoder_frame_ref (nv_frame),
+      (GDestroyNotify) gst_nv_decoder_frame_unref);
+
+  return GST_FLOW_OK;
 }
 
 static GstFlowReturn
@@ -468,7 +567,6 @@ gst_nv_h264_dec_output_picture (GstH264Decoder * decoder,
   GstNvH264Dec *self = GST_NV_H264_DEC (decoder);
   GstVideoDecoder *vdec = GST_VIDEO_DECODER (decoder);
   GstNvDecoderFrame *decoder_frame;
-  gboolean ret G_GNUC_UNUSED = FALSE;
 
   GST_LOG_OBJECT (self,
       "Outputting picture %p (poc %d)", picture, picture->pic_order_cnt);
@@ -480,35 +578,21 @@ gst_nv_h264_dec_output_picture (GstH264Decoder * decoder,
     goto error;
   }
 
-  frame->output_buffer = gst_video_decoder_allocate_output_buffer (vdec);
-  if (!frame->output_buffer) {
-    GST_ERROR_OBJECT (self, "Couldn't allocate output buffer");
+  if (!gst_nv_decoder_finish_frame (self->decoder, vdec, picture->discont_state,
+          decoder_frame, &frame->output_buffer)) {
+    GST_ERROR_OBJECT (self, "Failed to handle output picture");
     goto error;
   }
 
-  if (self->output_type == GST_NV_DECOCER_OUTPUT_TYPE_GL) {
-    ret = gst_nv_decoder_finish_frame (self->decoder,
-        GST_NV_DECOCER_OUTPUT_TYPE_GL, self->gl_context,
-        decoder_frame, frame->output_buffer);
+  if (picture->buffer_flags != 0) {
+    gboolean interlaced =
+        (picture->buffer_flags & GST_VIDEO_BUFFER_FLAG_INTERLACED) != 0;
+    gboolean tff = (picture->buffer_flags & GST_VIDEO_BUFFER_FLAG_TFF) != 0;
 
-    /* FIXME: This is the case where OpenGL context of downstream glbufferpool
-     * belongs to non-nvidia (or different device).
-     * There should be enhancement to ensure nvdec has compatible OpenGL context
-     */
-    if (!ret) {
-      GST_WARNING_OBJECT (self,
-          "Couldn't copy frame to GL memory, fallback to system memory");
-      self->output_type = GST_NV_DECOCER_OUTPUT_TYPE_SYSTEM;
-    }
-  }
-
-  if (!ret) {
-    if (!gst_nv_decoder_finish_frame (self->decoder,
-            GST_NV_DECOCER_OUTPUT_TYPE_SYSTEM, NULL, decoder_frame,
-            frame->output_buffer)) {
-      GST_ERROR_OBJECT (self, "Failed to finish frame");
-      goto error;
-    }
+    GST_TRACE_OBJECT (self,
+        "apply buffer flags 0x%x (interlaced %d, top-field-first %d)",
+        picture->buffer_flags, interlaced, tff);
+    GST_BUFFER_FLAG_SET (frame->output_buffer, picture->buffer_flags);
   }
 
   gst_h264_picture_unref (picture);
@@ -516,8 +600,8 @@ gst_nv_h264_dec_output_picture (GstH264Decoder * decoder,
   return gst_video_decoder_finish_frame (vdec, frame);
 
 error:
-  gst_video_decoder_drop_frame (vdec, frame);
   gst_h264_picture_unref (picture);
+  gst_video_decoder_release_frame (vdec, frame);
 
   return GST_FLOW_ERROR;
 }
@@ -564,7 +648,7 @@ gst_nv_h264_dec_picture_params_from_sps (GstNvH264Dec * self,
     const GstH264SPS * sps, gboolean field_pic, CUVIDH264PICPARAMS * params)
 {
   params->residual_colour_transform_flag = sps->separate_colour_plane_flag;
-  params->MbaffFrameFlag = sps->mb_adaptive_frame_field_flag && field_pic;
+  params->MbaffFrameFlag = sps->mb_adaptive_frame_field_flag && !field_pic;
 
 #define COPY_FIELD(f) \
   (params)->f = (sps)->f
@@ -624,7 +708,68 @@ gst_nv_h264_dec_reset_bitstream_params (GstNvH264Dec * self)
   self->params.pSliceDataOffsets = NULL;
 }
 
-static gboolean
+static void
+gst_nv_h264_dec_fill_dpb (GstNvH264Dec * self, GstH264Picture * ref,
+    CUVIDH264DPBENTRY * dpb)
+{
+  GstNvDecoderFrame *frame;
+
+  dpb->not_existing = ref->nonexisting;
+  dpb->PicIdx = -1;
+
+  frame = gst_nv_h264_dec_get_decoder_frame_from_picture (self, ref);
+  if (!frame) {
+    dpb->not_existing = 1;
+  } else if (!dpb->not_existing) {
+    dpb->PicIdx = frame->index;
+  }
+
+  if (dpb->not_existing)
+    return;
+
+  if (GST_H264_PICTURE_IS_LONG_TERM_REF (ref)) {
+    dpb->FrameIdx = ref->long_term_frame_idx;
+    dpb->is_long_term = 1;
+  } else {
+    dpb->FrameIdx = ref->frame_num;
+    dpb->is_long_term = 0;
+  }
+
+  switch (ref->field) {
+    case GST_H264_PICTURE_FIELD_FRAME:
+      dpb->FieldOrderCnt[0] = ref->top_field_order_cnt;
+      dpb->FieldOrderCnt[1] = ref->bottom_field_order_cnt;
+      dpb->used_for_reference = 0x3;
+      break;
+    case GST_H264_PICTURE_FIELD_TOP_FIELD:
+      dpb->FieldOrderCnt[0] = ref->top_field_order_cnt;
+      dpb->used_for_reference = 0x1;
+      if (ref->other_field) {
+        dpb->FieldOrderCnt[1] = ref->other_field->bottom_field_order_cnt;
+        dpb->used_for_reference |= 0x2;
+      } else {
+        dpb->FieldOrderCnt[1] = 0;
+      }
+      break;
+    case GST_H264_PICTURE_FIELD_BOTTOM_FIELD:
+      dpb->FieldOrderCnt[1] = ref->bottom_field_order_cnt;
+      dpb->used_for_reference = 0x2;
+      if (ref->other_field) {
+        dpb->FieldOrderCnt[0] = ref->other_field->bottom_field_order_cnt;
+        dpb->used_for_reference |= 0x1;
+      } else {
+        dpb->FieldOrderCnt[0] = 0;
+      }
+      break;
+    default:
+      dpb->FieldOrderCnt[0] = 0;
+      dpb->FieldOrderCnt[1] = 0;
+      dpb->used_for_reference = 0;
+      break;
+  }
+}
+
+static GstFlowReturn
 gst_nv_h264_dec_start_picture (GstH264Decoder * decoder,
     GstH264Picture * picture, GstH264Slice * slice, GstH264Dpb * dpb)
 {
@@ -635,8 +780,8 @@ gst_nv_h264_dec_start_picture (GstH264Decoder * decoder,
   const GstH264SPS *sps;
   const GstH264PPS *pps;
   GstNvDecoderFrame *frame;
-  GArray *dpb_array;
-  gint i;
+  GArray *ref_list = self->ref_list;
+  guint i, ref_frame_idx;
 
   g_return_val_if_fail (slice_header->pps != NULL, FALSE);
   g_return_val_if_fail (slice_header->pps->sequence != NULL, FALSE);
@@ -646,7 +791,7 @@ gst_nv_h264_dec_start_picture (GstH264Decoder * decoder,
   if (!frame) {
     GST_ERROR_OBJECT (self,
         "Couldn't get decoder frame frame picture %p", picture);
-    return FALSE;
+    return GST_FLOW_ERROR;
   }
 
   gst_nv_h264_dec_reset_bitstream_params (self);
@@ -656,92 +801,70 @@ gst_nv_h264_dec_start_picture (GstH264Decoder * decoder,
 
   /* FIXME: update sps/pps related params only when it's required */
   params->PicWidthInMbs = sps->pic_width_in_mbs_minus1 + 1;
-  params->FrameHeightInMbs = sps->pic_height_in_map_units_minus1 + 1;
+  if (!sps->frame_mbs_only_flag) {
+    params->FrameHeightInMbs = (sps->pic_height_in_map_units_minus1 + 1) << 1;
+  } else {
+    params->FrameHeightInMbs = sps->pic_height_in_map_units_minus1 + 1;
+  }
   params->CurrPicIdx = frame->index;
-  /* TODO: verifiy interlaced */
-  params->field_pic_flag = picture->field != GST_H264_PICTURE_FIELD_FRAME;
+  params->field_pic_flag = slice_header->field_pic_flag;
   params->bottom_field_flag =
       picture->field == GST_H264_PICTURE_FIELD_BOTTOM_FIELD;
-  /* TODO: set second_field here */
-  params->second_field = 0;
+  params->second_field = picture->second_field;
+
+  if (picture->field == GST_H264_PICTURE_FIELD_TOP_FIELD) {
+    h264_params->CurrFieldOrderCnt[0] = picture->top_field_order_cnt;
+    h264_params->CurrFieldOrderCnt[1] = 0;
+  } else if (picture->field == GST_H264_PICTURE_FIELD_BOTTOM_FIELD) {
+    h264_params->CurrFieldOrderCnt[0] = 0;
+    h264_params->CurrFieldOrderCnt[1] = picture->bottom_field_order_cnt;
+  } else {
+    h264_params->CurrFieldOrderCnt[0] = picture->top_field_order_cnt;
+    h264_params->CurrFieldOrderCnt[1] = picture->bottom_field_order_cnt;
+  }
 
   /* nBitstreamDataLen, pBitstreamData, nNumSlices and pSliceDataOffsets
    * will be set later */
 
-  params->ref_pic_flag = picture->ref;
+  params->ref_pic_flag = GST_H264_PICTURE_IS_REF (picture);
   /* will be updated later, if any slices belong to this frame is not
    * intra slice */
   params->intra_pic_flag = 1;
 
   h264_params->frame_num = picture->frame_num;
-  h264_params->ref_pic_flag = picture->ref;
-  /* FIXME: should be updated depending on field type? */
-  h264_params->CurrFieldOrderCnt[0] = picture->top_field_order_cnt;
-  h264_params->CurrFieldOrderCnt[1] = picture->bottom_field_order_cnt;
+  h264_params->ref_pic_flag = GST_H264_PICTURE_IS_REF (picture);
 
-  if (!self->last_sps || self->last_sps != sps) {
-    GST_DEBUG_OBJECT (self, "Update params from SPS and PPS");
-    gst_nv_h264_dec_picture_params_from_sps (self,
-        sps, slice_header->field_pic_flag, h264_params);
-    gst_nv_h264_dec_picture_params_from_pps (self, pps, h264_params);
-    self->last_sps = sps;
-    self->last_pps = pps;
-  } else if (!self->last_pps || self->last_pps != pps) {
-    GST_DEBUG_OBJECT (self, "Update params from PPS");
-    gst_nv_h264_dec_picture_params_from_pps (self, pps, h264_params);
-    self->last_pps = pps;
-  } else {
-    GST_TRACE_OBJECT (self, "SPS and PPS were not updated");
-  }
+  gst_nv_h264_dec_picture_params_from_sps (self,
+      sps, slice_header->field_pic_flag, h264_params);
+  gst_nv_h264_dec_picture_params_from_pps (self, pps, h264_params);
+
+  ref_frame_idx = 0;
+  g_array_set_size (ref_list, 0);
 
   memset (&h264_params->dpb, 0, sizeof (h264_params->dpb));
-  for (i = 0; i < G_N_ELEMENTS (h264_params->dpb); i++)
+  gst_h264_dpb_get_pictures_short_term_ref (dpb, FALSE, FALSE, ref_list);
+  for (i = 0; ref_frame_idx < 16 && i < ref_list->len; i++) {
+    GstH264Picture *other = g_array_index (ref_list, GstH264Picture *, i);
+    gst_nv_h264_dec_fill_dpb (self, other, &h264_params->dpb[ref_frame_idx]);
+    ref_frame_idx++;
+  }
+  g_array_set_size (ref_list, 0);
+
+  gst_h264_dpb_get_pictures_long_term_ref (dpb, FALSE, ref_list);
+  for (i = 0; ref_frame_idx < 16 && i < ref_list->len; i++) {
+    GstH264Picture *other = g_array_index (ref_list, GstH264Picture *, i);
+    gst_nv_h264_dec_fill_dpb (self, other, &h264_params->dpb[ref_frame_idx]);
+    ref_frame_idx++;
+  }
+  g_array_set_size (ref_list, 0);
+
+  for (i = ref_frame_idx; i < 16; i++)
     h264_params->dpb[i].PicIdx = -1;
 
-  dpb_array = gst_h264_dpb_get_pictures_all (dpb);
-  for (i = 0; i < dpb_array->len && i < G_N_ELEMENTS (h264_params->dpb); i++) {
-    GstH264Picture *other = g_array_index (dpb_array, GstH264Picture *, i);
-    GstNvDecoderFrame *other_frame;
-    gint picture_index = -1;
-    CUVIDH264DPBENTRY *dpb = &h264_params->dpb[i];
-
-    if (!other->ref)
-      continue;
-
-    other_frame = gst_nv_h264_dec_get_decoder_frame_from_picture (self, other);
-
-    if (other_frame)
-      picture_index = other_frame->index;
-
-    dpb->PicIdx = picture_index;
-    if (other->long_term) {
-      dpb->FrameIdx = other->long_term_frame_idx;
-      dpb->is_long_term = 1;
-    } else {
-      dpb->FrameIdx = other->frame_num;
-      dpb->is_long_term = 0;
-    }
-
-    dpb->not_existing = other->nonexisting;
-    if (dpb->not_existing && dpb->PicIdx != -1) {
-      GST_WARNING_OBJECT (self,
-          "Non-existing frame has valid picture index %d", dpb->PicIdx);
-      dpb->PicIdx = -1;
-    }
-
-    /* FIXME: 1=top_field, 2=bottom_field, 3=both_fields */
-    dpb->used_for_reference = 3;
-
-    dpb->FieldOrderCnt[0] = other->top_field_order_cnt;
-    dpb->FieldOrderCnt[1] = other->bottom_field_order_cnt;
-  }
-
-  g_array_unref (dpb_array);
-
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
-static gboolean
+static GstFlowReturn
 gst_nv_h264_dec_decode_slice (GstH264Decoder * decoder,
     GstH264Picture * picture, GstH264Slice * slice, GArray * ref_pic_list0,
     GArray * ref_pic_list1)
@@ -752,8 +875,10 @@ gst_nv_h264_dec_decode_slice (GstH264Decoder * decoder,
   GST_LOG_OBJECT (self, "Decode slice, nalu size %u", slice->nalu.size);
 
   if (self->slice_offsets_alloc_len < self->num_slices + 1) {
+    self->slice_offsets_alloc_len = 2 * (self->num_slices + 1);
+
     self->slice_offsets = (guint *) g_realloc_n (self->slice_offsets,
-        self->num_slices + 1, sizeof (guint));
+        self->slice_offsets_alloc_len, sizeof (guint));
   }
   self->slice_offsets[self->num_slices] = self->bitstream_buffer_offset;
   GST_LOG_OBJECT (self, "Slice offset %u for slice %d",
@@ -763,8 +888,10 @@ gst_nv_h264_dec_decode_slice (GstH264Decoder * decoder,
 
   new_size = self->bitstream_buffer_offset + slice->nalu.size + 3;
   if (self->bitstream_buffer_alloc_size < new_size) {
-    self->bitstream_buffer =
-        (guint8 *) g_realloc (self->bitstream_buffer, new_size);
+    self->bitstream_buffer_alloc_size = 2 * new_size;
+
+    self->bitstream_buffer = (guint8 *) g_realloc (self->bitstream_buffer,
+        self->bitstream_buffer_alloc_size);
   }
 
   self->bitstream_buffer[self->bitstream_buffer_offset] = 0;
@@ -779,10 +906,10 @@ gst_nv_h264_dec_decode_slice (GstH264Decoder * decoder,
       !GST_H264_IS_SI_SLICE (&slice->header))
     self->params.intra_pic_flag = 0;
 
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
-static gboolean
+static GstFlowReturn
 gst_nv_h264_dec_end_picture (GstH264Decoder * decoder, GstH264Picture * picture)
 {
   GstNvH264Dec *self = GST_NV_H264_DEC (decoder);
@@ -799,78 +926,56 @@ gst_nv_h264_dec_end_picture (GstH264Decoder * decoder, GstH264Picture * picture)
 
   ret = gst_nv_decoder_decode_picture (self->decoder, &self->params);
 
-  if (!ret)
+  if (!ret) {
     GST_ERROR_OBJECT (self, "Failed to decode picture");
-
-  return ret;
-}
-
-typedef struct
-{
-  GstCaps *sink_caps;
-  GstCaps *src_caps;
-  guint cuda_device_id;
-  gboolean is_default;
-} GstNvH264DecClassData;
-
-static void
-gst_nv_h264_dec_subclass_init (gpointer klass, GstNvH264DecClassData * cdata)
-{
-  GstElementClass *element_class = GST_ELEMENT_CLASS (klass);
-  GstNvH264DecClass *nvdec_class = (GstNvH264DecClass *) (klass);
-  gchar *long_name;
-
-  if (cdata->is_default) {
-    long_name = g_strdup_printf ("NVDEC H.264 Stateless Decoder");
-  } else {
-    long_name = g_strdup_printf ("NVDEC H.264 Stateless Decoder with device %d",
-        cdata->cuda_device_id);
+    return GST_FLOW_ERROR;
   }
 
-  gst_element_class_set_metadata (element_class, long_name,
-      "Codec/Decoder/Video/Hardware",
-      "Nvidia H.264 video decoder", "Seungha Yang <seungha@centricular.com>");
-  g_free (long_name);
+  return GST_FLOW_OK;
+}
 
-  gst_element_class_add_pad_template (element_class,
-      gst_pad_template_new ("sink", GST_PAD_SINK, GST_PAD_ALWAYS,
-          cdata->sink_caps));
-  gst_element_class_add_pad_template (element_class,
-      gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
-          cdata->src_caps));
+static guint
+gst_nv_h264_dec_get_preferred_output_delay (GstH264Decoder * decoder,
+    gboolean live)
+{
+  /* Prefer to zero latency for live pipeline */
+  if (live)
+    return 0;
 
-  nvdec_class->cuda_device_id = cdata->cuda_device_id;
-
-  gst_caps_unref (cdata->sink_caps);
-  gst_caps_unref (cdata->src_caps);
-  g_free (cdata);
+  /* NVCODEC SDK uses 4 frame delay for better throughput performance */
+  return 4;
 }
 
 void
 gst_nv_h264_dec_register (GstPlugin * plugin, guint device_id, guint rank,
     GstCaps * sink_caps, GstCaps * src_caps, gboolean is_primary)
 {
-  GTypeQuery type_query;
-  GTypeInfo type_info = { 0, };
-  GType subtype;
+  GType type;
   gchar *type_name;
   gchar *feature_name;
-  GstNvH264DecClassData *cdata;
-  gboolean is_default = TRUE;
+  GstNvDecoderClassData *cdata;
+  gint index = 0;
   const GValue *value;
   GstStructure *s;
+  GTypeInfo type_info = {
+    sizeof (GstNvH264DecClass),
+    NULL,
+    NULL,
+    (GClassInitFunc) gst_nv_h264_dec_class_init,
+    NULL,
+    NULL,
+    sizeof (GstNvH264Dec),
+    0,
+    (GInstanceInitFunc) gst_nv_h264_dec_init,
+  };
 
-  /**
-   * element-nvh264sldec
-   *
-   * Since: 1.18
-   */
+  GST_DEBUG_CATEGORY_INIT (gst_nv_h264_dec_debug, "nvh264dec", 0, "nvh264dec");
 
-  cdata = g_new0 (GstNvH264DecClassData, 1);
+  cdata = g_new0 (GstNvDecoderClassData, 1);
   cdata->sink_caps = gst_caps_from_string ("video/x-h264, "
       "stream-format= (string) { avc, avc3, byte-stream }, "
       "alignment= (string) au, "
-      "profile = (string) { high, main, constrained-baseline, baseline }, "
+      "profile = (string) { high, main, constrained-high, constrained-baseline, baseline }, "
       "framerate = " GST_VIDEO_FPS_RANGE);
 
   s = gst_caps_get_structure (sink_caps, 0);
@@ -885,45 +990,37 @@ gst_nv_h264_dec_register (GstPlugin * plugin, guint device_id, guint rank,
   cdata->src_caps = gst_caps_ref (src_caps);
   cdata->cuda_device_id = device_id;
 
-  g_type_query (GST_TYPE_NV_H264_DEC, &type_query);
-  memset (&type_info, 0, sizeof (type_info));
-  type_info.class_size = type_query.class_size;
-  type_info.instance_size = type_query.instance_size;
-  type_info.class_init = (GClassInitFunc) gst_nv_h264_dec_subclass_init;
-  type_info.class_data = cdata;
-
   if (is_primary) {
-    type_name = g_strdup ("GstNvH264StatelessPrimaryDec");
+    type_name = g_strdup ("GstNvH264Dec");
     feature_name = g_strdup ("nvh264dec");
   } else {
-    type_name = g_strdup ("GstNvH264StatelessDec");
+    type_name = g_strdup ("GstNvH264SLDec");
     feature_name = g_strdup ("nvh264sldec");
   }
 
-  if (g_type_from_name (type_name) != 0) {
+  while (g_type_from_name (type_name)) {
+    index++;
     g_free (type_name);
     g_free (feature_name);
     if (is_primary) {
-      type_name =
-          g_strdup_printf ("GstNvH264StatelessPrimaryDevice%dDec", device_id);
-      feature_name = g_strdup_printf ("nvh264device%ddec", device_id);
+      type_name = g_strdup_printf ("GstNvH264Device%dDec", index);
+      feature_name = g_strdup_printf ("nvh264device%ddec", index);
     } else {
-      type_name = g_strdup_printf ("GstNvH264StatelessDevice%dDec", device_id);
-      feature_name = g_strdup_printf ("nvh264sldevice%ddec", device_id);
+      type_name = g_strdup_printf ("GstNvH264SLDevice%dDec", index);
+      feature_name = g_strdup_printf ("nvh264sldevice%ddec", index);
     }
-
-    is_default = FALSE;
   }
 
-  cdata->is_default = is_default;
-  subtype = g_type_register_static (GST_TYPE_NV_H264_DEC,
+  type_info.class_data = cdata;
+
+  type = g_type_register_static (GST_TYPE_H264_DECODER,
       type_name, &type_info, 0);
 
   /* make lower rank than default device */
-  if (rank > 0 && !is_default)
+  if (rank > 0 && index > 0)
     rank--;
 
-  if (!gst_element_register (plugin, feature_name, rank, subtype))
+  if (!gst_element_register (plugin, feature_name, rank, type))
     GST_WARNING ("Failed to register plugin '%s'", type_name);
 
   g_free (type_name);

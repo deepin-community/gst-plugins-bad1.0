@@ -503,35 +503,14 @@ error:
 static void
 gst_mpdparser_parse_content_protection_node (GList ** list, xmlNode * a_node)
 {
-  gchar *value = NULL;
-  if (gst_xml_helper_get_prop_string (a_node, "value", &value)) {
-    if (!g_strcmp0 (value, "MSPR 2.0")) {
-      xmlNode *cur_node;
-      for (cur_node = a_node->children; cur_node; cur_node = cur_node->next) {
-        if (cur_node->type == XML_ELEMENT_NODE) {
-          if (xmlStrcmp (cur_node->name, (xmlChar *) "pro") == 0) {
-            GstMPDDescriptorTypeNode *new_descriptor;
-            new_descriptor = gst_mpd_descriptor_type_node_new ((const gchar *)
-                cur_node->name);
-            *list = g_list_append (*list, new_descriptor);
+  GstMPDDescriptorTypeNode *new_descriptor;
+  new_descriptor = gst_mpd_descriptor_type_node_new ((const gchar *)
+      a_node->name);
+  *list = g_list_append (*list, new_descriptor);
 
-            gst_xml_helper_get_prop_string_stripped (a_node, "schemeIdUri",
-                &new_descriptor->schemeIdUri);
-
-            gst_xml_helper_get_node_content (cur_node, &new_descriptor->value);
-            goto beach;
-          }
-        }
-      }
-    } else {
-      gst_mpdparser_parse_descriptor_type (list, a_node);
-    }
-  } else {
-    gst_mpdparser_parse_descriptor_type (list, a_node);
-  }
-beach:
-  if (value)
-    g_free (value);
+  gst_xml_helper_get_prop_string_stripped (a_node, "schemeIdUri",
+      &new_descriptor->schemeIdUri);
+  gst_xml_helper_get_node_as_string (a_node, &new_descriptor->value);
 }
 
 static void
@@ -1387,34 +1366,56 @@ gst_mpdparser_free_active_stream (GstActiveStream * active_stream)
   }
 }
 
-const gchar *
+static gchar *
+get_base_url_with_query (GstActiveStream * stream)
+{
+  GstUri *uri;
+  gchar *uri_str;
+
+  if (!stream->queryURL)
+    return g_strdup (stream->baseURL);
+
+  uri = gst_uri_from_string (stream->baseURL);
+  gst_uri_set_query_string (uri, stream->queryURL);
+  uri_str = gst_uri_to_string (uri);
+
+  gst_uri_unref (uri);
+  return uri_str;
+}
+
+/*
+ * gst_mpdparser_get_initializationURL:
+ *
+ * Returns: (transfer full): stream initializationURL if available,
+ *   baseURL combined with queryURL otherwise.
+ */
+gchar *
 gst_mpdparser_get_initializationURL (GstActiveStream * stream,
     GstMPDURLTypeNode * InitializationURL)
 {
-  const gchar *url_prefix;
-
   g_return_val_if_fail (stream != NULL, NULL);
 
-  url_prefix = (InitializationURL
-      && InitializationURL->sourceURL) ? InitializationURL->sourceURL : stream->
-      baseURL;
-
-  return url_prefix;
+  return (InitializationURL && InitializationURL->sourceURL)
+      ? g_strdup (InitializationURL->sourceURL)
+      : get_base_url_with_query (stream);
 }
 
+/*
+ * gst_mpdparser_get_mediaURL:
+ *
+ * Returns: (transfer full): stream mediaURL if available,
+ *   baseURL combined with queryURL otherwise.
+ */
 gchar *
 gst_mpdparser_get_mediaURL (GstActiveStream * stream,
     GstMPDSegmentURLNode * segmentURL)
 {
-  const gchar *url_prefix;
-
   g_return_val_if_fail (stream != NULL, NULL);
   g_return_val_if_fail (segmentURL != NULL, NULL);
 
-  url_prefix = segmentURL->media ? segmentURL->media : stream->baseURL;
-  g_return_val_if_fail (url_prefix != NULL, NULL);
-
-  return segmentURL->media;
+  return (segmentURL->media)
+      ? g_strdup (segmentURL->media)
+      : get_base_url_with_query (stream);
 }
 
 /* navigation functions */

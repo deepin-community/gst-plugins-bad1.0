@@ -1,21 +1,28 @@
 mf_sources = [
-  'plugin.c',
-  'gstmfutils.cpp',
-  'gstmftransform.cpp',
-  'gstmfvideoenc.cpp',
+  'gstmfaacdec.cpp',
+  'gstmfaacenc.cpp',
+  'gstmfaudiodecoder.cpp',
+  'gstmfaudioencoder.cpp',
+  'gstmfdevice.cpp',
   'gstmfh264enc.cpp',
   'gstmfh265enc.cpp',
-  'gstmfvp9enc.cpp',
-  'gstmfvideosrc.c',
-  'gstmfsourceobject.c',
-  'gstmfdevice.c',
-  'gstmfaudioenc.cpp',
-  'gstmfaacenc.cpp',
+  'gstmfmp3dec.cpp',
   'gstmfmp3enc.cpp',
+  'gstmfplatloader.cpp',
+  'gstmfsourceobject.cpp',
+  'gstmftransform.cpp',
+  'gstmfutils.cpp',
+  'gstmfvideobuffer.cpp',
+  'gstmfvideoencoder.cpp',
+  'gstmfvideosrc.cpp',
+  'gstmfvp9enc.cpp',
+  'plugin.cpp',
 ]
 
 mf_desktop_sources = [
+  'gstmfcapturedshow.cpp',
   'gstmfsourcereader.cpp',
+  'gstwin32devicewatcher.cpp',
 ]
 
 mf_app_sources = [
@@ -36,8 +43,11 @@ mf_header_deps = [
 winapi_desktop = false
 winapi_app = false
 have_capture_engine = false
+have_mf_d3d11 = false
 mf_lib_deps = []
 mf_config = configuration_data()
+extra_c_args = ['-DCOBJMACROS']
+extra_cpp_args = []
 
 mf_option = get_option('mediafoundation')
 if host_system != 'windows' or mf_option.disabled()
@@ -113,30 +123,53 @@ if not winapi_desktop and not winapi_app
 endif
 
 if winapi_app
+  if not gstwinrt_dep.found()
+    if mf_option.enabled()
+      error('The mediafoundation plugin was enabled explicitly, but GstWinRt library is unavailable')
+    else
+      subdir_done()
+    endif
+  endif
+
   mf_sources += mf_app_sources
-  mf_lib_deps += [runtimeobject_lib]
+  mf_lib_deps += [runtimeobject_lib, gstwinrt_dep]
 endif
 
 if winapi_desktop
   mf_sources += mf_desktop_sources
+  # We need d3d11_4.h header for querying "ExtendedNV12SharedTextureSupported"
+  # Since MFTEnum2 is desktop only we don't support d3d11 interop for UWP build
+  # And because MFTEnum2 is Windows 10 API, we will load MFTEnum2 symbol
+  # by using g_module_open() so that keep supporting old OS versions
+  if gstd3d11_dep.found() and cc.has_header('d3d11_4.h') and cc.has_header('d3d10.h')
+    have_mf_d3d11 = true
+    mf_lib_deps += [gstd3d11_dep]
+    extra_c_args += ['-DGST_USE_UNSTABLE_API']
+    extra_cpp_args += ['-DGST_USE_UNSTABLE_API']
+    message ('Enable D3D11 interop for MediaFoundation plugin')
+  endif
 endif
 
 mf_config.set10('GST_MF_WINAPI_APP', winapi_app)
 mf_config.set10('GST_MF_WINAPI_DESKTOP', winapi_desktop)
+mf_config.set10('GST_MF_HAVE_D3D11', have_mf_d3d11)
 
 configure_file(
   output: 'gstmfconfig.h',
   configuration: mf_config,
 )
 
+# Work around for Windows SDK header issue
+# https://docs.microsoft.com/en-us/cpp/build/reference/permissive-standards-conformance?view=msvc-160#windows-header-issues
+extra_cpp_args += cxx.get_supported_arguments(['/Zc:twoPhase-'])
+
 gstmediafoundation = library('gstmediafoundation',
   mf_sources,
-  c_args : gst_plugins_bad_args + ['-DCOBJMACROS'],
-  cpp_args : gst_plugins_bad_args,
+  c_args : gst_plugins_bad_args + extra_c_args,
+  cpp_args : gst_plugins_bad_args + extra_cpp_args,
   include_directories : [configinc],
-  dependencies : [gstbase_dep, gstvideo_dep, gstaudio_dep, gstpbutils_dep] + mf_lib_deps,
+  dependencies : [gstbase_dep, gstvideo_dep, gstaudio_dep, gstpbutils_dep, gmodule_dep] + mf_lib_deps,
   install : true,
   install_dir : plugins_install_dir,
 )
-pkgconfig.generate(gstmediafoundation, install_dir : plugins_pkgconfig_install_dir)
 plugins += [gstmediafoundation]

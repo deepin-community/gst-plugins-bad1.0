@@ -1,4 +1,4 @@
-debian/tmp/usr/include
-debian/tmp/usr/lib/*/pkgconfig
-debian/tmp/usr/lib/*/*.so
-debian/tmp/usr/share/gir-*
+usr/include
+usr/lib/*/pkgconfig
+usr/lib/*/*.so
+usr/share/gir-*

@@ -101,6 +101,7 @@ static void gst_preset_interface_init (gpointer g_iface, gpointer iface_data);
 
 G_DEFINE_TYPE_WITH_CODE (GstBs2b, gst_bs2b, GST_TYPE_AUDIO_FILTER,
     G_IMPLEMENT_INTERFACE (GST_TYPE_PRESET, gst_preset_interface_init));
+GST_ELEMENT_REGISTER_DEFINE (bs2b, "bs2b", GST_RANK_NONE, GST_TYPE_BS2B);
 
 static void gst_bs2b_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);
@@ -258,58 +259,58 @@ gst_bs2b_setup (GstAudioFilter * filter, const GstAudioInfo * audio_info)
 
   switch (GST_AUDIO_INFO_FORMAT (audio_info)) {
     case GST_AUDIO_FORMAT_S8:
-      element->func = &bs2b_cross_feed_s8;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_s8;
       break;
     case GST_AUDIO_FORMAT_U8:
-      element->func = &bs2b_cross_feed_u8;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_u8;
       break;
     case GST_AUDIO_FORMAT_S16BE:
-      element->func = &bs2b_cross_feed_s16be;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_s16be;
       break;
     case GST_AUDIO_FORMAT_S16LE:
-      element->func = &bs2b_cross_feed_s16le;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_s16le;
       break;
     case GST_AUDIO_FORMAT_U16BE:
-      element->func = &bs2b_cross_feed_u16be;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_u16be;
       break;
     case GST_AUDIO_FORMAT_U16LE:
-      element->func = &bs2b_cross_feed_u16le;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_u16le;
       break;
     case GST_AUDIO_FORMAT_S24BE:
-      element->func = &bs2b_cross_feed_s24be;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_s24be;
       break;
     case GST_AUDIO_FORMAT_S24LE:
-      element->func = &bs2b_cross_feed_s24le;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_s24le;
       break;
     case GST_AUDIO_FORMAT_U24BE:
-      element->func = &bs2b_cross_feed_u24be;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_u24be;
       break;
     case GST_AUDIO_FORMAT_U24LE:
-      element->func = &bs2b_cross_feed_u24le;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_u24le;
       break;
     case GST_AUDIO_FORMAT_S32BE:
-      element->func = &bs2b_cross_feed_s32be;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_s32be;
       break;
     case GST_AUDIO_FORMAT_S32LE:
-      element->func = &bs2b_cross_feed_s32le;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_s32le;
       break;
     case GST_AUDIO_FORMAT_U32BE:
-      element->func = &bs2b_cross_feed_u32be;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_u32be;
       break;
     case GST_AUDIO_FORMAT_U32LE:
-      element->func = &bs2b_cross_feed_u32le;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_u32le;
       break;
     case GST_AUDIO_FORMAT_F32BE:
-      element->func = &bs2b_cross_feed_fbe;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_fbe;
       break;
     case GST_AUDIO_FORMAT_F32LE:
-      element->func = &bs2b_cross_feed_fle;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_fle;
       break;
     case GST_AUDIO_FORMAT_F64BE:
-      element->func = &bs2b_cross_feed_dbe;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_dbe;
       break;
     case GST_AUDIO_FORMAT_F64LE:
-      element->func = &bs2b_cross_feed_dle;
+      element->func = (GstBs2bProcessFunc) & bs2b_cross_feed_dle;
       break;
     default:
       return FALSE;
@@ -410,7 +411,7 @@ gst_bs2b_get_property (GObject * object, guint prop_id, GValue * value,
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  return gst_element_register (plugin, "bs2b", GST_RANK_NONE, GST_TYPE_BS2B);
+  return GST_ELEMENT_REGISTER (bs2b, plugin);
 }
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,

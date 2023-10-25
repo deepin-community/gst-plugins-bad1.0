@@ -64,8 +64,7 @@ nal_size (GstBuffer * buffer)
   guint8 nal_size[4];
 
   gst_buffer_extract (buffer, 0, nal_size, 4);
-  return (nal_size[0] << 24) | (nal_size[1] << 16) | (nal_size[2] << 8) |
-      nal_size[3];
+  return GST_READ_UINT32_BE (nal_size);
 }
 
 static gsize
@@ -88,7 +87,7 @@ fetch_nal (GstBuffer * buffer, gsize * offset)
     return NULL;
 
   gst_buffer_extract (buffer, *offset, buf, 4);
-  nal_size = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
+  nal_size = GST_READ_UINT32_BE (buf);
 
   ret =
       gst_buffer_copy_region (buffer, GST_BUFFER_COPY_MEMORY, *offset,
@@ -1472,14 +1471,12 @@ avtpcvfdepay_suite (void)
 {
   Suite *s = suite_create ("avtpcvfdepay");
   TCase *tc_chain = tcase_create ("general");
+  TCase *tc_slow = tcase_create ("slow");
 
   suite_add_tcase (s, tc_chain);
-  /* 'fragmented_big' may take some time to run, so give it a bit more time */
-  tcase_set_timeout (tc_chain, 10);
   tcase_add_test (tc_chain, test_depayloader_single);
   tcase_add_test (tc_chain, test_depayloader_multiple_single);
   tcase_add_test (tc_chain, test_depayloader_fragmented);
-  tcase_add_test (tc_chain, test_depayloader_fragmented_big);
   tcase_add_test (tc_chain, test_depayloader_single_and_fragmented);
   tcase_add_test (tc_chain, test_depayloader_property);
   tcase_add_test (tc_chain, test_depayloader_lost_packet);
@@ -1493,6 +1490,11 @@ avtpcvfdepay_suite (void)
   tcase_add_test (tc_chain, test_depayloader_fragmented_two_start_eos);
   tcase_add_test (tc_chain, test_depayloader_multiple_lost_eos);
   tcase_add_test (tc_chain, test_depayloader_fragment_and_single);
+
+  suite_add_tcase (s, tc_slow);
+  /* 'fragmented_big' may take some time to run, so give it a bit more time */
+  tcase_set_timeout (tc_slow, 20);
+  tcase_add_test (tc_slow, test_depayloader_fragmented_big);
 
   return s;
 }

@@ -33,7 +33,7 @@
 #endif
 
 #include <gst/interfaces/photography.h>
-#include <gst/gst-i18n-plugin.h>
+#include <glib/gi18n-lib.h>
 
 #include "gstwrappercamerabinsrc.h"
 #include "gstdigitalzoom.h"
@@ -52,6 +52,8 @@ GST_DEBUG_CATEGORY (wrapper_camera_bin_src_debug);
 #define gst_wrapper_camera_bin_src_parent_class parent_class
 G_DEFINE_TYPE (GstWrapperCameraBinSrc, gst_wrapper_camera_bin_src,
     GST_TYPE_BASE_CAMERA_SRC);
+GST_ELEMENT_REGISTER_DEFINE (wrappercamerabinsrc, "wrappercamerabinsrc",
+    GST_RANK_NONE, gst_wrapper_camera_bin_src_get_type ());
 
 static GstStaticPadTemplate vfsrc_template =
 GST_STATIC_PAD_TEMPLATE (GST_BASE_CAMERA_SRC_VIEWFINDER_PAD_NAME,
@@ -235,10 +237,6 @@ static void
 gst_wrapper_camera_bin_src_set_output (GstWrapperCameraBinSrc * self,
     GstPad * old_pad, GstPad * output_pad)
 {
-  GstQuery *drain = gst_query_new_drain ();
-  gst_pad_peer_query (self->src_pad, drain);
-  gst_query_unref (drain);
-
   if (old_pad)
     gst_ghost_pad_set_target (GST_GHOST_PAD (old_pad), NULL);
   if (output_pad)
@@ -596,10 +594,10 @@ gst_wrapper_camera_bin_src_construct_pipeline (GstBaseCameraSrc * bcamsrc)
     video_recording_tee = gst_element_factory_make ("tee", "video_rec_tee");
     gst_bin_add (GST_BIN_CAST (self), video_recording_tee);     /* TODO check returns */
     self->video_tee_vf_pad =
-        gst_element_get_request_pad (video_recording_tee, "src_%u");
+        gst_element_request_pad_simple (video_recording_tee, "src_%u");
     self->video_tee_sink =
         gst_element_get_static_pad (video_recording_tee, "sink");
-    tee_pad = gst_element_get_request_pad (video_recording_tee, "src_%u");
+    tee_pad = gst_element_request_pad_simple (video_recording_tee, "src_%u");
     gst_ghost_pad_set_target (GST_GHOST_PAD (self->vidsrc), tee_pad);
     gst_object_unref (tee_pad);
 
@@ -1168,11 +1166,4 @@ gst_wrapper_camera_bin_src_init (GstWrapperCameraBinSrc * self)
   self->image_renegotiate = TRUE;
   self->mode = GST_BASE_CAMERA_SRC_CAST (self)->mode;
   self->app_vid_filter = NULL;
-}
-
-gboolean
-gst_wrapper_camera_bin_src_plugin_init (GstPlugin * plugin)
-{
-  return gst_element_register (plugin, "wrappercamerabinsrc", GST_RANK_NONE,
-      gst_wrapper_camera_bin_src_get_type ());
 }

@@ -23,7 +23,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "gst/gst-i18n-plugin.h"
+#include <glib/gi18n-lib.h>
 #include <gst/gst.h>
 
 #include "gstmssdemux.h"
@@ -31,11 +31,7 @@
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  if (!gst_element_register (plugin, "mssdemux",
-          GST_RANK_PRIMARY, GST_TYPE_MSS_DEMUX))
-    return FALSE;
-
-  return TRUE;
+  return GST_ELEMENT_REGISTER (mssdemux, plugin);
 }
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,

@@ -47,10 +47,23 @@ gboolean
 gst_msdk_context_find (GstElement * element, GstMsdkContext ** context_ptr);
 
 gboolean
-gst_msdk_context_get_context (GstContext * context, GstMsdkContext ** msdk_context);
+gst_msdk_ensure_new_context (GstElement * element, gboolean hardware, GstMsdkContextJobType job, GstMsdkContext ** context_ptr);
 
 gboolean
-gst_msdk_context_ensure_context (GstElement * element, gboolean hardware, GstMsdkContextJobType job);
+gst_msdk_context_get_context (GstContext * context, GstMsdkContext ** msdk_context);
+
+#ifndef _WIN32
+gboolean
+gst_msdk_context_from_external_va_display (GstContext * context, gboolean hardware,
+    GstMsdkContextJobType job_type, GstMsdkContext ** msdk_context);
+#else
+gboolean
+gst_msdk_context_from_external_d3d11_device (GstContext * context, gboolean hardware,
+    GstMsdkContextJobType job_type, GstMsdkContext ** msdk_context);
+#endif
+
+gboolean
+gst_msdk_handle_context_query (GstElement * element, GstQuery * query, GstMsdkContext * msdk_context);
 
 G_END_DECLS
 

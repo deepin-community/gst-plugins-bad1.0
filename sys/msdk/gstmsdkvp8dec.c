@@ -30,6 +30,22 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+/**
+ * SECTION:element-msdkvp8dec
+ * @title: msdkvp8dec
+ * @short_description: Intel MSDK VP8 decoder
+ *
+ * VP8 video decoder based on Intel MFX
+ *
+ * ## Example launch line
+ * ```
+ * gst-launch-1.0 filesrc location=sample.webm ! matroskademux ! msdkvp8dec ! glimagesink
+ * ```
+ *
+ * Since: 1.14
+ *
+ */
+
 #ifdef HAVE_CONFIG_H
 #  include <config.h>
 #endif
@@ -174,7 +190,7 @@ gst_msdkvp8dec_class_init (GstMsdkVP8DecClass * klass)
   gst_element_class_set_static_metadata (element_class,
       "Intel MSDK VP8 decoder",
       "Codec/Decoder/Video/Hardware",
-      "VP8 video decoder based on Intel Media SDK",
+      "VP8 video decoder based on " MFX_API_SDK,
       "Hyunjun Ko <zzoon@igalia.com>");
 
   gst_msdkdec_prop_install_output_oder_property (gobject_class);

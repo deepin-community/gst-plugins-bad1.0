@@ -24,6 +24,10 @@
 #include "gstnvenc.h"
 #include "gstnvh264enc.h"
 #include "gstnvh265enc.h"
+#include <gst/cuda/gstcudautils.h>
+#include <gst/cuda/gstcudabufferpool.h>
+#include <string.h>
+
 #include <gmodule.h>
 
 #if HAVE_NVCODEC_GST_GL
@@ -48,6 +52,7 @@
 #define GST_NVENCAPI_STRUCT_VERSION(ver,api_ver) ((uint32_t)(api_ver) | ((ver)<<16) | (0x7 << 28))
 
 static guint32 gst_nvenc_api_version = NVENCAPI_VERSION;
+static gboolean gst_nvenc_supports_cuda_stream = FALSE;
 
 typedef NVENCSTATUS NVENCAPI
 tNvEncodeAPICreateInstance (NV_ENCODE_API_FUNCTION_LIST * functionList);
@@ -75,6 +80,13 @@ NvEncDestroyEncoder (void *encoder)
 {
   g_assert (nvenc_api.nvEncDestroyEncoder != NULL);
   return nvenc_api.nvEncDestroyEncoder (encoder);
+}
+
+const char *NVENCAPI
+NvEncGetLastErrorString (void *encoder)
+{
+  g_assert (nvenc_api.nvEncGetLastErrorString != NULL);
+  return nvenc_api.nvEncGetLastErrorString (encoder);
 }
 
 NVENCSTATUS NVENCAPI
@@ -257,6 +269,28 @@ NvEncEncodePicture (void *encoder, NV_ENC_PIC_PARAMS * pic_params)
 {
   g_assert (nvenc_api.nvEncEncodePicture != NULL);
   return nvenc_api.nvEncEncodePicture (encoder, pic_params);
+}
+
+NVENCSTATUS NVENCAPI
+NvEncRegisterAsyncEvent (void *encoder, NV_ENC_EVENT_PARAMS * event_params)
+{
+  g_assert (nvenc_api.nvEncRegisterAsyncEvent != NULL);
+  return nvenc_api.nvEncRegisterAsyncEvent (encoder, event_params);
+}
+
+NVENCSTATUS NVENCAPI
+NvEncUnregisterAsyncEvent (void *encoder, NV_ENC_EVENT_PARAMS * event_params)
+{
+  g_assert (nvenc_api.nvEncUnregisterAsyncEvent != NULL);
+  return nvenc_api.nvEncUnregisterAsyncEvent (encoder, event_params);
+}
+
+NVENCSTATUS NVENCAPI
+NvEncSetIOCudaStreams (void *encoder, NV_ENC_CUSTREAM_PTR input_stream,
+    NV_ENC_CUSTREAM_PTR output_stream)
+{
+  g_assert (nvenc_api.nvEncSetIOCudaStreams != NULL);
+  return nvenc_api.nvEncSetIOCudaStreams (encoder, input_stream, output_stream);
 }
 
 gboolean
@@ -511,6 +545,9 @@ gst_nvenc_get_supported_codec_profiles (gpointer enc, GUID codec_id)
         TRUE, FALSE, FALSE},
     /* put baseline to last since it does not support bframe */
     {"baseline", NV_ENC_H264_PROFILE_BASELINE_GUID, NV_ENC_CODEC_H264_GUID,
+        FALSE, FALSE, FALSE},
+    {"constrained-baseline", NV_ENC_H264_PROFILE_BASELINE_GUID,
+          NV_ENC_CODEC_H264_GUID,
         FALSE, FALSE, FALSE},
     /* hevc profiles */
     {"main", NV_ENC_HEVC_PROFILE_MAIN_GUID, NV_ENC_CODEC_HEVC_GUID, FALSE,
@@ -787,14 +824,20 @@ gst_nv_enc_register (GstPlugin * plugin, GUID codec_id, const gchar * codec,
       g_value_unset (interlace_modes);
       g_free (interlace_modes);
     }
-#if HAVE_NVCODEC_GST_GL
+
     {
+      GstCaps *cuda_caps = gst_caps_copy (sink_templ);
+#if HAVE_NVCODEC_GST_GL
       GstCaps *gl_caps = gst_caps_copy (sink_templ);
       gst_caps_set_features_simple (gl_caps,
           gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_GL_MEMORY));
       gst_caps_append (sink_templ, gl_caps);
-    }
 #endif
+
+      gst_caps_set_features_simple (cuda_caps,
+          gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY));
+      gst_caps_append (sink_templ, cuda_caps);
+    }
 
     name = g_strdup_printf ("video/x-%s", codec);
     src_templ = gst_caps_new_simple (name,
@@ -858,6 +901,7 @@ gst_nvenc_load_library (guint * api_major_ver, guint * api_minor_ver)
   gint i;
   static const GstNvEncVersion version_list[] = {
     {NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION},
+    {9, 1},
     {9, 0},
     {GST_NVENC_MIN_API_MAJOR_VERSION, GST_NVENC_MIN_API_MINOR_VERSION}
   };
@@ -936,9 +980,13 @@ gst_nvenc_load_library (guint * api_major_ver, guint * api_minor_ver)
       continue;
     }
 
+    GST_INFO ("Checking version %d.%d", version_list[i].major,
+        version_list[i].minor);
+
     gst_nvenc_api_version =
         GST_NVENCAPI_VERSION (version_list[i].major, version_list[i].minor);
 
+    memset (&nvenc_api, 0, sizeof (NV_ENCODE_API_FUNCTION_LIST));
     nvenc_api.version = GST_NVENCAPI_STRUCT_VERSION (2, gst_nvenc_api_version);
     ret = nvEncodeAPICreateInstance (&nvenc_api);
 
@@ -948,7 +996,18 @@ gst_nvenc_load_library (guint * api_major_ver, guint * api_minor_ver)
 
       *api_major_ver = version_list[i].major;
       *api_minor_ver = version_list[i].minor;
+
+      if ((version_list[i].major > 9 ||
+              (version_list[i].major == 9 && version_list[i].minor > 0)) &&
+          nvenc_api.nvEncSetIOCudaStreams) {
+        GST_INFO ("nvEncSetIOCudaStreams is supported");
+        gst_nvenc_supports_cuda_stream = TRUE;
+      }
+
       break;
+    } else {
+      GST_INFO ("Version %d.%d is not supported", version_list[i].major,
+          version_list[i].minor);
     }
   }
 
@@ -1083,7 +1142,7 @@ gst_nvenc_get_map_input_resource_version (void)
 }
 
 guint32
-gst_nvenc_get_registure_resource_version (void)
+gst_nvenc_get_register_resource_version (void)
 {
   /* NV_ENC_REGISTER_RESOURCE_VER == NVENCAPI_STRUCT_VERSION(3) */
   return GST_NVENCAPI_STRUCT_VERSION (3, gst_nvenc_api_version);
@@ -1115,4 +1174,10 @@ gst_nvenc_get_open_encode_session_ex_params_version (void)
 {
   /* NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER == NVENCAPI_STRUCT_VERSION(1) */
   return GST_NVENCAPI_STRUCT_VERSION (1, gst_nvenc_api_version);
+}
+
+gboolean
+gst_nvenc_have_set_io_cuda_streams (void)
+{
+  return gst_nvenc_supports_cuda_stream;
 }

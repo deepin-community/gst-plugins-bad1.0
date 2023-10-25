@@ -4,6 +4,7 @@ rist_sources = [
   'gstristrtxreceive.c',
   'gstristsrc.c',
   'gstristsink.c',
+  'gstrist.c',
   'gstristplugin.c',
   'gstristrtpext.c',
   'gstristrtpdeext.c'
@@ -17,5 +18,4 @@ gstrist = library('gstrist',
   install : true,
   install_dir : plugins_install_dir,
 )
-pkgconfig.generate(gstrist, install_dir : plugins_pkgconfig_install_dir)
 plugins += [gstrist]

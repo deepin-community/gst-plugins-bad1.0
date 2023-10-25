@@ -11,8 +11,9 @@
 
 #include <gtk/gtk.h>
 
-#include <gst/gst.h>
 #include <gst/app/gstappsink.h>
+#include <gst/gst.h>
+#include <gst/va/gstva.h>
 #include <gst/video/video.h>
 
 #include <va/va_x11.h>
@@ -44,11 +45,11 @@ context_handler (GstBus * bus, GstMessage * msg, gpointer data)
 
   gst_println ("got need context %s", context_type);
 
-  if (g_strcmp0 (context_type, "gst.va.display.handle") == 0) {
+  if (g_strcmp0 (context_type, GST_VA_DISPLAY_HANDLE_CONTEXT_TYPE_STR) == 0) {
     GstContext *context;
     GstStructure *s;
 
-    context = gst_context_new ("gst.va.display.handle", TRUE);
+    context = gst_context_new (GST_VA_DISPLAY_HANDLE_CONTEXT_TYPE_STR, TRUE);
     s = gst_context_writable_structure (context);
     gst_structure_set (s, "va-display", G_TYPE_POINTER, app->va_dpy, NULL);
     gst_element_set_context (GST_ELEMENT (msg->src), context);
@@ -228,7 +229,7 @@ build_pipeline (struct _app *app)
   gst_object_unref (src);
 
   sink = gst_bin_get_by_name (GST_BIN (app->pipeline), "sink");
-  caps = gst_caps_from_string ("video/x-raw(memory:VAMemory)");
+  caps = gst_caps_from_string ("video/x-raw(" GST_CAPS_FEATURE_MEMORY_VA ")");
   g_object_set (sink, "caps", caps, NULL);
   gst_caps_unref (caps);
   gst_app_sink_set_callbacks (GST_APP_SINK (sink), &callbacks, app, NULL);

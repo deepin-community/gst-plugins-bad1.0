@@ -35,6 +35,8 @@ typedef struct _GstV4l2Request GstV4l2Request;
 
 GstV4l2Decoder *  gst_v4l2_decoder_new (GstV4l2CodecDevice * device);
 
+guint             gst_v4l2_decoder_get_version (GstV4l2Decoder * self);
+
 gboolean          gst_v4l2_decoder_open (GstV4l2Decoder * decoder);
 
 gboolean          gst_v4l2_decoder_close (GstV4l2Decoder * decoder);
@@ -72,22 +74,6 @@ gboolean          gst_v4l2_decoder_export_buffer (GstV4l2Decoder * self,
                                                   gsize * offsets,
                                                   guint *num_fds);
 
-gboolean          gst_v4l2_decoder_queue_sink_mem (GstV4l2Decoder * self,
-                                                   GstV4l2Request * request,
-                                                   GstMemory * mem,
-                                                   guint32 frame_num,
-                                                   gsize bytesused,
-                                                   guint flags);
-
-gboolean          gst_v4l2_decoder_dequeue_sink (GstV4l2Decoder * self);
-
-gboolean          gst_v4l2_decoder_queue_src_buffer (GstV4l2Decoder * self,
-                                                     GstBuffer * buffer,
-                                                     guint32 frame_num);
-
-gboolean          gst_v4l2_decoder_dequeue_src (GstV4l2Decoder * self,
-                                                guint32 *out_frame_num);
-
 gboolean          gst_v4l2_decoder_set_controls (GstV4l2Decoder * self,
                                                  GstV4l2Request * request,
                                                  struct v4l2_ext_control *control,
@@ -96,6 +82,10 @@ gboolean          gst_v4l2_decoder_set_controls (GstV4l2Decoder * self,
 gboolean          gst_v4l2_decoder_get_controls (GstV4l2Decoder * self,
                                                  struct v4l2_ext_control * control,
                                                  guint count);
+
+gboolean          gst_v4l2_decoder_query_control_size (GstV4l2Decoder * self,
+                                                 unsigned int control_id,
+						 unsigned int *control_size);
 
 void              gst_v4l2_decoder_install_properties (GObjectClass * gobject_class,
                                                        gint prop_offset,
@@ -110,22 +100,45 @@ void              gst_v4l2_decoder_get_property (GObject * object, guint prop_id
 void              gst_v4l2_decoder_register (GstPlugin * plugin,
                                              GType dec_type,
                                              GClassInitFunc class_init,
+                                             gconstpointer class_data,
                                              GInstanceInitFunc instance_init,
                                              const gchar *element_name_tmpl,
                                              GstV4l2CodecDevice * device,
-                                             guint rank);
+                                             guint rank,
+                                             gchar ** element_name);
 
-GstV4l2Request   *gst_v4l2_decoder_alloc_request (GstV4l2Decoder * self);
+GstV4l2Request   *gst_v4l2_decoder_alloc_request (GstV4l2Decoder * self,
+                                                  guint32 frame_num,
+                                                  GstMemory *bitstream,
+                                                  GstBuffer * pic_buf);
 
-void              gst_v4l2_request_free (GstV4l2Request * request);
+GstV4l2Request   *gst_v4l2_decoder_alloc_sub_request (GstV4l2Decoder * self,
+                                                      GstV4l2Request * prev_request,
+                                                      GstMemory *bitstream);
 
-gboolean          gst_v4l2_request_queue (GstV4l2Request * request);
+void              gst_v4l2_decoder_set_render_delay (GstV4l2Decoder * self,
+                                                     guint delay);
 
-gint              gst_v4l2_request_poll (GstV4l2Request * request, GstClockTime timeout);
+guint             gst_v4l2_decoder_get_render_delay (GstV4l2Decoder * self);
 
-void              gst_v4l2_request_set_done (GstV4l2Request * request);
 
-gboolean          gst_v4l2_request_is_done (GstV4l2Request * request);
+GstV4l2Request *  gst_v4l2_request_ref (GstV4l2Request * request);
+
+void              gst_v4l2_request_unref (GstV4l2Request * request);
+
+gboolean          gst_v4l2_request_queue (GstV4l2Request * request,
+                                          guint flags);
+
+gint              gst_v4l2_request_poll (GstV4l2Request * request,
+                                         GstClockTime timeout);
+
+gint              gst_v4l2_request_set_done (GstV4l2Request * request);
+
+gboolean          gst_v4l2_request_failed (GstV4l2Request * request);
+
+GstBuffer *       gst_v4l2_request_dup_pic_buf (GstV4l2Request * request);
+
+gint              gst_v4l2_request_get_fd (GstV4l2Request * request);
 
 G_END_DECLS
 
