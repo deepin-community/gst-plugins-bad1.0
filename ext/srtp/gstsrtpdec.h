@@ -82,6 +82,8 @@ struct _GstSrtpDec
 
   gboolean rtp_has_segment;
   gboolean rtcp_has_segment;
+  guint recv_count;
+  guint recv_drop_count;
 
 #ifndef HAVE_SRTP2
   GHashTable *streams_roc_changed;
@@ -98,7 +100,6 @@ struct _GstSrtpDecClass
 
 GType gst_srtp_dec_get_type (void);
 
-gboolean gst_srtp_dec_plugin_init (GstPlugin * plugin);
 
 G_END_DECLS
 

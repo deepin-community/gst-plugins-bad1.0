@@ -36,6 +36,8 @@ GST_DEBUG_CATEGORY_STATIC (gst_sctp_enc_debug_category);
 
 #define gst_sctp_enc_parent_class parent_class
 G_DEFINE_TYPE (GstSctpEnc, gst_sctp_enc, GST_TYPE_ELEMENT);
+GST_ELEMENT_REGISTER_DEFINE (sctpenc, "sctpenc", GST_RANK_NONE,
+    GST_TYPE_SCTP_ENC);
 
 static GstStaticPadTemplate sink_template =
 GST_STATIC_PAD_TEMPLATE ("sink_%u", GST_PAD_SINK,
@@ -101,6 +103,7 @@ struct _GstSctpEncPad
   GMutex lock;
   GCond cond;
   gboolean flushing;
+  gboolean clear_to_send;
 };
 
 G_DEFINE_TYPE (GstSctpEncPad, gst_sctp_enc_pad, GST_TYPE_PAD);
@@ -130,6 +133,7 @@ gst_sctp_enc_pad_init (GstSctpEncPad * self)
   g_mutex_init (&self->lock);
   g_cond_init (&self->cond);
   self->flushing = FALSE;
+  self->clear_to_send = FALSE;
 }
 
 static void gst_sctp_enc_finalize (GObject * object);
@@ -327,6 +331,34 @@ gst_sctp_enc_get_property (GObject * object, guint prop_id, GValue * value,
   }
 }
 
+static void
+flush_sinkpad (const GValue * item, gpointer user_data)
+{
+  GstSctpEncPad *sctpenc_pad = g_value_get_object (item);
+  gboolean flush = GPOINTER_TO_INT (user_data);
+
+  if (flush) {
+    g_mutex_lock (&sctpenc_pad->lock);
+    sctpenc_pad->flushing = TRUE;
+    g_cond_signal (&sctpenc_pad->cond);
+    g_mutex_unlock (&sctpenc_pad->lock);
+  } else {
+    sctpenc_pad->flushing = FALSE;
+  }
+}
+
+static void
+flush_sinkpads (GstSctpEnc * self, gboolean state)
+{
+  GstIterator *it;
+
+  it = gst_element_iterate_sink_pads (GST_ELEMENT (self));
+  while (gst_iterator_foreach (it, flush_sinkpad,
+          GINT_TO_POINTER (state)) == GST_ITERATOR_RESYNC)
+    gst_iterator_resync (it);
+  gst_iterator_free (it);
+}
+
 static GstStateChangeReturn
 gst_sctp_enc_change_state (GstElement * element, GstStateChange transition)
 {
@@ -347,6 +379,7 @@ gst_sctp_enc_change_state (GstElement * element, GstStateChange transition)
       break;
     case GST_STATE_CHANGE_PAUSED_TO_READY:
       stop_srcpad_task (self->src_pad, self);
+      flush_sinkpads (self, TRUE);
       self->src_ret = GST_FLOW_FLUSHING;
       break;
     case GST_STATE_CHANGE_READY_TO_NULL:
@@ -481,7 +514,10 @@ gst_sctp_enc_release_pad (GstElement * element, GstPad * pad)
   if (self->sctp_association)
     gst_sctp_association_reset_stream (self->sctp_association, stream_id);
 
-  gst_element_remove_pad (element, pad);
+  GST_PAD_STREAM_LOCK (pad);
+  if (gst_object_has_as_parent (GST_OBJECT (pad), GST_OBJECT (element)))
+    gst_element_remove_pad (element, pad);
+  GST_PAD_STREAM_UNLOCK (pad);
 }
 
 static void
@@ -558,6 +594,7 @@ gst_sctp_enc_sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
 {
   GstSctpEnc *self = GST_SCTP_ENC (parent);
   GstSctpEncPad *sctpenc_pad = GST_SCTP_ENC_PAD (pad);
+  GstSctpEncPad *sctpenc_pad_next = NULL;
   GstMapInfo map;
   guint32 ppid;
   gboolean ordered;
@@ -569,6 +606,7 @@ gst_sctp_enc_sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
   GstFlowReturn flow_ret = GST_FLOW_ERROR;
   const guint8 *data;
   guint32 length;
+  gboolean clear_to_send;
 
   GST_OBJECT_LOCK (self);
   if (self->src_ret != GST_FLOW_OK) {
@@ -624,7 +662,21 @@ gst_sctp_enc_sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
   data = map.data;
   length = map.size;
 
+  GST_OBJECT_LOCK (self);
+  clear_to_send = g_queue_is_empty (&self->pending_pads);
+  g_queue_push_tail (&self->pending_pads, sctpenc_pad);
+  GST_OBJECT_UNLOCK (self);
+
   g_mutex_lock (&sctpenc_pad->lock);
+
+  if (clear_to_send) {
+    sctpenc_pad->clear_to_send = TRUE;
+  }
+
+  while (!sctpenc_pad->flushing && !sctpenc_pad->clear_to_send) {
+    g_cond_wait (&sctpenc_pad->cond, &sctpenc_pad->lock);
+  }
+
   while (!sctpenc_pad->flushing) {
     guint32 bytes_sent;
 
@@ -653,15 +705,8 @@ gst_sctp_enc_sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
       length -= bytes_sent;
 
       /* The buffer was probably full. Retry in a while */
-      GST_OBJECT_LOCK (self);
-      g_queue_push_tail (&self->pending_pads, sctpenc_pad);
-      GST_OBJECT_UNLOCK (self);
-
       g_cond_wait_until (&sctpenc_pad->cond, &sctpenc_pad->lock, end_time);
 
-      GST_OBJECT_LOCK (self);
-      g_queue_remove (&self->pending_pads, sctpenc_pad);
-      GST_OBJECT_UNLOCK (self);
     } else if (bytes_sent == length) {
       GST_DEBUG_OBJECT (pad, "Successfully sent buffer");
       sctpenc_pad->bytes_sent += bytes_sent;
@@ -671,7 +716,20 @@ gst_sctp_enc_sink_chain (GstPad * pad, GstObject * parent, GstBuffer * buffer)
   flow_ret = sctpenc_pad->flushing ? GST_FLOW_FLUSHING : GST_FLOW_OK;
 
 out:
+  sctpenc_pad->clear_to_send = FALSE;
   g_mutex_unlock (&sctpenc_pad->lock);
+
+  GST_OBJECT_LOCK (self);
+  g_queue_remove (&self->pending_pads, sctpenc_pad);
+  sctpenc_pad_next = g_queue_peek_head (&self->pending_pads);
+  GST_OBJECT_UNLOCK (self);
+
+  if (sctpenc_pad_next) {
+    g_mutex_lock (&sctpenc_pad_next->lock);
+    sctpenc_pad_next->clear_to_send = TRUE;
+    g_cond_signal (&sctpenc_pad_next->cond);
+    g_mutex_unlock (&sctpenc_pad_next->lock);
+  }
 
   gst_buffer_unmap (buffer, &map);
 error:
@@ -735,22 +793,6 @@ gst_sctp_enc_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
   return ret;
 }
 
-static void
-flush_sinkpad (const GValue * item, gpointer user_data)
-{
-  GstSctpEncPad *sctpenc_pad = g_value_get_object (item);
-  gboolean flush = GPOINTER_TO_INT (user_data);
-
-  if (flush) {
-    g_mutex_lock (&sctpenc_pad->lock);
-    sctpenc_pad->flushing = TRUE;
-    g_cond_signal (&sctpenc_pad->cond);
-    g_mutex_unlock (&sctpenc_pad->lock);
-  } else {
-    sctpenc_pad->flushing = FALSE;
-  }
-}
-
 static gboolean
 gst_sctp_enc_src_event (GstPad * pad, GstObject * parent, GstEvent * event)
 {
@@ -759,29 +801,17 @@ gst_sctp_enc_src_event (GstPad * pad, GstObject * parent, GstEvent * event)
 
   switch (GST_EVENT_TYPE (event)) {
     case GST_EVENT_FLUSH_START:{
-      GstIterator *it;
-
       gst_data_queue_set_flushing (self->outbound_sctp_packet_queue, TRUE);
       gst_data_queue_flush (self->outbound_sctp_packet_queue);
 
-      it = gst_element_iterate_sink_pads (GST_ELEMENT (self));
-      while (gst_iterator_foreach (it, flush_sinkpad,
-              GINT_TO_POINTER (TRUE)) == GST_ITERATOR_RESYNC)
-        gst_iterator_resync (it);
-      gst_iterator_free (it);
+      flush_sinkpads (self, TRUE);
 
       ret = gst_pad_event_default (pad, parent, event);
       break;
     }
     case GST_EVENT_RECONFIGURE:
     case GST_EVENT_FLUSH_STOP:{
-      GstIterator *it;
-
-      it = gst_element_iterate_sink_pads (GST_ELEMENT (self));
-      while (gst_iterator_foreach (it, flush_sinkpad,
-              GINT_TO_POINTER (FALSE)) == GST_ITERATOR_RESYNC)
-        gst_iterator_resync (it);
-      gst_iterator_free (it);
+      flush_sinkpads (self, FALSE);
 
       gst_data_queue_set_flushing (self->outbound_sctp_packet_queue, FALSE);
       self->need_segment = TRUE;
@@ -885,13 +915,12 @@ on_sctp_packet_out (GstSctpAssociation * _association, const guint8 * buf,
   GstSctpEnc *self = user_data;
   GstBuffer *gstbuf;
   GstDataQueueItem *item;
-  GList *pending_pads, *l;
   GstSctpEncPad *sctpenc_pad;
 
   GST_DEBUG_OBJECT (self, "Received output packet of size %" G_GSIZE_FORMAT,
       length);
 
-  gstbuf = gst_buffer_new_wrapped (g_memdup (buf, length), length);
+  gstbuf = gst_buffer_new_memdup (buf, length);
 
   item = g_new0 (GstDataQueueItem, 1);
   item->object = GST_MINI_OBJECT (gstbuf);
@@ -904,21 +933,22 @@ on_sctp_packet_out (GstSctpAssociation * _association, const guint8 * buf,
     GST_DEBUG_OBJECT (self, "Failed to push item because we're flushing");
   }
 
-  /* Wake up pads in the order they waited, oldest pad first */
+  /* Wake up the oldest pad which is the one that needs to finish first */
   GST_OBJECT_LOCK (self);
-  pending_pads = NULL;
-  while ((sctpenc_pad = g_queue_pop_tail (&self->pending_pads))) {
-    pending_pads = g_list_prepend (pending_pads, sctpenc_pad);
-  }
-  GST_OBJECT_UNLOCK (self);
+  sctpenc_pad = g_queue_peek_head (&self->pending_pads);
+  if (sctpenc_pad) {
+    gst_object_ref (sctpenc_pad);
 
-  for (l = pending_pads; l; l = l->next) {
-    sctpenc_pad = l->data;
+    GST_OBJECT_UNLOCK (self);
+
     g_mutex_lock (&sctpenc_pad->lock);
     g_cond_signal (&sctpenc_pad->cond);
     g_mutex_unlock (&sctpenc_pad->lock);
+
+    gst_object_unref (sctpenc_pad);
+  } else {
+    GST_OBJECT_UNLOCK (self);
   }
-  g_list_free (pending_pads);
 }
 
 static void
@@ -948,7 +978,6 @@ sctpenc_cleanup (GstSctpEnc * self)
 
   g_signal_handler_disconnect (self->sctp_association,
       self->signal_handler_state_changed);
-  stop_srcpad_task (self->src_pad, self);
   gst_sctp_association_force_close (self->sctp_association);
   g_object_unref (self->sctp_association);
   self->sctp_association = NULL;

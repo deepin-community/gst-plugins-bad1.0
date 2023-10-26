@@ -121,6 +121,8 @@ static size_t gst_curl_base_sink_transfer_read_cb (void *ptr, size_t size,
     size_t nmemb, void *stream);
 static size_t gst_curl_base_sink_transfer_write_cb (void *ptr, size_t size,
     size_t nmemb, void *stream);
+static int gst_curl_base_sink_transfer_seek_cb (void *user_p, curl_off_t offset,
+    int origin);
 static size_t gst_curl_base_sink_transfer_data_buffer (GstCurlBaseSink * sink,
     void *curl_ptr, size_t block_size, guint * last_chunk);
 #ifndef GST_DISABLE_GST_DEBUG
@@ -142,6 +144,7 @@ static void gst_curl_base_sink_wait_for_transfer_thread_to_send_unlocked
 static void gst_curl_base_sink_data_sent_notify (GstCurlBaseSink * sink);
 static void gst_curl_base_sink_wait_for_response (GstCurlBaseSink * sink);
 static void gst_curl_base_sink_got_response_notify (GstCurlBaseSink * sink);
+static void gst_curl_base_sink_transfer_thread_close (GstCurlBaseSink * sink);
 
 static void handle_transfer (GstCurlBaseSink * sink);
 static size_t transfer_data_buffer (void *curl_ptr, TransferBuffer * buf,
@@ -293,7 +296,7 @@ gst_curl_base_sink_transfer_thread_notify_unlocked (GstCurlBaseSink * sink)
   g_cond_signal (&sink->transfer_cond->cond);
 }
 
-void
+static void
 gst_curl_base_sink_transfer_thread_close (GstCurlBaseSink * sink)
 {
   GST_OBJECT_LOCK (sink);
@@ -704,6 +707,21 @@ gst_curl_base_sink_transfer_set_common_options_unlocked (GstCurlBaseSink * sink)
         curl_easy_strerror (res));
     return FALSE;
   }
+
+  res = curl_easy_setopt (sink->curl, CURLOPT_SEEKDATA, sink);
+  if (res != CURLE_OK) {
+    sink->error = g_strdup_printf ("failed to set seek user data: %s",
+        curl_easy_strerror (res));
+    return FALSE;
+  }
+  res = curl_easy_setopt (sink->curl, CURLOPT_SEEKFUNCTION,
+      gst_curl_base_sink_transfer_seek_cb);
+  if (res != CURLE_OK) {
+    sink->error = g_strdup_printf ("failed to set seek function: %s",
+        curl_easy_strerror (res));
+    return FALSE;
+  }
+
   /* Time out in case transfer speed in bytes per second stay below
    * CURLOPT_LOW_SPEED_LIMIT during CURLOPT_LOW_SPEED_TIME */
   res = curl_easy_setopt (sink->curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
@@ -882,6 +900,45 @@ gst_curl_base_sink_transfer_write_cb (void G_GNUC_UNUSED * ptr, size_t size,
   return realsize;
 }
 
+static int
+gst_curl_base_sink_transfer_seek_cb (void *stream, curl_off_t offset,
+    int origin)
+{
+  GstCurlBaseSink *sink;
+  curl_off_t buf_size;
+
+  /*
+   *  Origin is SEEK_SET, SEEK_CUR or SEEK_END,
+   *  libcurl currently only passes SEEK_SET.
+   */
+
+  sink = (GstCurlBaseSink *) stream;
+
+  GST_OBJECT_LOCK (sink);
+  buf_size = sink->transfer_buf->offset + sink->transfer_buf->len;
+
+  switch (origin) {
+    case SEEK_SET:
+      if ((0 <= offset) && (offset <= buf_size)) {
+        sink->transfer_buf->offset = offset;
+        sink->transfer_buf->len = buf_size - offset;
+      } else {
+        GST_OBJECT_UNLOCK (sink);
+        return CURL_SEEKFUNC_FAIL;
+      }
+      break;
+    case SEEK_CUR:
+    case SEEK_END:
+    default:
+      GST_OBJECT_UNLOCK (sink);
+      return CURL_SEEKFUNC_FAIL;
+      break;
+  }
+
+  GST_OBJECT_UNLOCK (sink);
+  return CURL_SEEKFUNC_OK;
+}
+
 CURLcode
 gst_curl_base_sink_transfer_check (GstCurlBaseSink * sink)
 {
@@ -1036,7 +1093,7 @@ gst_curl_base_sink_debug_cb (CURL * handle, curl_infotype type, char *data,
     case CURLINFO_TEXT:
     case CURLINFO_HEADER_IN:
     case CURLINFO_HEADER_OUT:
-      msg = g_memdup (data, size);
+      msg = g_memdup2 (data, size);
       if (size > 0) {
         msg[size - 1] = '\0';
         g_strchomp (msg);

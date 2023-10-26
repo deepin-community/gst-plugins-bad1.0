@@ -54,6 +54,8 @@ struct _GstMFSourceObject
   gchar *device_path;
   gchar *device_name;
   gint device_index;
+
+  GWeakRef client;
 };
 
 struct _GstMFSourceObjectClass
@@ -69,6 +71,9 @@ struct _GstMFSourceObjectClass
 
   GstFlowReturn (*create)      (GstMFSourceObject * object,
                                 GstBuffer ** buffer);
+
+  GstFlowReturn (*get_sample)  (GstMFSourceObject * object,
+                                GstSample ** sample);
 
   gboolean      (*unlock)      (GstMFSourceObject * object);
 
@@ -94,6 +99,10 @@ GstFlowReturn   gst_mf_source_object_fill         (GstMFSourceObject * object,
 GstFlowReturn   gst_mf_source_object_create       (GstMFSourceObject * object,
                                                    GstBuffer ** buffer);
 
+/* DirectShow filter */
+GstFlowReturn   gst_mf_source_object_get_sample   (GstMFSourceObject * object,
+                                                   GstSample ** sample);
+
 void            gst_mf_source_object_set_flushing (GstMFSourceObject * object,
                                                    gboolean flushing);
 
@@ -101,6 +110,11 @@ GstCaps *       gst_mf_source_object_get_caps     (GstMFSourceObject * object);
 
 gboolean        gst_mf_source_object_set_caps     (GstMFSourceObject * object,
                                                    GstCaps * caps);
+
+gboolean        gst_mf_source_object_set_client   (GstMFSourceObject * object,
+                                                   GstElement * element);
+
+GstClockTime    gst_mf_source_object_get_running_time (GstMFSourceObject * object);
 
 /* A factory method for subclass impl. selection */
 GstMFSourceObject * gst_mf_source_object_new      (GstMFSourceType type,

@@ -15,12 +15,14 @@ applemedia_args = [
     '-Dgst_core_media_buffer_get_type=gst_core_media_buffer_priv_get_type',
     '-Dgst_core_media_buffer_get_pixel_buffer=gst_core_media_buffer_priv_get_pixel_buffer',
     '-Dgst_core_video_buffer_new=gst_core_video_buffer_priv_new',
-    '-Dgst_core_video_buffer_get_type=gst_core_video_buffer_priv_get_type'
+    '-Dgst_core_video_buffer_get_type=gst_core_video_buffer_priv_get_type',
+    '-DGST_USE_UNSTABLE_API'
 ]
 
 applemedia_objc_args = []
 applemedia_option = get_option('applemedia')
 if not ['darwin', 'ios'].contains(host_system) or applemedia_option.disabled()
+  applemedia_found_deps = false
   subdir_done()
 endif
 
@@ -31,6 +33,8 @@ if ['darwin', 'ios'].contains(host_system)
   endif
 
   applemedia_objc_args += ['-fobjc-arc']
+
+  objcpp = meson.get_compiler('objcpp')
 endif
 
 applemedia_frameworks = []
@@ -87,6 +91,7 @@ foreach framework : applemedia_frameworks
     endif
 endforeach
 
+applemedia_objcpp_args = []
 if gstvulkan_dep.found() and have_objcpp
   moltenvk_dep = cc.find_library('MoltenVK', required : false)
   metal_dep = dependency('appleframeworks', modules : ['Metal'], required : false)
@@ -97,6 +102,10 @@ if gstvulkan_dep.found() and have_objcpp
       'iosurfacevulkanmemory.c',
     ]
     applemedia_args += ['-DAPPLEMEDIA_MOLTENVK']
+    # override_options : ['cpp_std=c++11'] doesn't seem to work for objcpp
+    applemedia_objcpp_args += objcpp.get_supported_arguments([
+      '-std=c++11',
+    ])
   endif
 endif
 
@@ -105,13 +114,13 @@ if applemedia_found_deps
         applemedia_sources,
         c_args : gst_plugins_bad_args + applemedia_args,
         objc_args : gst_plugins_bad_args + applemedia_args + applemedia_objc_args,
-        objcpp_args : gst_plugins_bad_args + applemedia_args + applemedia_objc_args,
+        objcpp_args : gst_plugins_bad_args + applemedia_args + applemedia_objc_args + applemedia_objcpp_args,
         link_args : noseh_link_args,
         include_directories : [configinc, libsinc],
-        dependencies : [gstvideo_dep, gstaudio_dep, gstpbutils_dep, gst_dep, gstbase_dep, gstgl_dep, gstglproto_dep] + applemedia_frameworks,
+        dependencies : [gstvideo_dep, gstaudio_dep, gstpbutils_dep, gst_dep, gstbase_dep, gstgl_dep, gstglproto_dep, gstcodecparsers_dep] + applemedia_frameworks,
+        override_options : ['cpp_std=c++11'],
         install : true,
         install_dir : plugins_install_dir,
     )
-    pkgconfig.generate(gstapplemedia, install_dir : plugins_pkgconfig_install_dir)
     plugins += [gstapplemedia]
 endif

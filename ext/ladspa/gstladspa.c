@@ -115,7 +115,7 @@
 #include "gstladspafilter.h"
 #include "gstladspasource.h"
 #include "gstladspasink.h"
-#include <gst/gst-i18n-plugin.h>
+#include <glib/gi18n-lib.h>
 
 #include <string.h>
 #include <ladspa.h>
@@ -250,9 +250,10 @@ ladspa_describe_plugin (const gchar * file_name, const gchar * entry_name,
         "control-out", G_TYPE_UINT, control_out, NULL);
 
     g_value_init (&value, GST_TYPE_STRUCTURE);
-    g_value_set_boxed (&value, ladspa_meta);
+    g_value_take_boxed (&value, ladspa_meta);
     gst_structure_set_value (ladspa_meta_all, type_name, &value);
     g_value_unset (&value);
+    g_free (type_name);
   }
 }
 

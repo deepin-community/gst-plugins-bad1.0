@@ -22,9 +22,16 @@
 #endif
 
 #include "gstv4l2codecallocator.h"
+#include "gstv4l2codecalphadecodebin.h"
 #include "gstv4l2codecpool.h"
 #include "gstv4l2codecvp8dec.h"
-#include "linux/vp8-ctrls.h"
+#include "gstv4l2format.h"
+
+#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))
+
+#define V4L2_MIN_KERNEL_VER_MAJOR 5
+#define V4L2_MIN_KERNEL_VER_MINOR 13
+#define V4L2_MIN_KERNEL_VERSION KERNEL_VERSION(V4L2_MIN_KERNEL_VER_MAJOR, V4L2_MIN_KERNEL_VER_MINOR, 0)
 
 GST_DEBUG_CATEGORY_STATIC (v4l2_vp8dec_debug);
 #define GST_CAT_DEFAULT v4l2_vp8dec_debug
@@ -41,10 +48,16 @@ GST_STATIC_PAD_TEMPLATE (GST_VIDEO_DECODER_SINK_NAME,
     GST_STATIC_CAPS ("video/x-vp8")
     );
 
+static GstStaticPadTemplate alpha_template =
+GST_STATIC_PAD_TEMPLATE (GST_VIDEO_DECODER_SINK_NAME,
+    GST_PAD_SINK, GST_PAD_ALWAYS,
+    GST_STATIC_CAPS ("video/x-vp8, codec-alpha = (boolean) true")
+    );
+
 static GstStaticPadTemplate src_template =
 GST_STATIC_PAD_TEMPLATE (GST_VIDEO_DECODER_SRC_NAME,
     GST_PAD_SRC, GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE ("{ NV12, YUY2, NV12_32L32 }")));
+    GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE (GST_V4L2_DEFAULT_VIDEO_FORMATS)));
 
 struct _GstV4l2CodecVp8Dec
 {
@@ -60,25 +73,43 @@ struct _GstV4l2CodecVp8Dec
   GstV4l2CodecPool *src_pool;
   gint min_pool_size;
   gboolean has_videometa;
-  gboolean need_negotiation;
+  gboolean streaming;
   gboolean copy_frames;
 
-  struct v4l2_ctrl_vp8_frame_header frame_header;
+  struct v4l2_ctrl_vp8_frame frame_header;
 
   GstMemory *bitstream;
   GstMapInfo bitstream_map;
 };
 
-G_DEFINE_ABSTRACT_TYPE_WITH_CODE (GstV4l2CodecVp8Dec,
-    gst_v4l2_codec_vp8_dec, GST_TYPE_VP8_DECODER,
-    GST_DEBUG_CATEGORY_INIT (v4l2_vp8dec_debug, "v4l2codecs-vp8dec", 0,
-        "V4L2 stateless VP8 decoder"));
+G_DEFINE_ABSTRACT_TYPE (GstV4l2CodecVp8Dec, gst_v4l2_codec_vp8_dec,
+    GST_TYPE_VP8_DECODER);
+
 #define parent_class gst_v4l2_codec_vp8_dec_parent_class
+
+static guint
+gst_v4l2_codec_vp8_dec_get_preferred_output_delay (GstVp8Decoder * decoder,
+    gboolean is_live)
+{
+
+  GstV4l2CodecVp8Dec *self = GST_V4L2_CODEC_VP8_DEC (decoder);
+  guint delay;
+
+  if (is_live)
+    delay = 0;
+  else
+    /* Just one for now, perhaps we can make this configurable in the future. */
+    delay = 1;
+
+  gst_v4l2_decoder_set_render_delay (self->decoder, delay);
+  return delay;
+}
 
 static gboolean
 gst_v4l2_codec_vp8_dec_open (GstVideoDecoder * decoder)
 {
   GstV4l2CodecVp8Dec *self = GST_V4L2_CODEC_VP8_DEC (decoder);
+  guint version;
 
   if (!gst_v4l2_decoder_open (self->decoder)) {
     GST_ELEMENT_ERROR (self, RESOURCE, OPEN_READ_WRITE,
@@ -86,6 +117,13 @@ gst_v4l2_codec_vp8_dec_open (GstVideoDecoder * decoder)
         ("gst_v4l2_decoder_open() failed: %s", g_strerror (errno)));
     return FALSE;
   }
+
+  version = gst_v4l2_decoder_get_version (self->decoder);
+  if (version < V4L2_MIN_KERNEL_VERSION)
+    GST_WARNING_OBJECT (self,
+        "V4L2 API v%u.%u too old, at least v%u.%u required",
+        (version >> 16) & 0xff, (version >> 8) & 0xff,
+        V4L2_MIN_KERNEL_VER_MAJOR, V4L2_MIN_KERNEL_VER_MINOR);
 
   return TRUE;
 }
@@ -96,6 +134,16 @@ gst_v4l2_codec_vp8_dec_close (GstVideoDecoder * decoder)
   GstV4l2CodecVp8Dec *self = GST_V4L2_CODEC_VP8_DEC (decoder);
   gst_v4l2_decoder_close (self->decoder);
   return TRUE;
+}
+
+static void
+gst_v4l2_codec_vp8_dec_streamoff (GstV4l2CodecVp8Dec * self)
+{
+  if (self->streaming) {
+    gst_v4l2_decoder_streamoff (self->decoder, GST_PAD_SINK);
+    gst_v4l2_decoder_streamoff (self->decoder, GST_PAD_SRC);
+    self->streaming = FALSE;
+  }
 }
 
 static void
@@ -118,9 +166,7 @@ gst_v4l2_codec_vp8_dec_stop (GstVideoDecoder * decoder)
 {
   GstV4l2CodecVp8Dec *self = GST_V4L2_CODEC_VP8_DEC (decoder);
 
-  gst_v4l2_decoder_streamoff (self->decoder, GST_PAD_SINK);
-  gst_v4l2_decoder_streamoff (self->decoder, GST_PAD_SRC);
-
+  gst_v4l2_codec_vp8_dec_streamoff (self);
   gst_v4l2_codec_vp8_dec_reset_allocation (self);
 
   if (self->output_state)
@@ -138,7 +184,7 @@ gst_v4l2_codec_vp8_dec_negotiate (GstVideoDecoder * decoder)
   /* *INDENT-OFF* */
   struct v4l2_ext_control control[] = {
     {
-      .id = V4L2_CID_MPEG_VIDEO_VP8_FRAME_HEADER,
+      .id = V4L2_CID_STATELESS_VP8_FRAME,
       .ptr = &self->frame_header,
       .size = sizeof (self->frame_header),
     },
@@ -147,16 +193,12 @@ gst_v4l2_codec_vp8_dec_negotiate (GstVideoDecoder * decoder)
   GstCaps *filter, *caps;
 
   /* Ignore downstream renegotiation request. */
-  if (!self->need_negotiation)
-    return TRUE;
-  self->need_negotiation = FALSE;
+  if (self->streaming)
+    goto done;
 
   GST_DEBUG_OBJECT (self, "Negotiate");
 
   gst_v4l2_codec_vp8_dec_reset_allocation (self);
-
-  gst_v4l2_decoder_streamoff (self->decoder, GST_PAD_SINK);
-  gst_v4l2_decoder_streamoff (self->decoder, GST_PAD_SRC);
 
   if (!gst_v4l2_decoder_set_sink_fmt (self->decoder, V4L2_PIX_FMT_VP8_FRAME,
           self->width, self->height, 12 /* 8 bits 4:2:0 */ )) {
@@ -196,6 +238,7 @@ gst_v4l2_codec_vp8_dec_negotiate (GstVideoDecoder * decoder)
   }
   gst_caps_unref (caps);
 
+done:
   if (self->output_state)
     gst_video_codec_state_unref (self->output_state);
 
@@ -207,6 +250,9 @@ gst_v4l2_codec_vp8_dec_negotiate (GstVideoDecoder * decoder)
   self->output_state->caps = gst_video_info_to_caps (&self->output_state->info);
 
   if (GST_VIDEO_DECODER_CLASS (parent_class)->negotiate (decoder)) {
+    if (self->streaming)
+      return TRUE;
+
     if (!gst_v4l2_decoder_streamon (self->decoder, GST_PAD_SINK)) {
       GST_ELEMENT_ERROR (self, RESOURCE, FAILED,
           ("Could not enable the decoder driver."),
@@ -221,6 +267,8 @@ gst_v4l2_codec_vp8_dec_negotiate (GstVideoDecoder * decoder)
       return FALSE;
     }
 
+    self->streaming = TRUE;
+
     return TRUE;
   }
 
@@ -233,6 +281,10 @@ gst_v4l2_codec_vp8_dec_decide_allocation (GstVideoDecoder * decoder,
 {
   GstV4l2CodecVp8Dec *self = GST_V4L2_CODEC_VP8_DEC (decoder);
   guint min = 0;
+  guint num_bitstream;
+
+  if (self->streaming)
+    return TRUE;
 
   self->has_videometa = gst_query_find_allocation_meta (query,
       GST_VIDEO_META_API_TYPE, NULL);
@@ -245,10 +297,26 @@ gst_v4l2_codec_vp8_dec_decide_allocation (GstVideoDecoder * decoder,
 
   min = MAX (2, min);
 
+  num_bitstream = 1 +
+      MAX (1, gst_v4l2_decoder_get_render_delay (self->decoder));
+
   self->sink_allocator = gst_v4l2_codec_allocator_new (self->decoder,
-      GST_PAD_SINK, self->min_pool_size + 2);
+      GST_PAD_SINK, num_bitstream);
+  if (!self->sink_allocator) {
+    GST_ELEMENT_ERROR (self, RESOURCE, NO_SPACE_LEFT,
+        ("Not enough memory to allocate sink buffers."), (NULL));
+    return FALSE;
+  }
+
   self->src_allocator = gst_v4l2_codec_allocator_new (self->decoder,
       GST_PAD_SRC, self->min_pool_size + min + 4);
+  if (!self->src_allocator) {
+    GST_ELEMENT_ERROR (self, RESOURCE, NO_SPACE_LEFT,
+        ("Not enough memory to allocate source buffers."), (NULL));
+    g_clear_object (&self->sink_allocator);
+    return FALSE;
+  }
+
   self->src_pool = gst_v4l2_codec_pool_new (self->src_allocator, &self->vinfo);
 
   /* Our buffer pool is internal, we will let the base class create a video
@@ -259,57 +327,57 @@ gst_v4l2_codec_vp8_dec_decide_allocation (GstVideoDecoder * decoder,
 }
 
 static void
-gst_v4l2_codec_vp8_dec_fill_segment_header (struct v4l2_vp8_segment_header
-    *segment_header, const GstVp8Segmentation * segmentation)
+gst_v4l2_codec_vp8_dec_fill_segment (struct v4l2_vp8_segment
+    *segment, const GstVp8Segmentation * segmentation)
 {
   gint i;
 
   /* *INDENT-OFF* */
-  segment_header->flags =
-    (segmentation->segmentation_enabled ? V4L2_VP8_SEGMENT_HEADER_FLAG_ENABLED : 0) |
-    (segmentation->update_mb_segmentation_map ? V4L2_VP8_SEGMENT_HEADER_FLAG_UPDATE_MAP : 0) |
-    (segmentation->update_segment_feature_data ? V4L2_VP8_SEGMENT_HEADER_FLAG_UPDATE_FEATURE_DATA : 0) |
-    (segmentation->segment_feature_mode ? 0 : V4L2_VP8_SEGMENT_HEADER_FLAG_DELTA_VALUE_MODE);
+  segment->flags =
+    (segmentation->segmentation_enabled ? V4L2_VP8_SEGMENT_FLAG_ENABLED : 0) |
+    (segmentation->update_mb_segmentation_map ? V4L2_VP8_SEGMENT_FLAG_UPDATE_MAP : 0) |
+    (segmentation->update_segment_feature_data ? V4L2_VP8_SEGMENT_FLAG_UPDATE_FEATURE_DATA : 0) |
+    (segmentation->segment_feature_mode ? 0 : V4L2_VP8_SEGMENT_FLAG_DELTA_VALUE_MODE);
   /* *INDENT-ON* */
 
   for (i = 0; i < 4; i++) {
-    segment_header->quant_update[i] = segmentation->quantizer_update_value[i];
-    segment_header->lf_update[i] = segmentation->lf_update_value[i];
+    segment->quant_update[i] = segmentation->quantizer_update_value[i];
+    segment->lf_update[i] = segmentation->lf_update_value[i];
   }
 
   for (i = 0; i < 3; i++)
-    segment_header->segment_probs[i] = segmentation->segment_prob[i];
+    segment->segment_probs[i] = segmentation->segment_prob[i];
 
-  segment_header->padding = 0;
+  segment->padding = 0;
 }
 
 static void
-gst_v4l2_codec_vp8_dec_fill_lf_header (struct v4l2_vp8_loopfilter_header
-    *lf_header, const GstVp8MbLfAdjustments * lf_adj)
+gst_v4l2_codec_vp8_dec_fill_lf (struct v4l2_vp8_loop_filter
+    *lf, const GstVp8MbLfAdjustments * lf_adj)
 {
   gint i;
 
-  lf_header->flags |=
-      (lf_adj->loop_filter_adj_enable ? V4L2_VP8_LF_HEADER_ADJ_ENABLE : 0) |
-      (lf_adj->mode_ref_lf_delta_update ? V4L2_VP8_LF_HEADER_DELTA_UPDATE : 0);
+  lf->flags |=
+      (lf_adj->loop_filter_adj_enable ? V4L2_VP8_LF_ADJ_ENABLE : 0) |
+      (lf_adj->mode_ref_lf_delta_update ? V4L2_VP8_LF_DELTA_UPDATE : 0);
 
   for (i = 0; i < 4; i++) {
-    lf_header->ref_frm_delta[i] = lf_adj->ref_frame_delta[i];
-    lf_header->mb_mode_delta[i] = lf_adj->mb_mode_delta[i];
+    lf->ref_frm_delta[i] = lf_adj->ref_frame_delta[i];
+    lf->mb_mode_delta[i] = lf_adj->mb_mode_delta[i];
   }
 }
 
 static void
-gst_v4l2_codec_vp8_dec_fill_entropy_header (struct v4l2_vp8_entropy_header
-    *entropy_header, const GstVp8FrameHdr * frame_hdr)
+gst_v4l2_codec_vp8_dec_fill_entropy (struct v4l2_vp8_entropy
+    *entropy, const GstVp8FrameHdr * frame_hdr)
 {
-  memcpy (entropy_header->coeff_probs, frame_hdr->token_probs.prob,
+  memcpy (entropy->coeff_probs, frame_hdr->token_probs.prob,
       sizeof (frame_hdr->token_probs.prob));
-  memcpy (entropy_header->y_mode_probs, frame_hdr->mode_probs.y_prob,
+  memcpy (entropy->y_mode_probs, frame_hdr->mode_probs.y_prob,
       sizeof (frame_hdr->mode_probs.y_prob));
-  memcpy (entropy_header->uv_mode_probs, frame_hdr->mode_probs.uv_prob,
+  memcpy (entropy->uv_mode_probs, frame_hdr->mode_probs.uv_prob,
       sizeof (frame_hdr->mode_probs.uv_prob));
-  memcpy (entropy_header->mv_probs, frame_hdr->mv_probs.prob,
+  memcpy (entropy->mv_probs, frame_hdr->mv_probs.prob,
       sizeof (frame_hdr->mv_probs.prob));
 }
 
@@ -320,13 +388,13 @@ gst_v4l2_codec_vp8_dec_fill_frame_header (GstV4l2CodecVp8Dec * self,
   gint i;
 
   /* *INDENT-OFF* */
-  self->frame_header = (struct v4l2_ctrl_vp8_frame_header) {
-    .lf_header = (struct v4l2_vp8_loopfilter_header) {
+  self->frame_header = (struct v4l2_ctrl_vp8_frame) {
+    .lf = (struct v4l2_vp8_loop_filter) {
       .sharpness_level = frame_hdr->sharpness_level,
       .level = frame_hdr->loop_filter_level,
       .flags = (frame_hdr->filter_type == 1 ? V4L2_VP8_LF_FILTER_TYPE_SIMPLE : 0)
     },
-    .quant_header = (struct v4l2_vp8_quantization_header) {
+    .quant = (struct v4l2_vp8_quantization) {
       .y_ac_qi = frame_hdr->quant_indices.y_ac_qi,
       .y_dc_delta = frame_hdr->quant_indices.y_dc_delta,
       .y2_dc_delta = frame_hdr->quant_indices.y2_dc_delta,
@@ -356,19 +424,18 @@ gst_v4l2_codec_vp8_dec_fill_frame_header (GstV4l2CodecVp8Dec * self,
     .first_part_size = frame_hdr->first_part_size,
     .first_part_header_bits = frame_hdr->header_size,
 
-    .flags = (frame_hdr->key_frame ? V4L2_VP8_FRAME_HEADER_FLAG_KEY_FRAME : 0) |
-             (frame_hdr->show_frame ? V4L2_VP8_FRAME_HEADER_FLAG_SHOW_FRAME : 0) |
-             (frame_hdr->mb_no_skip_coeff ? V4L2_VP8_FRAME_HEADER_FLAG_MB_NO_SKIP_COEFF : 0) |
-             (frame_hdr->sign_bias_golden ? V4L2_VP8_FRAME_HEADER_FLAG_SIGN_BIAS_GOLDEN : 0) |
-             (frame_hdr->sign_bias_alternate ? V4L2_VP8_FRAME_HEADER_FLAG_SIGN_BIAS_ALT : 0),
+    .flags = (frame_hdr->key_frame ? V4L2_VP8_FRAME_FLAG_KEY_FRAME : 0) |
+             (frame_hdr->show_frame ? V4L2_VP8_FRAME_FLAG_SHOW_FRAME : 0) |
+             (frame_hdr->mb_no_skip_coeff ? V4L2_VP8_FRAME_FLAG_MB_NO_SKIP_COEFF : 0) |
+             (frame_hdr->sign_bias_golden ? V4L2_VP8_FRAME_FLAG_SIGN_BIAS_GOLDEN : 0) |
+             (frame_hdr->sign_bias_alternate ? V4L2_VP8_FRAME_FLAG_SIGN_BIAS_ALT : 0),
   };
   /* *INDENT-ON* */
 
   for (i = 0; i < 8; i++)
     self->frame_header.dct_part_sizes[i] = frame_hdr->partition_size[i];
 
-  gst_v4l2_codec_vp8_dec_fill_entropy_header (&self->
-      frame_header.entropy_header, frame_hdr);
+  gst_v4l2_codec_vp8_dec_fill_entropy (&self->frame_header.entropy, frame_hdr);
 }
 
 static void
@@ -394,9 +461,9 @@ gst_v4l2_codec_vp8_dec_fill_references (GstV4l2CodecVp8Dec * self)
       (guint32) self->frame_header.alt_frame_ts / 1000);
 }
 
-static gboolean
+static GstFlowReturn
 gst_v4l2_codec_vp8_dec_new_sequence (GstVp8Decoder * decoder,
-    const GstVp8FrameHdr * frame_hdr)
+    const GstVp8FrameHdr * frame_hdr, gint max_dpb_size)
 {
   GstV4l2CodecVp8Dec *self = GST_V4L2_CODEC_VP8_DEC (decoder);
   gboolean negotiation_needed = FALSE;
@@ -416,10 +483,10 @@ gst_v4l2_codec_vp8_dec_new_sequence (GstVp8Decoder * decoder,
   gst_v4l2_codec_vp8_dec_fill_frame_header (self, frame_hdr);
 
   if (negotiation_needed) {
-    self->need_negotiation = TRUE;
+    gst_v4l2_codec_vp8_dec_streamoff (self);
     if (!gst_video_decoder_negotiate (GST_VIDEO_DECODER (self))) {
       GST_ERROR_OBJECT (self, "Failed to negotiate with downstream");
-      return FALSE;
+      return GST_FLOW_NOT_NEGOTIATED;
     }
   }
 
@@ -444,10 +511,10 @@ gst_v4l2_codec_vp8_dec_new_sequence (GstVp8Decoder * decoder,
     self->copy_frames = FALSE;
   }
 
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
-static gboolean
+static GstFlowReturn
 gst_v4l2_codec_vp8_dec_start_picture (GstVp8Decoder * decoder,
     GstVp8Picture * picture)
 {
@@ -455,7 +522,7 @@ gst_v4l2_codec_vp8_dec_start_picture (GstVp8Decoder * decoder,
 
   /* FIXME base class should not call us if negotiation failed */
   if (!self->sink_allocator)
-    return FALSE;
+    return GST_FLOW_NOT_NEGOTIATED;
 
   /* Ensure we have a bitstream to write into */
   if (!self->bitstream) {
@@ -464,24 +531,24 @@ gst_v4l2_codec_vp8_dec_start_picture (GstVp8Decoder * decoder,
     if (!self->bitstream) {
       GST_ELEMENT_ERROR (decoder, RESOURCE, NO_SPACE_LEFT,
           ("Not enough memory to decode VP8 stream."), (NULL));
-      return FALSE;
+      return GST_FLOW_ERROR;
     }
 
     if (!gst_memory_map (self->bitstream, &self->bitstream_map, GST_MAP_WRITE)) {
       GST_ELEMENT_ERROR (decoder, RESOURCE, WRITE,
           ("Could not access bitstream memory for writing"), (NULL));
       g_clear_pointer (&self->bitstream, gst_memory_unref);
-      return FALSE;
+      return GST_FLOW_ERROR;
     }
   }
 
   /* We use this field to track how much we have written */
   self->bitstream_map.size = 0;
 
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
-static gboolean
+static GstFlowReturn
 gst_v4l2_codec_vp8_dec_decode_picture (GstVp8Decoder * decoder,
     GstVp8Picture * picture, GstVp8Parser * parser)
 {
@@ -491,20 +558,20 @@ gst_v4l2_codec_vp8_dec_decode_picture (GstVp8Decoder * decoder,
   if (self->bitstream_map.maxsize < picture->size) {
     GST_ELEMENT_ERROR (decoder, RESOURCE, NO_SPACE_LEFT,
         ("Not enough space to send picture bitstream."), (NULL));
-    return FALSE;
+    return GST_FLOW_ERROR;
   }
 
   gst_v4l2_codec_vp8_dec_fill_frame_header (self, &picture->frame_hdr);
-  gst_v4l2_codec_vp8_dec_fill_segment_header (&self->
-      frame_header.segment_header, &parser->segmentation);
-  gst_v4l2_codec_vp8_dec_fill_lf_header (&self->frame_header.lf_header,
+  gst_v4l2_codec_vp8_dec_fill_segment (&self->frame_header.segment,
+      &parser->segmentation);
+  gst_v4l2_codec_vp8_dec_fill_lf (&self->frame_header.lf,
       &parser->mb_lf_adjust);
   gst_v4l2_codec_vp8_dec_fill_references (self);
 
   memcpy (bitstream_data, picture->data, picture->size);
   self->bitstream_map.size = picture->size;
 
-  return TRUE;
+  return GST_FLOW_OK;
 }
 
 static void
@@ -518,7 +585,7 @@ gst_v4l2_codec_vp8_dec_reset_picture (GstV4l2CodecVp8Dec * self)
   }
 }
 
-static gboolean
+static GstFlowReturn
 gst_v4l2_codec_vp8_dec_end_picture (GstVp8Decoder * decoder,
     GstVp8Picture * picture)
 {
@@ -526,28 +593,23 @@ gst_v4l2_codec_vp8_dec_end_picture (GstVp8Decoder * decoder,
   GstVideoCodecFrame *frame;
   GstV4l2Request *request;
   GstBuffer *buffer;
-  GstFlowReturn flow_ret;
+  GstFlowReturn flow_ret = GST_FLOW_OK;
   gsize bytesused;
 
   /* *INDENT-OFF* */
   struct v4l2_ext_control control[] = {
     {
-      .id = V4L2_CID_MPEG_VIDEO_VP8_FRAME_HEADER,
+      .id = V4L2_CID_STATELESS_VP8_FRAME,
       .ptr = &self->frame_header,
       .size = sizeof(self->frame_header),
     },
   };
   /* *INDENT-ON* */
 
-  request = gst_v4l2_decoder_alloc_request (self->decoder);
-  if (!request) {
-    GST_ELEMENT_ERROR (decoder, RESOURCE, NO_SPACE_LEFT,
-        ("Failed to allocate a media request object."), (NULL));
-    goto fail;
-  }
-
-  gst_vp8_picture_set_user_data (picture, request,
-      (GDestroyNotify) gst_v4l2_request_free);
+  bytesused = self->bitstream_map.size;
+  gst_memory_unmap (self->bitstream, &self->bitstream_map);
+  self->bitstream_map = (GstMapInfo) GST_MAP_INFO_INIT;
+  gst_memory_resize (self->bitstream, 0, bytesused);
 
   flow_ret = gst_buffer_pool_acquire_buffer (GST_BUFFER_POOL (self->src_pool),
       &buffer, NULL);
@@ -562,10 +624,21 @@ gst_v4l2_codec_vp8_dec_end_picture (GstVp8Decoder * decoder,
 
   frame = gst_video_decoder_get_frame (GST_VIDEO_DECODER (self),
       picture->system_frame_number);
-  g_return_val_if_fail (frame, FALSE);
+  g_return_val_if_fail (frame, GST_FLOW_ERROR);
   g_warn_if_fail (frame->output_buffer == NULL);
   frame->output_buffer = buffer;
   gst_video_codec_frame_unref (frame);
+
+  request = gst_v4l2_decoder_alloc_request (self->decoder,
+      picture->system_frame_number, self->bitstream, buffer);
+  if (!request) {
+    GST_ELEMENT_ERROR (decoder, RESOURCE, NO_SPACE_LEFT,
+        ("Failed to allocate a media request object."), (NULL));
+    goto fail;
+  }
+
+  gst_vp8_picture_set_user_data (picture, request,
+      (GDestroyNotify) gst_v4l2_request_unref);
 
   if (!gst_v4l2_decoder_set_controls (self->decoder, request, control,
           G_N_ELEMENTS (control))) {
@@ -574,37 +647,23 @@ gst_v4l2_codec_vp8_dec_end_picture (GstVp8Decoder * decoder,
     goto fail;
   }
 
-  bytesused = self->bitstream_map.size;
-  gst_memory_unmap (self->bitstream, &self->bitstream_map);
-  self->bitstream_map = (GstMapInfo) GST_MAP_INFO_INIT;
-
-  if (!gst_v4l2_decoder_queue_sink_mem (self->decoder, request, self->bitstream,
-          picture->system_frame_number, bytesused, 0)) {
-    GST_ELEMENT_ERROR (decoder, RESOURCE, WRITE,
-        ("Driver did not accept the bitstream data."), (NULL));
-    goto fail;
-  }
-
-
-  if (!gst_v4l2_decoder_queue_src_buffer (self->decoder, buffer,
-          picture->system_frame_number)) {
-    GST_ELEMENT_ERROR (decoder, RESOURCE, WRITE,
-        ("Driver did not accept the picture buffer."), (NULL));
-    goto fail;
-  }
-
-  if (!gst_v4l2_request_queue (request)) {
+  if (!gst_v4l2_request_queue (request, 0)) {
     GST_ELEMENT_ERROR (decoder, RESOURCE, WRITE,
         ("Driver did not accept the decode request."), (NULL));
     goto fail;
   }
 
   gst_v4l2_codec_vp8_dec_reset_picture (self);
-  return TRUE;
+
+  return GST_FLOW_OK;
 
 fail:
   gst_v4l2_codec_vp8_dec_reset_picture (self);
-  return FALSE;
+
+  if (flow_ret != GST_FLOW_OK)
+    return flow_ret;
+
+  return GST_FLOW_ERROR;
 }
 
 static gboolean
@@ -663,15 +722,17 @@ gst_v4l2_codec_vp8_dec_output_picture (GstVp8Decoder * decoder,
   GstVideoDecoder *vdec = GST_VIDEO_DECODER (decoder);
   GstV4l2Request *request = gst_vp8_picture_get_user_data (picture);
   gint ret;
-  guint32 frame_num;
+
+  if (picture->discont_state) {
+    if (!gst_video_decoder_negotiate (vdec)) {
+      GST_ERROR_OBJECT (vdec, "Could not re-negotiate with updated state");
+      return FALSE;
+    }
+  }
 
   GST_DEBUG_OBJECT (self, "Output picture %u", picture->system_frame_number);
 
-  /* Unlikely, but it would not break this decoding flow */
-  if (gst_v4l2_request_is_done (request))
-    goto finish_frame;
-
-  ret = gst_v4l2_request_poll (request, GST_SECOND);
+  ret = gst_v4l2_request_set_done (request);
   if (ret == 0) {
     GST_ELEMENT_ERROR (self, STREAM, DECODE,
         ("Decoding frame took too long"), (NULL));
@@ -682,17 +743,13 @@ gst_v4l2_codec_vp8_dec_output_picture (GstVp8Decoder * decoder,
     goto error;
   }
 
-  do {
-    if (!gst_v4l2_decoder_dequeue_src (self->decoder, &frame_num)) {
-      GST_ELEMENT_ERROR (self, STREAM, DECODE,
-          ("Decoder did not produce a frame"), (NULL));
-      goto error;
-    }
-  } while (frame_num != picture->system_frame_number);
-
-finish_frame:
-  gst_v4l2_request_set_done (request);
   g_return_val_if_fail (frame->output_buffer, GST_FLOW_ERROR);
+
+  if (gst_v4l2_request_failed (request)) {
+    GST_ELEMENT_ERROR (self, STREAM, DECODE,
+        ("Failed to decode frame %u", picture->system_frame_number), (NULL));
+    goto error;
+  }
 
   /* Hold on reference buffers for the rest of the picture lifetime */
   gst_vp8_picture_set_user_data (picture,
@@ -865,17 +922,68 @@ gst_v4l2_codec_vp8_dec_subclass_init (GstV4l2CodecVp8DecClass * klass,
       GST_DEBUG_FUNCPTR (gst_v4l2_codec_vp8_dec_end_picture);
   vp8decoder_class->output_picture =
       GST_DEBUG_FUNCPTR (gst_v4l2_codec_vp8_dec_output_picture);
+  vp8decoder_class->get_preferred_output_delay =
+      GST_DEBUG_FUNCPTR (gst_v4l2_codec_vp8_dec_get_preferred_output_delay);
 
   klass->device = device;
   gst_v4l2_decoder_install_properties (gobject_class, PROP_LAST, device);
 }
 
+static void gst_v4l2_codec_vp8_alpha_decode_bin_subclass_init
+    (GstV4l2CodecAlphaDecodeBinClass * klass, gchar * decoder_name)
+{
+  GstV4l2CodecAlphaDecodeBinClass *adbin_class =
+      (GstV4l2CodecAlphaDecodeBinClass *) klass;
+  GstElementClass *element_class = (GstElementClass *) klass;
+
+  adbin_class->decoder_name = decoder_name;
+  gst_element_class_add_static_pad_template (element_class, &alpha_template);
+
+  gst_element_class_set_static_metadata (element_class,
+      "VP8 Alpha Decoder", "Codec/Decoder/Video",
+      "Wrapper bin to decode VP8 with alpha stream.",
+      "Daniel Almeida <daniel.almeida@collabora.com>");
+}
+
 void
-gst_v4l2_codec_vp8_dec_register (GstPlugin * plugin,
+gst_v4l2_codec_vp8_dec_register (GstPlugin * plugin, GstV4l2Decoder * decoder,
     GstV4l2CodecDevice * device, guint rank)
 {
+  gchar *element_name;
+  GstCaps *src_caps, *alpha_caps;
+
+  GST_DEBUG_CATEGORY_INIT (v4l2_vp8dec_debug, "v4l2codecs-vp8dec", 0,
+      "V4L2 stateless VP8 decoder");
+
+  if (!gst_v4l2_decoder_set_sink_fmt (decoder, V4L2_PIX_FMT_VP8_FRAME,
+          320, 240, 8))
+    return;
+  src_caps = gst_v4l2_decoder_enum_src_formats (decoder);
+
+  if (gst_caps_is_empty (src_caps)) {
+    GST_WARNING ("Not registering VP8 decoder since it produces no "
+        "supported format");
+    goto done;
+  }
+
   gst_v4l2_decoder_register (plugin, GST_TYPE_V4L2_CODEC_VP8_DEC,
       (GClassInitFunc) gst_v4l2_codec_vp8_dec_subclass_init,
+      gst_mini_object_ref (GST_MINI_OBJECT (device)),
       (GInstanceInitFunc) gst_v4l2_codec_vp8_dec_subinit,
-      "v4l2sl%svp8dec", device, rank);
+      "v4l2sl%svp8dec", device, rank, &element_name);
+
+  if (!element_name)
+    goto done;
+
+  alpha_caps = gst_caps_from_string ("video/x-raw,format={I420, NV12}");
+
+  if (gst_caps_can_intersect (src_caps, alpha_caps))
+    gst_v4l2_codec_alpha_decode_bin_register (plugin,
+        (GClassInitFunc) gst_v4l2_codec_vp8_alpha_decode_bin_subclass_init,
+        element_name, "v4l2slvp8%salphadecodebin", device, rank);
+
+  gst_caps_unref (alpha_caps);
+
+done:
+  gst_caps_unref (src_caps);
 }

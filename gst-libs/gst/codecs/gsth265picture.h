@@ -27,8 +27,8 @@
 
 #include <gst/gst.h>
 #include <gst/codecs/codecs-prelude.h>
-
 #include <gst/codecparsers/gsth265parser.h>
+#include <gst/video/video.h>
 
 G_BEGIN_DECLS
 
@@ -48,22 +48,22 @@ struct _GstH265Slice
 
   /* parsed nal unit (doesn't take ownership of raw data) */
   GstH265NalUnit nalu;
-};
 
-typedef enum
-{
-  GST_H265_PICTURE_FIELD_FRAME,
-  GST_H265_PICTURE_FILED_TOP_FIELD,
-  GST_H265_PICTURE_FIELD_BOTTOM_FIELD,
-} GstH265PictureField;
+  /*< private >*/
+  gboolean rap_pic_flag;
+  gboolean no_rasl_output_flag;
+  gboolean no_output_of_prior_pics_flag;
+  gboolean clear_dpb;
+  gboolean intra_pic_flag;
+};
 
 struct _GstH265Picture
 {
+  /*< private >*/
   GstMiniObject parent;
 
   GstH265SliceType type;
 
-  GstClockTime pts;
   /* From GstVideoCodecFrame */
   guint32 system_frame_number;
 
@@ -81,9 +81,17 @@ struct _GstH265Picture
 
   gboolean ref;
   gboolean long_term;
-  gboolean outputted;
+  gboolean needed_for_output;
 
-  GstH265PictureField field;
+  /* from picture timing SEI */
+  GstH265SEIPicStructType pic_struct;
+  guint8 source_scan_type;
+  guint8 duplicate_flag;
+
+  GstVideoBufferFlags buffer_flags;
+
+  /* decoder input state if this picture is discont point */
+  GstVideoCodecState *discont_state;
 
   gpointer user_data;
   GDestroyNotify notify;
@@ -116,7 +124,7 @@ gst_h265_picture_replace (GstH265Picture ** old_picture,
 }
 
 static inline void
-gst_h265_picture_clear (GstH265Picture ** picture)
+gst_clear_h265_picture (GstH265Picture ** picture)
 {
   if (picture && *picture) {
     gst_h265_picture_unref (*picture);
@@ -161,10 +169,6 @@ GST_CODECS_API
 void  gst_h265_dpb_delete_unused    (GstH265Dpb * dpb);
 
 GST_CODECS_API
-void  gst_h265_dpb_delete_by_poc    (GstH265Dpb * dpb,
-                                     gint poc);
-
-GST_CODECS_API
 gint  gst_h265_dpb_num_ref_pictures (GstH265Dpb * dpb);
 
 GST_CODECS_API
@@ -187,17 +191,24 @@ GstH265Picture * gst_h265_dpb_get_long_ref_by_poc  (GstH265Dpb * dpb,
                                                     gint poc);
 
 GST_CODECS_API
-void  gst_h265_dpb_get_pictures_not_outputted  (GstH265Dpb * dpb,
-                                                GList ** out);
+GArray * gst_h265_dpb_get_pictures_all         (GstH265Dpb * dpb);
 
 GST_CODECS_API
-GArray * gst_h265_dpb_get_pictures_all         (GstH265Dpb * dpb);
+GstH265Picture * gst_h265_dpb_get_picture      (GstH265Dpb * dpb,
+                                                guint32 system_frame_number);
 
 GST_CODECS_API
 gint  gst_h265_dpb_get_size   (GstH265Dpb * dpb);
 
 GST_CODECS_API
-gboolean gst_h265_dpb_is_full (GstH265Dpb * dpb);
+gboolean gst_h265_dpb_needs_bump (GstH265Dpb * dpb,
+                                  guint max_num_reorder_pics,
+                                  guint max_latency_increase,
+                                  guint max_dec_pic_buffering);
+
+GST_CODECS_API
+GstH265Picture * gst_h265_dpb_bump (GstH265Dpb * dpb,
+                                    gboolean drain);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(GstH265Picture, gst_h265_picture_unref)
 

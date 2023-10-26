@@ -140,6 +140,8 @@
 GST_DEBUG_CATEGORY_STATIC (gst_decklink_video_sink_debug);
 #define GST_CAT_DEFAULT gst_decklink_video_sink_debug
 
+#define DEFAULT_PERSISTENT_ID (-1)
+
 class GStreamerVideoOutputCallback:public IDeckLinkVideoOutputCallback
 {
 public:
@@ -232,19 +234,298 @@ private:
   gint m_refcount;
 };
 
+class GstDecklinkTimecode:public IDeckLinkTimecode
+{
+public:
+  GstDecklinkTimecode (GstVideoTimeCode *
+      timecode):m_timecode (gst_video_time_code_copy (timecode)), m_refcount (1)
+  {
+  }
+
+  virtual BMDTimecodeBCD STDMETHODCALLTYPE GetBCD (void)
+  {
+    BMDTimecodeBCD bcd = 0;
+
+    bcd |= (m_timecode->frames % 10) << 0;
+    bcd |= ((m_timecode->frames / 10) & 0x0f) << 4;
+    bcd |= (m_timecode->seconds % 10) << 8;
+    bcd |= ((m_timecode->seconds / 10) & 0x0f) << 12;
+    bcd |= (m_timecode->minutes % 10) << 16;
+    bcd |= ((m_timecode->minutes / 10) & 0x0f) << 20;
+    bcd |= (m_timecode->hours % 10) << 24;
+    bcd |= ((m_timecode->hours / 10) & 0x0f) << 28;
+
+    if (m_timecode->config.fps_n == 24 && m_timecode->config.fps_d == 1)
+      bcd |= 0x0 << 30;
+    else if (m_timecode->config.fps_n == 25 && m_timecode->config.fps_d == 1)
+      bcd |= 0x1 << 30;
+    else if (m_timecode->config.fps_n == 30 && m_timecode->config.fps_d == 1001)
+      bcd |= 0x2 << 30;
+    else if (m_timecode->config.fps_n == 30 && m_timecode->config.fps_d == 1)
+      bcd |= 0x3 << 30;
+
+    return bcd;
+  }
+
+  virtual HRESULT STDMETHODCALLTYPE GetComponents (uint8_t * hours,
+      uint8_t * minutes, uint8_t * seconds, uint8_t * frames)
+  {
+    *hours = m_timecode->hours;
+    *minutes = m_timecode->minutes;
+    *seconds = m_timecode->seconds;
+    *frames = m_timecode->frames;
+
+    return S_OK;
+  }
+
+  virtual HRESULT STDMETHODCALLTYPE GetString (COMSTR_T * timecode)
+  {
+    COMSTR_T s = (COMSTR_T) gst_video_time_code_to_string (m_timecode);
+    CONVERT_TO_COM_STRING (s);
+    *timecode = s;
+    return S_OK;
+  }
+
+  virtual BMDTimecodeFlags STDMETHODCALLTYPE GetFlags (void)
+  {
+    BMDTimecodeFlags flags = (BMDTimecodeFlags) 0;
+
+    if (((GstVideoTimeCodeFlags) (m_timecode->
+                config.flags)) & GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME)
+      flags = (BMDTimecodeFlags) (flags | bmdTimecodeIsDropFrame);
+    else
+      flags = (BMDTimecodeFlags) (flags | bmdTimecodeFlagDefault);
+    if (m_timecode->field_count == 2)
+      flags = (BMDTimecodeFlags) (flags | bmdTimecodeFieldMark);
+
+    return flags;
+  }
+
+  virtual HRESULT STDMETHODCALLTYPE GetTimecodeUserBits (BMDTimecodeUserBits *
+      userBits)
+  {
+    *userBits = 0;
+    return S_OK;
+  }
+
+  virtual HRESULT STDMETHODCALLTYPE QueryInterface (REFIID, LPVOID *)
+  {
+    return E_NOINTERFACE;
+  }
+
+  virtual ULONG STDMETHODCALLTYPE AddRef (void)
+  {
+    ULONG ret;
+
+    ret = g_atomic_int_add (&m_refcount, 1) + 1;
+
+    return ret;
+  }
+
+  virtual ULONG STDMETHODCALLTYPE Release (void)
+  {
+    ULONG ret;
+
+    ret = g_atomic_int_add (&m_refcount, -1);
+    if (ret == 1) {
+      delete this;
+    }
+
+    return ret - 1;
+  }
+
+private:
+  GstVideoTimeCode * m_timecode;
+  int m_refcount;
+
+  virtual ~ GstDecklinkTimecode () {
+    if (m_timecode) {
+      gst_video_time_code_free (m_timecode);
+    }
+  }
+};
+
+class GstDecklinkVideoFrame:public IDeckLinkVideoFrame
+{
+public:
+  GstDecklinkVideoFrame (GstVideoFrame * frame):m_frame (0),
+      m_dframe (0), m_ancillary (0), m_timecode (0), m_refcount (1)
+  {
+    m_frame = g_new0 (GstVideoFrame, 1);
+    *m_frame = *frame;
+  }
+
+  GstDecklinkVideoFrame (IDeckLinkMutableVideoFrame * dframe):m_frame (0),
+      m_dframe (dframe), m_ancillary (0), m_timecode (0), m_refcount (1)
+  {
+  }
+
+  virtual long STDMETHODCALLTYPE GetWidth (void)
+  {
+    return m_frame ? GST_VIDEO_FRAME_WIDTH (m_frame) : m_dframe->GetWidth ();
+  }
+  virtual long STDMETHODCALLTYPE GetHeight (void)
+  {
+    return m_frame ? GST_VIDEO_FRAME_HEIGHT (m_frame) : m_dframe->GetHeight ();
+  }
+  virtual long STDMETHODCALLTYPE GetRowBytes (void)
+  {
+    return m_frame ? GST_VIDEO_FRAME_PLANE_STRIDE (m_frame,
+        0) : m_dframe->GetRowBytes ();
+  }
+  virtual BMDPixelFormat STDMETHODCALLTYPE GetPixelFormat (void)
+  {
+    if (m_dframe)
+      return m_dframe->GetPixelFormat ();
+
+    switch (GST_VIDEO_FRAME_FORMAT (m_frame)) {
+      case GST_VIDEO_FORMAT_UYVY:
+        return bmdFormat8BitYUV;
+      case GST_VIDEO_FORMAT_v210:
+        return bmdFormat10BitYUV;
+      case GST_VIDEO_FORMAT_ARGB:
+        return bmdFormat8BitARGB;
+      case GST_VIDEO_FORMAT_BGRA:
+        return bmdFormat8BitBGRA;
+      case GST_VIDEO_FORMAT_r210:
+        return bmdFormat10BitRGB;
+      default:
+        g_assert_not_reached ();
+    }
+  }
+  virtual BMDFrameFlags STDMETHODCALLTYPE GetFlags (void)
+  {
+    return m_dframe ? m_dframe->GetFlags () : bmdFrameFlagDefault;
+  }
+  virtual HRESULT STDMETHODCALLTYPE GetBytes (void **buffer)
+  {
+    if (m_dframe)
+      return m_dframe->GetBytes (buffer);
+
+    *buffer = GST_VIDEO_FRAME_PLANE_DATA (m_frame, 0);
+    return S_OK;
+  }
+
+  virtual HRESULT STDMETHODCALLTYPE GetTimecode (BMDTimecodeFormat format,
+      IDeckLinkTimecode ** timecode)
+  {
+    *timecode = m_timecode;
+    if (m_timecode) {
+      m_timecode->AddRef ();
+      return S_OK;
+    } else {
+      return S_FALSE;
+    }
+  }
+
+  virtual HRESULT STDMETHODCALLTYPE SetTimecode (GstVideoTimeCode * timecode)
+  {
+    if (m_timecode) {
+      m_timecode->Release ();
+    }
+    m_timecode = new GstDecklinkTimecode (timecode);
+
+    return S_OK;
+  }
+
+  virtual HRESULT STDMETHODCALLTYPE
+      GetAncillaryData (IDeckLinkVideoFrameAncillary ** ancillary)
+  {
+    *ancillary = m_ancillary;
+    if (m_ancillary) {
+      m_ancillary->AddRef ();
+      return S_OK;
+    } else {
+      return S_FALSE;
+    }
+  }
+  virtual HRESULT STDMETHODCALLTYPE
+      SetAncillaryData (IDeckLinkVideoFrameAncillary * ancillary)
+  {
+    if (m_ancillary)
+      m_ancillary->Release ();
+
+    if (ancillary)
+      ancillary->AddRef ();
+
+    m_ancillary = ancillary;
+
+    return S_OK;
+  }
+
+  virtual HRESULT STDMETHODCALLTYPE QueryInterface (REFIID, LPVOID *)
+  {
+    return E_NOINTERFACE;
+  }
+
+  virtual ULONG STDMETHODCALLTYPE AddRef (void)
+  {
+    ULONG ret;
+
+    ret = g_atomic_int_add (&m_refcount, 1) + 1;
+
+    return ret;
+  }
+
+  virtual ULONG STDMETHODCALLTYPE Release (void)
+  {
+    ULONG ret;
+
+    ret = g_atomic_int_add (&m_refcount, -1);
+    if (ret == 1) {
+      delete this;
+    }
+
+    return ret - 1;
+  }
+
+private:
+  GstVideoFrame * m_frame;
+  IDeckLinkMutableVideoFrame *m_dframe;
+  IDeckLinkVideoFrameAncillary *m_ancillary;
+  GstDecklinkTimecode *m_timecode;
+  int m_refcount;
+
+  virtual ~ GstDecklinkVideoFrame () {
+    if (m_frame) {
+      gst_video_frame_unmap (m_frame);
+      g_free (m_frame);
+    }
+    if (m_dframe) {
+      m_dframe->Release ();
+    }
+    if (m_ancillary) {
+      m_ancillary->Release ();
+    }
+    if (m_timecode) {
+      m_timecode->Release ();
+    }
+  }
+};
+
+/**
+ * GstDecklinkMappingFormat:
+ * @GST_DECKLINK_MAPPING_FORMAT_DEFAULT: Don't change the mapping format
+ * @GST_DECKLINK_MAPPING_FORMAT_LEVEL_A: Level A
+ * @GST_DECKLINK_MAPPING_FORMAT_LEVEL_B: Level B
+ *
+ * Since: 1.22
+ */
 enum
 {
   PROP_0,
   PROP_MODE,
   PROP_DEVICE_NUMBER,
   PROP_VIDEO_FORMAT,
-  PROP_DUPLEX_MODE,
+  PROP_PROFILE_ID,
   PROP_TIMECODE_FORMAT,
   PROP_KEYER_MODE,
   PROP_KEYER_LEVEL,
   PROP_HW_SERIAL_NUMBER,
   PROP_CC_LINE,
   PROP_AFD_BAR_LINE,
+  PROP_MAPPING_FORMAT,
+  PROP_PERSISTENT_ID
 };
 
 static void gst_decklink_video_sink_set_property (GObject * object,
@@ -280,6 +561,9 @@ gst_decklink_video_sink_start_scheduled_playback (GstElement * element);
 #define parent_class gst_decklink_video_sink_parent_class
 G_DEFINE_TYPE (GstDecklinkVideoSink, gst_decklink_video_sink,
     GST_TYPE_BASE_SINK);
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (decklinkvideosink, "decklinkvideosink",
+    GST_RANK_NONE, GST_TYPE_DECKLINK_VIDEO_SINK,
+    decklink_element_init (plugin));
 
 static gboolean
 reset_framerate (GstCapsFeatures * features, GstStructure * structure,
@@ -333,6 +617,22 @@ gst_decklink_video_sink_class_init (GstDecklinkVideoSinkClass * klass)
           "Output device instance to use", 0, G_MAXINT, 0,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
               G_PARAM_CONSTRUCT)));
+  /**
+   * GstDecklinkVideoSink:persistent-id
+   *
+   * Decklink device to use. Higher priority than "device-number".
+   * BMDDeckLinkPersistentID is a device speciﬁc, 32-bit unique identiﬁer.
+   * It is stable even when the device is plugged in a diﬀerent connector,
+   * across reboots, and when plugged into diﬀerent computers.
+   *
+   * Since: 1.22
+   */
+  g_object_class_install_property (gobject_class, PROP_PERSISTENT_ID,
+      g_param_spec_int64 ("persistent-id", "Persistent id",
+          "Output device instance to use. Higher priority than \"device-number\".",
+          DEFAULT_PERSISTENT_ID, G_MAXINT64, DEFAULT_PERSISTENT_ID,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+              G_PARAM_CONSTRUCT)));
 
   g_object_class_install_property (gobject_class, PROP_VIDEO_FORMAT,
       g_param_spec_enum ("video-format", "Video format",
@@ -341,17 +641,26 @@ gst_decklink_video_sink_class_init (GstDecklinkVideoSinkClass * klass)
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
               G_PARAM_CONSTRUCT)));
 
-  g_object_class_install_property (gobject_class, PROP_DUPLEX_MODE,
-      g_param_spec_enum ("duplex-mode", "Duplex mode",
-          "Certain DeckLink devices such as the DeckLink Quad 2 and the "
+  /**
+   * GstDecklinkVideoSink:profile
+   *
+   * Specifies decklink profile to use.
+   *
+   * Since: 1.20
+   */
+  g_object_class_install_property (gobject_class, PROP_PROFILE_ID,
+      g_param_spec_enum ("profile", "Profile",
+          "Certain DeckLink devices such as the DeckLink 8K Pro, the DeckLink "
+          "Quad 2 and the DeckLink Duo 2 support multiple profiles to "
+          "configure the capture and playback behavior of its sub-devices."
+          "For the DeckLink Duo 2 and DeckLink Quad 2, a profile is shared "
+          "between any 2 sub-devices that utilize the same connectors. For the "
+          "DeckLink 8K Pro, a profile is shared between all 4 sub-devices. Any "
+          "sub-devices that share a profile are considered to be part of the "
+          "same profile group."
           "DeckLink Duo 2 support configuration of the duplex mode of "
-          "individual sub-devices."
-          "A sub-device configured as full-duplex will use two connectors, "
-          "which allows simultaneous capture and playback, internal keying, "
-          "and fill & key scenarios."
-          "A half-duplex sub-device will use a single connector as an "
-          "individual capture or playback channel.",
-          GST_TYPE_DECKLINK_DUPLEX_MODE, GST_DECKLINK_DUPLEX_MODE_HALF,
+          "individual sub-devices.",
+          GST_TYPE_DECKLINK_PROFILE_ID, GST_DECKLINK_PROFILE_ID_DEFAULT,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
               G_PARAM_CONSTRUCT)));
 
@@ -396,6 +705,20 @@ gst_decklink_video_sink_class_init (GstDecklinkVideoSinkClass * klass)
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
               G_PARAM_CONSTRUCT)));
 
+  /**
+   * GstDecklinkVideoSink:mapping-format
+   *
+   * Specifies the 3G-SDI mapping format to use (SMPTE ST 425-1:2017).
+   *
+   * Since: 1.22
+   */
+  g_object_class_install_property (gobject_class, PROP_MAPPING_FORMAT,
+      g_param_spec_enum ("mapping-format", "3G-SDI Mapping Format",
+          "3G-SDI Mapping Format (Level A/B)",
+          GST_TYPE_DECKLINK_MAPPING_FORMAT, GST_DECKLINK_MAPPING_FORMAT_DEFAULT,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+              G_PARAM_CONSTRUCT)));
+
   templ_caps = gst_decklink_mode_get_template_caps (FALSE);
   templ_caps = gst_caps_make_writable (templ_caps);
   /* For output we support any framerate and only really care about timestamps */
@@ -411,6 +734,9 @@ gst_decklink_video_sink_class_init (GstDecklinkVideoSinkClass * klass)
 
   GST_DEBUG_CATEGORY_INIT (gst_decklink_video_sink_debug, "decklinkvideosink",
       0, "debug category for decklinkvideosink element");
+
+  gst_type_mark_as_plugin_api (GST_TYPE_DECKLINK_MAPPING_FORMAT,
+      (GstPluginAPIFlags) 0);
 }
 
 static void
@@ -418,12 +744,14 @@ gst_decklink_video_sink_init (GstDecklinkVideoSink * self)
 {
   self->mode = GST_DECKLINK_MODE_NTSC;
   self->device_number = 0;
+  self->persistent_id = DEFAULT_PERSISTENT_ID;
   self->video_format = GST_DECKLINK_VIDEO_FORMAT_8BIT_YUV;
-  self->duplex_mode = bmdDuplexModeHalf;
+  self->profile_id = GST_DECKLINK_PROFILE_ID_DEFAULT;
   /* VITC is legacy, we should expect RP188 in modern use cases */
   self->timecode_format = bmdTimecodeRP188Any;
   self->caption_line = 0;
   self->afd_bar_line = 0;
+  self->mapping_format = GST_DECKLINK_MAPPING_FORMAT_DEFAULT;
 
   gst_base_sink_set_max_lateness (GST_BASE_SINK_CAST (self), 20 * GST_MSECOND);
   gst_base_sink_set_qos_enabled (GST_BASE_SINK_CAST (self), TRUE);
@@ -450,6 +778,7 @@ gst_decklink_video_sink_set_property (GObject * object, guint property_id,
         case GST_DECKLINK_VIDEO_FORMAT_10BIT_YUV:
         case GST_DECKLINK_VIDEO_FORMAT_8BIT_ARGB:
         case GST_DECKLINK_VIDEO_FORMAT_8BIT_BGRA:
+        case GST_DECKLINK_VIDEO_FORMAT_10BIT_RGB:
           break;
         default:
           GST_ELEMENT_WARNING (GST_ELEMENT (self), CORE, NOT_IMPLEMENTED,
@@ -457,10 +786,8 @@ gst_decklink_video_sink_set_property (GObject * object, guint property_id,
           break;
       }
       break;
-    case PROP_DUPLEX_MODE:
-      self->duplex_mode =
-          gst_decklink_duplex_mode_from_enum ((GstDecklinkDuplexMode)
-          g_value_get_enum (value));
+    case PROP_PROFILE_ID:
+      self->profile_id = (GstDecklinkProfileId) g_value_get_enum (value);
       break;
     case PROP_TIMECODE_FORMAT:
       self->timecode_format =
@@ -480,6 +807,13 @@ gst_decklink_video_sink_set_property (GObject * object, guint property_id,
       break;
     case PROP_AFD_BAR_LINE:
       self->afd_bar_line = g_value_get_int (value);
+      break;
+    case PROP_MAPPING_FORMAT:
+      self->mapping_format =
+          (GstDecklinkMappingFormat) g_value_get_enum (value);
+      break;
+    case PROP_PERSISTENT_ID:
+      self->persistent_id = g_value_get_int64 (value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
@@ -503,9 +837,8 @@ gst_decklink_video_sink_get_property (GObject * object, guint property_id,
     case PROP_VIDEO_FORMAT:
       g_value_set_enum (value, self->video_format);
       break;
-    case PROP_DUPLEX_MODE:
-      g_value_set_enum (value,
-          gst_decklink_duplex_mode_to_enum (self->duplex_mode));
+    case PROP_PROFILE_ID:
+      g_value_set_enum (value, self->profile_id);
       break;
     case PROP_TIMECODE_FORMAT:
       g_value_set_enum (value,
@@ -529,6 +862,12 @@ gst_decklink_video_sink_get_property (GObject * object, guint property_id,
       break;
     case PROP_AFD_BAR_LINE:
       g_value_set_int (value, self->afd_bar_line);
+      break;
+    case PROP_MAPPING_FORMAT:
+      g_value_set_enum (value, self->mapping_format);
+      break;
+    case PROP_PERSISTENT_ID:
+      g_value_set_int64 (value, self->persistent_id);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
@@ -918,7 +1257,7 @@ convert_cea708_cc_data_cea708_cdp_internal (GstDecklinkVideoSink * self,
 
 static void
 write_vbi (GstDecklinkVideoSink * self, GstBuffer * buffer,
-    BMDPixelFormat format, IDeckLinkMutableVideoFrame * frame,
+    BMDPixelFormat format, GstDecklinkVideoFrame * frame,
     GstVideoTimeCodeMeta * tc_meta)
 {
   IDeckLinkVideoFrameAncillary *vanc_frame = NULL;
@@ -1197,23 +1536,32 @@ write_vbi (GstDecklinkVideoSink * self, GstBuffer * buffer,
   }
 }
 
+static gboolean
+buffer_is_pbo_memory (GstBuffer * buffer)
+{
+  GstMemory *mem;
+
+  mem = gst_buffer_peek_memory (buffer, 0);
+  if (mem->allocator
+      && g_strcmp0 (mem->allocator->mem_type, "GLMemoryPBO") == 0)
+    return TRUE;
+  return FALSE;
+}
+
 static GstFlowReturn
 gst_decklink_video_sink_prepare (GstBaseSink * bsink, GstBuffer * buffer)
 {
   GstDecklinkVideoSink *self = GST_DECKLINK_VIDEO_SINK_CAST (bsink);
   GstVideoFrame vframe;
-  IDeckLinkMutableVideoFrame *frame;
-  guint8 *outdata, *indata;
+  GstDecklinkVideoFrame *frame = NULL;
   GstFlowReturn flow_ret;
   HRESULT ret;
   GstClockTime timestamp, duration;
   GstClockTime running_time, running_time_duration;
   GstClockTime latency, render_delay;
   GstClockTimeDiff ts_offset;
-  gint i;
   GstDecklinkVideoFormat caps_format;
   BMDPixelFormat format;
-  gint stride;
   GstVideoTimeCodeMeta *tc_meta;
 
   GST_DEBUG_OBJECT (self, "Preparing buffer %" GST_PTR_FORMAT, buffer);
@@ -1262,58 +1610,57 @@ gst_decklink_video_sink_prepare (GstBaseSink * bsink, GstBuffer * buffer)
   else
     running_time = 0;
 
-  ret = self->output->output->CreateVideoFrame (self->info.width,
-      self->info.height, self->info.stride[0], format, bmdFrameFlagDefault,
-      &frame);
-  if (ret != S_OK) {
-    GST_ELEMENT_ERROR (self, STREAM, FAILED,
-        (NULL), ("Failed to create video frame: 0x%08lx", (unsigned long) ret));
-    return GST_FLOW_ERROR;
-  }
-
   if (!gst_video_frame_map (&vframe, &self->info, buffer, GST_MAP_READ)) {
     GST_ERROR_OBJECT (self, "Failed to map video frame");
     flow_ret = GST_FLOW_ERROR;
     goto out;
   }
+  // If the video frame is stored in PBO memory then we need to copy anyway as
+  // it might be stored in CPU-accessible GPU memory that can't be accessed
+  // from the Decklink driver.
+  if (buffer_is_pbo_memory (buffer)) {
+    guint8 *outdata;
+    const guint8 *indata;
+    gint i, src_stride, dest_stride, stride;
+    IDeckLinkMutableVideoFrame *dframe;
 
-  frame->GetBytes ((void **) &outdata);
-  indata = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&vframe, 0);
-  stride =
-      MIN (GST_VIDEO_FRAME_PLANE_STRIDE (&vframe, 0), frame->GetRowBytes ());
-  for (i = 0; i < self->info.height; i++) {
-    memcpy (outdata, indata, stride);
-    indata += GST_VIDEO_FRAME_PLANE_STRIDE (&vframe, 0);
-    outdata += frame->GetRowBytes ();
+    ret = self->output->output->CreateVideoFrame (self->info.width,
+        self->info.height, self->info.stride[0], format, bmdFrameFlagDefault,
+        &dframe);
+
+    if (ret != S_OK) {
+      gst_video_frame_unmap (&vframe);
+      GST_ELEMENT_ERROR (self, STREAM, FAILED,
+          (NULL), ("Failed to create video frame: 0x%08lx",
+              (unsigned long) ret));
+      return GST_FLOW_ERROR;
+    }
+
+    dframe->GetBytes ((void **) &outdata);
+    indata = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&vframe, 0);
+    src_stride = GST_VIDEO_FRAME_PLANE_STRIDE (&vframe, 0);
+    dest_stride = dframe->GetRowBytes ();
+    stride = MIN (src_stride, dest_stride);
+    for (i = 0; i < self->info.height; i++) {
+      memcpy (outdata, indata, stride);
+      indata += src_stride;
+      outdata += dest_stride;
+    }
+    gst_video_frame_unmap (&vframe);
+
+    // Takes ownership of the frame
+    frame = new GstDecklinkVideoFrame (dframe);
+  } else {
+    // Takes ownership of the frame
+    frame = new GstDecklinkVideoFrame (&vframe);
   }
-  gst_video_frame_unmap (&vframe);
 
   tc_meta = gst_buffer_get_video_time_code_meta (buffer);
   if (tc_meta) {
-    BMDTimecodeFlags bflags = (BMDTimecodeFlags) 0;
     gchar *tc_str;
 
-    if (((GstVideoTimeCodeFlags) (tc_meta->tc.
-                config.flags)) & GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME)
-      bflags = (BMDTimecodeFlags) (bflags | bmdTimecodeIsDropFrame);
-    else
-      bflags = (BMDTimecodeFlags) (bflags | bmdTimecodeFlagDefault);
-    if (tc_meta->tc.field_count == 2)
-      bflags = (BMDTimecodeFlags) (bflags | bmdTimecodeFieldMark);
-
+    frame->SetTimecode (&tc_meta->tc);
     tc_str = gst_video_time_code_to_string (&tc_meta->tc);
-    ret = frame->SetTimecodeFromComponents (self->timecode_format,
-        (uint8_t) tc_meta->tc.hours,
-        (uint8_t) tc_meta->tc.minutes,
-        (uint8_t) tc_meta->tc.seconds, (uint8_t) tc_meta->tc.frames, bflags);
-    if (ret != S_OK) {
-      GST_ERROR_OBJECT (self,
-          "Failed to set timecode %s to video frame: 0x%08lx", tc_str,
-          (unsigned long) ret);
-      flow_ret = GST_FLOW_ERROR;
-      g_free (tc_str);
-      goto out;
-    }
     GST_DEBUG_OBJECT (self, "Set frame timecode to %s", tc_str);
     g_free (tc_str);
   }
@@ -1340,7 +1687,8 @@ gst_decklink_video_sink_prepare (GstBaseSink * bsink, GstBuffer * buffer)
 
 out:
 
-  frame->Release ();
+  if (frame)
+    frame->Release ();
 
   return flow_ret;
 }
@@ -1354,7 +1702,7 @@ gst_decklink_video_sink_open (GstBaseSink * bsink)
   GST_DEBUG_OBJECT (self, "Starting");
 
   self->output =
-      gst_decklink_acquire_nth_output (self->device_number,
+      gst_decklink_acquire_nth_output (self->device_number, self->persistent_id,
       GST_ELEMENT_CAST (self), FALSE);
   if (!self->output) {
     GST_ERROR_OBJECT (self, "Failed to acquire output");
@@ -1399,7 +1747,7 @@ gst_decklink_video_sink_close (GstBaseSink * bsink)
     g_mutex_unlock (&self->output->lock);
 
     self->output->output->DisableVideoOutput ();
-    gst_decklink_release_nth_output (self->device_number,
+    gst_decklink_release_nth_output (self->device_number, self->persistent_id,
         GST_ELEMENT_CAST (self), FALSE);
     self->output = NULL;
   }
@@ -1617,7 +1965,8 @@ gst_decklink_video_sink_change_state (GstElement * element,
           self->internal_time_offset = self->internal_base_time;
         } else if (GST_CLOCK_TIME_IS_VALID (self->internal_pause_time)) {
           self->internal_time_offset +=
-                  gst_clock_get_internal_time (self->output->clock) - self->internal_pause_time;
+              gst_clock_get_internal_time (self->output->clock) -
+              self->internal_pause_time;
         }
 
         GST_INFO_OBJECT (self, "clock has been set to %" GST_PTR_FORMAT
@@ -1681,7 +2030,8 @@ gst_decklink_video_sink_change_state (GstElement * element,
     case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
       break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
-      self->internal_pause_time = gst_clock_get_internal_time (self->output->clock);
+      self->internal_pause_time =
+          gst_clock_get_internal_time (self->output->clock);
       break;
     default:
       break;

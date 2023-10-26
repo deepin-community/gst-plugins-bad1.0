@@ -87,9 +87,9 @@ gst_vulkan_fence_free (GstVulkanFence * fence)
 /**
  * gst_vulkan_fence_new:
  * @device: the parent #GstVulkanDevice
- * @error: a #GError for the failure condition
+ * @error: (optional): a #GError for the failure condition
  *
- * Returns: whether a new #GstVulkanFence or %NULL on error
+ * Returns: a new #GstVulkanFence or %NULL on error
  *
  * Since: 1.18
  */

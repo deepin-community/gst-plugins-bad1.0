@@ -26,22 +26,6 @@
 
 G_BEGIN_DECLS
 
-#define GST_WEBRTC_BIN_ERROR gst_webrtc_bin_error_quark ()
-GQuark gst_webrtc_bin_error_quark (void);
-
-typedef enum
-{
-  GST_WEBRTC_BIN_ERROR_FAILED,
-  GST_WEBRTC_BIN_ERROR_INVALID_SYNTAX,
-  GST_WEBRTC_BIN_ERROR_INVALID_MODIFICATION,
-  GST_WEBRTC_BIN_ERROR_INVALID_STATE,
-  GST_WEBRTC_BIN_ERROR_BAD_SDP,
-  GST_WEBRTC_BIN_ERROR_FINGERPRINT,
-  GST_WEBRTC_BIN_ERROR_SCTP_FAILURE,
-  GST_WEBRTC_BIN_ERROR_DATA_CHANNEL_FAILURE,
-  GST_WEBRTC_BIN_ERROR_CLOSED,
-} GstWebRTCError;
-
 GstPadTemplate *        _find_pad_template          (GstElement * element,
                                                      GstPadDirection direction,
                                                      GstPadPresence presence,
@@ -75,11 +59,18 @@ struct pad_block *      _create_pad_block           (GstElement * element,
                                                      GDestroyNotify notify);
 
 G_GNUC_INTERNAL
-gchar *                 _enum_value_to_string       (GType type, guint value);
+const gchar *                 _enum_value_to_string       (GType type, guint value);
 G_GNUC_INTERNAL
 const gchar *           _g_checksum_to_webrtc_string (GChecksumType type);
 G_GNUC_INTERNAL
 GstCaps *               _rtp_caps_from_media        (const GstSDPMedia * media);
+G_GNUC_INTERNAL
+GstWebRTCKind           webrtc_kind_from_caps       (const GstCaps * caps);
+G_GNUC_INTERNAL
+char *                  _get_msid_from_media        (const GstSDPMedia * media);
+
+#define gst_webrtc_kind_to_string(kind) _enum_value_to_string(GST_TYPE_WEBRTC_KIND, kind)
+#define gst_webrtc_rtp_transceiver_direction_to_string(dir) _enum_value_to_string(GST_TYPE_WEBRTC_RTP_TRANSCEIVER_DIRECTION, dir)
 
 G_END_DECLS
 

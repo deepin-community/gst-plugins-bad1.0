@@ -82,6 +82,72 @@ const IID IID_IAudioRenderClient = { 0xf294acfc, 0x3146, 0x4483,
   {0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2}
 };
 
+/* Desktop only defines */
+#ifndef KSAUDIO_SPEAKER_MONO
+#define KSAUDIO_SPEAKER_MONO            (SPEAKER_FRONT_CENTER)
+#endif
+#ifndef KSAUDIO_SPEAKER_1POINT1
+#define KSAUDIO_SPEAKER_1POINT1         (SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY)
+#endif
+#ifndef KSAUDIO_SPEAKER_STEREO
+#define KSAUDIO_SPEAKER_STEREO          (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT)
+#endif
+#ifndef KSAUDIO_SPEAKER_2POINT1
+#define KSAUDIO_SPEAKER_2POINT1         (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_LOW_FREQUENCY)
+#endif
+#ifndef KSAUDIO_SPEAKER_3POINT0
+#define KSAUDIO_SPEAKER_3POINT0         (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER)
+#endif
+#ifndef KSAUDIO_SPEAKER_3POINT1
+#define KSAUDIO_SPEAKER_3POINT1         (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | \
+                                         SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY)
+#endif
+#ifndef KSAUDIO_SPEAKER_QUAD
+#define KSAUDIO_SPEAKER_QUAD            (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | \
+                                         SPEAKER_BACK_LEFT  | SPEAKER_BACK_RIGHT)
+#endif
+#define KSAUDIO_SPEAKER_SURROUND        (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | \
+                                         SPEAKER_FRONT_CENTER | SPEAKER_BACK_CENTER)
+#ifndef KSAUDIO_SPEAKER_5POINT0
+#define KSAUDIO_SPEAKER_5POINT0         (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | \
+                                         SPEAKER_SIDE_LEFT  | SPEAKER_SIDE_RIGHT)
+#endif
+#define KSAUDIO_SPEAKER_5POINT1         (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | \
+                                         SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY | \
+                                         SPEAKER_BACK_LEFT  | SPEAKER_BACK_RIGHT)
+#ifndef KSAUDIO_SPEAKER_7POINT0
+#define KSAUDIO_SPEAKER_7POINT0         (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | \
+                                         SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT | \
+                                         SPEAKER_SIDE_LEFT | SPEAKER_SIDE_RIGHT)
+#endif
+#ifndef KSAUDIO_SPEAKER_7POINT1
+#define KSAUDIO_SPEAKER_7POINT1         (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | \
+                                         SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY | \
+                                         SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT | \
+                                         SPEAKER_FRONT_LEFT_OF_CENTER | SPEAKER_FRONT_RIGHT_OF_CENTER)
+#endif
+
+static DWORD default_ch_masks[] = {
+  0,
+  KSAUDIO_SPEAKER_MONO,
+  /* 2ch */
+  KSAUDIO_SPEAKER_STEREO,
+  /* 2.1ch */
+  /* KSAUDIO_SPEAKER_3POINT0 ? */
+  KSAUDIO_SPEAKER_2POINT1,
+  /* 4ch */
+  /* KSAUDIO_SPEAKER_3POINT1 or KSAUDIO_SPEAKER_SURROUND ? */
+  KSAUDIO_SPEAKER_QUAD,
+  /* 5ch */
+  KSAUDIO_SPEAKER_5POINT0,
+  /* 5.1ch */
+  KSAUDIO_SPEAKER_5POINT1,
+  /* 7ch */
+  KSAUDIO_SPEAKER_7POINT0,
+  /* 7.1ch */
+  KSAUDIO_SPEAKER_7POINT1,
+};
+
 /* *INDENT-OFF* */
 static struct
 {
@@ -305,39 +371,29 @@ gst_wasapi_util_hresult_to_string (HRESULT hr)
   return error_text;
 }
 
-static IMMDeviceEnumerator *
-gst_wasapi_util_get_device_enumerator (GstObject * self)
-{
-  HRESULT hr;
-  IMMDeviceEnumerator *enumerator = NULL;
-
-  hr = CoCreateInstance (&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
-      &IID_IMMDeviceEnumerator, (void **) &enumerator);
-  HR_FAILED_RET (hr, CoCreateInstance (MMDeviceEnumerator), NULL);
-
-  return enumerator;
-}
-
 gboolean
-gst_wasapi_util_get_devices (GstObject * self, gboolean active,
-    GList ** devices)
+gst_wasapi_util_get_devices (GstMMDeviceEnumerator * self,
+    gboolean active, GList ** devices)
 {
   gboolean res = FALSE;
   static GstStaticCaps scaps = GST_STATIC_CAPS (GST_WASAPI_STATIC_CAPS);
   DWORD dwStateMask = active ? DEVICE_STATE_ACTIVE : DEVICE_STATEMASK_ALL;
   IMMDeviceCollection *device_collection = NULL;
-  IMMDeviceEnumerator *enumerator = NULL;
+  IMMDeviceEnumerator *enum_handle = NULL;
   const gchar *device_class, *element_name;
   guint ii, count;
   HRESULT hr;
 
   *devices = NULL;
 
-  enumerator = gst_wasapi_util_get_device_enumerator (self);
-  if (!enumerator)
+  if (!self)
     return FALSE;
 
-  hr = IMMDeviceEnumerator_EnumAudioEndpoints (enumerator, eAll, dwStateMask,
+  enum_handle = gst_mm_device_enumerator_get_handle (self);
+  if (!enum_handle)
+    return FALSE;
+
+  hr = IMMDeviceEnumerator_EnumAudioEndpoints (enum_handle, eAll, dwStateMask,
       &device_collection);
   HR_FAILED_GOTO (hr, IMMDeviceEnumerator::EnumAudioEndpoints, err);
 
@@ -459,8 +515,6 @@ gst_wasapi_util_get_devices (GstObject * self, gboolean active,
   res = TRUE;
 
 err:
-  if (enumerator)
-    IUnknown_Release (enumerator);
   if (device_collection)
     IUnknown_Release (device_collection);
   return res;
@@ -533,25 +587,28 @@ out:
 }
 
 gboolean
-gst_wasapi_util_get_device_client (GstElement * self,
+gst_wasapi_util_get_device (GstMMDeviceEnumerator * self,
     gint data_flow, gint role, const wchar_t * device_strid,
-    IMMDevice ** ret_device, IAudioClient ** ret_client)
+    IMMDevice ** ret_device)
 {
   gboolean res = FALSE;
   HRESULT hr;
-  IMMDeviceEnumerator *enumerator = NULL;
+  IMMDeviceEnumerator *enum_handle = NULL;
   IMMDevice *device = NULL;
-  IAudioClient *client = NULL;
 
-  if (!(enumerator = gst_wasapi_util_get_device_enumerator (GST_OBJECT (self))))
-    goto beach;
+  if (!self)
+    return FALSE;
+
+  enum_handle = gst_mm_device_enumerator_get_handle (self);
+  if (!enum_handle)
+    return FALSE;
 
   if (!device_strid) {
-    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint (enumerator, data_flow,
+    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint (enum_handle, data_flow,
         role, &device);
     HR_FAILED_GOTO (hr, IMMDeviceEnumerator::GetDefaultAudioEndpoint, beach);
   } else {
-    hr = IMMDeviceEnumerator_GetDevice (enumerator, device_strid, &device);
+    hr = IMMDeviceEnumerator_GetDevice (enum_handle, device_strid, &device);
     if (hr != S_OK) {
       gchar *msg = gst_wasapi_util_hresult_to_string (hr);
       GST_ERROR_OBJECT (self, "IMMDeviceEnumerator::GetDevice (%S) failed"
@@ -560,6 +617,26 @@ gst_wasapi_util_get_device_client (GstElement * self,
       goto beach;
     }
   }
+
+  IUnknown_AddRef (device);
+  *ret_device = device;
+
+  res = TRUE;
+
+beach:
+  if (device != NULL)
+    IUnknown_Release (device);
+
+  return res;
+}
+
+gboolean
+gst_wasapi_util_get_audio_client (GstElement * self,
+    IMMDevice * device, IAudioClient ** ret_client)
+{
+  IAudioClient *client = NULL;
+  gboolean res = FALSE;
+  HRESULT hr;
 
   if (gst_wasapi_util_have_audioclient3 ())
     hr = IMMDevice_Activate (device, &IID_IAudioClient3, CLSCTX_ALL, NULL,
@@ -570,21 +647,13 @@ gst_wasapi_util_get_device_client (GstElement * self,
   HR_FAILED_GOTO (hr, IMMDevice::Activate (IID_IAudioClient), beach);
 
   IUnknown_AddRef (client);
-  IUnknown_AddRef (device);
   *ret_client = client;
-  *ret_device = device;
 
   res = TRUE;
 
 beach:
   if (client != NULL)
     IUnknown_Release (client);
-
-  if (device != NULL)
-    IUnknown_Release (device);
-
-  if (enumerator != NULL)
-    IUnknown_Release (enumerator);
 
   return res;
 }
@@ -701,6 +770,17 @@ gst_wasapi_util_waveformatex_to_channel_mask (WAVEFORMATEXTENSIBLE * format,
   WORD nChannels = format->Format.nChannels;
   DWORD dwChannelMask = format->dwChannelMask;
   GstAudioChannelPosition *pos = NULL;
+
+  if (nChannels > 2 && !dwChannelMask) {
+    GST_WARNING ("Unknown channel mask value for %d channel stream", nChannels);
+
+    if (nChannels >= G_N_ELEMENTS (default_ch_masks)) {
+      GST_ERROR ("Too many channels %d", nChannels);
+      return 0;
+    }
+
+    dwChannelMask = default_ch_masks[nChannels];
+  }
 
   pos = g_new (GstAudioChannelPosition, nChannels);
   gst_wasapi_util_channel_position_all_none (nChannels, pos);

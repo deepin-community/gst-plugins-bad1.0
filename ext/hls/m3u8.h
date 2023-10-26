@@ -24,7 +24,7 @@
 #ifndef __M3U8_H__
 #define __M3U8_H__
 
-#include <glib.h>
+#include <gst/gst.h>
 
 G_BEGIN_DECLS
 
@@ -99,6 +99,7 @@ struct _GstM3U8MediaFile
   gchar *key;
   guint8 iv[16];
   gint64 offset, size;
+  GstDateTime *program_dt;      /* program date time */
   gint ref_count;               /* ATOMIC */
   GstM3U8InitFile *init_file;   /* Media Initialization (hold ref) */
 };
@@ -127,6 +128,7 @@ void               gst_m3u8_set_uri              (GstM3U8      * m3u8,
 GstM3U8MediaFile * gst_m3u8_get_next_fragment    (GstM3U8      * m3u8,
                                                   gboolean       forward,
                                                   GstClockTime * sequence_position,
+                                                  GstDateTime ** program_dt,
                                                   gboolean     * discont);
 
 gboolean           gst_m3u8_has_next_fragment    (GstM3U8 * m3u8,
@@ -175,6 +177,8 @@ struct _GstHLSMedia {
 GstHLSMedia * gst_hls_media_ref   (GstHLSMedia * media);
 
 void          gst_hls_media_unref (GstHLSMedia * media);
+
+const gchar * gst_hls_media_type_get_name (GstHLSMediaType mtype);
 
 
 struct _GstHLSVariantStream {

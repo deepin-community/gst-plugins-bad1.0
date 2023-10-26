@@ -23,8 +23,9 @@
 
 #include <gst/gst.h>
 #include <gst/video/video.h>
+#include <stdlib.h>
 
-#include "nvcodec.h"
+#include "../key-handler.h"
 
 #define DEFAULT_VIDEO_SINK "autovideosink"
 
@@ -45,29 +46,26 @@ typedef struct
 } TestCallbackData;
 
 static void
-restore_terminal (void)
-{
-  gst_nvcodec_kb_set_key_handler (NULL, NULL);
-}
-
-static void
 print_keyboard_help (void)
 {
+  /* *INDENT-OFF* */
   static struct
   {
     const gchar *key_desc;
     const gchar *key_help;
   } key_controls[] = {
     {
-    "q or ESC", "Quit"}, {
+    "q", "Quit"}, {
     "right arrow", "Increase Width"}, {
     "left arrow", "Decrease Width"}, {
-    "up arrow", "Increase Height"}, {
+    "up arrow", "Increase Height"} , {
     "down arrow", "Decrease Height"}, {
     ">", "Increase encoding bitrate by 100 kbit/sec"}, {
     "<", "Decrease encoding bitrate by 100 kbit/sec"}, {
     "k", "show keyboard shortcuts"}
   };
+  /* *INDENT-ON* */
+
   guint i, chars_to_pad, desc_len, max_desc_len = 0;
 
   g_print ("\n\n%s\n\n", "Keyboard controls:");
@@ -88,55 +86,54 @@ print_keyboard_help (void)
 }
 
 static void
-keyboard_cb (const gchar * key_input, gpointer user_data)
+keyboard_cb (gchar input, gboolean is_ascii, gpointer user_data)
 {
   TestCallbackData *data = (TestCallbackData *) user_data;
-  gchar key = '\0';
 
-  /* only want to switch/case on single char, not first char of string */
-  if (key_input[0] != '\0' && key_input[1] == '\0')
-    key = g_ascii_tolower (key_input[0]);
-
-  switch (key) {
-    case 'k':
-      print_keyboard_help ();
-      break;
-    case 'q':
-    case 'Q':
-      gst_element_send_event (data->pipeline, gst_event_new_eos ());
-      g_main_loop_quit (loop);
-      break;
-    case 27:                   /* ESC */
-      if (key_input[1] == '\0') {
+  if (is_ascii) {
+    switch (input) {
+      case 'k':
+        print_keyboard_help ();
+        break;
+      case 'q':
+      case 'Q':
         gst_element_send_event (data->pipeline, gst_event_new_eos ());
         g_main_loop_quit (loop);
-      }
-      break;
-    case '>':
-      bitrate += 100;
-      bitrate = MIN (bitrate, 2048000);
-      g_print ("Increase encoding bitrate to %d\n", bitrate);
-      g_object_set (G_OBJECT (data->nvenc), "bitrate", bitrate, NULL);
-      break;
-    case '<':
-      bitrate -= 100;
-      bitrate = MAX (bitrate, 100);
-      g_print ("Decrease encoding bitrate to %d\n", bitrate);
-      g_object_set (G_OBJECT (data->nvenc), "bitrate", bitrate, NULL);
-      break;
-    default:{
-      if (strcmp (key_input, GST_NVCODEC_KB_ARROW_RIGHT) == 0) {
-        g_print ("Increase width to %d\n", ++width);
-      } else if (strcmp (key_input, GST_NVCODEC_KB_ARROW_LEFT) == 0) {
-        g_print ("Decrease width to %d\n", --width);
-      } else if (strcmp (key_input, GST_NVCODEC_KB_ARROW_UP) == 0) {
-        g_print ("Increase height to %d\n", ++height);
-      } else if (strcmp (key_input, GST_NVCODEC_KB_ARROW_DOWN) == 0) {
-        g_print ("Decrease height to %d\n", --height);
-      }
-
-      break;
+        break;
+      case '>':
+        bitrate += 100;
+        bitrate = MIN (bitrate, 2048000);
+        g_print ("Increase encoding bitrate to %d\n", bitrate);
+        g_object_set (G_OBJECT (data->nvenc), "bitrate", bitrate, NULL);
+        break;
+      case '<':
+        bitrate -= 100;
+        bitrate = MAX (bitrate, 100);
+        g_print ("Decrease encoding bitrate to %d\n", bitrate);
+        g_object_set (G_OBJECT (data->nvenc), "bitrate", bitrate, NULL);
+        break;
+      default:
+        break;
     }
+
+    return;
+  }
+
+  switch (input) {
+    case KB_ARROW_RIGHT:
+      g_print ("Increase width to %d\n", ++width);
+      break;
+    case KB_ARROW_LEFT:
+      g_print ("Decrease width to %d\n", --width);
+      break;
+    case KB_ARROW_UP:
+      g_print ("Increase height to %d\n", ++height);
+      break;
+    case KB_ARROW_DOWN:
+      g_print ("Decrease height to %d\n", --height);
+      break;
+    default:
+      break;
   }
 }
 
@@ -195,22 +192,32 @@ bus_msg (GstBus * bus, GstMessage * msg, gpointer user_data)
           GstNavigationEventType e_type = gst_navigation_event_get_type (ev);
           if (e_type == GST_NAVIGATION_EVENT_KEY_PRESS) {
             const gchar *key;
+            gchar val = 0;
 
             if (gst_navigation_event_parse_key_event (ev, &key)) {
+              gboolean ascii = TRUE;
+
               GST_INFO ("Key press: %s", key);
 
-              if (strcmp (key, "Left") == 0)
-                key = GST_NVCODEC_KB_ARROW_LEFT;
-              else if (strcmp (key, "Right") == 0)
-                key = GST_NVCODEC_KB_ARROW_RIGHT;
-              else if (strcmp (key, "Up") == 0)
-                key = GST_NVCODEC_KB_ARROW_UP;
-              else if (strcmp (key, "Down") == 0)
-                key = GST_NVCODEC_KB_ARROW_DOWN;
-              else if (strlen (key) > 1)
-                break;
+              val = key[0];
 
-              keyboard_cb (key, user_data);
+              if (g_strcmp0 (key, "Left") == 0) {
+                val = KB_ARROW_LEFT;
+                ascii = FALSE;
+              } else if (g_strcmp0 (key, "Right") == 0) {
+                val = KB_ARROW_RIGHT;
+                ascii = FALSE;
+              } else if (g_strcmp0 (key, "Up") == 0) {
+                val = KB_ARROW_UP;
+                ascii = FALSE;
+              } else if (g_strcmp0 (key, "Down") == 0) {
+                val = KB_ARROW_DOWN;
+                ascii = FALSE;
+              } else if (strlen (key) > 1) {
+                break;
+              }
+
+              keyboard_cb (val, ascii, user_data);
             }
           }
         }
@@ -227,14 +234,15 @@ bus_msg (GstBus * bus, GstMessage * msg, gpointer user_data)
 }
 
 static gboolean
-check_nvcodec_available (void)
+check_nvcodec_available (const gchar * encoder_name)
 {
   gboolean ret = TRUE;
   GstElement *elem;
 
-  elem = gst_element_factory_make ("nvh264enc", NULL);
+  elem = gst_element_factory_make (encoder_name, NULL);
   if (!elem) {
-    GST_WARNING ("nvh264enc is not available, possibly driver load failure");
+    GST_WARNING ("%s is not available, possibly driver load failure",
+        encoder_name);
     return FALSE;
   }
 
@@ -328,13 +336,16 @@ main (gint argc, gchar ** argv)
   GstCaps *caps;
   TestCallbackData data = { 0, };
   GstPad *pad;
-
+  gchar *encoder_name = NULL;
+  /* *INDENT-OFF* */
   GOptionEntry options[] = {
     {"use-gl", 0, 0, G_OPTION_ARG_NONE, &use_gl,
-        "Use OpenGL memory as input to the nvenc", NULL}
-    ,
+        "Use OpenGL memory as input to the nvenc", NULL},
+    {"encoder", 0, 0, G_OPTION_ARG_STRING, &encoder_name,
+        "NVENC encoder element to test, default: nvh264enc"},
     {NULL}
   };
+  /* *INDENT-ON* */
 
   option_ctx = g_option_context_new ("nvcodec dynamic reconfigure example");
   g_option_context_add_main_entries (option_ctx, options, NULL);
@@ -348,7 +359,10 @@ main (gint argc, gchar ** argv)
   g_option_context_free (option_ctx);
   gst_init (NULL, NULL);
 
-  if (!check_nvcodec_available ()) {
+  if (!encoder_name)
+    encoder_name = g_strdup ("nvh264enc");
+
+  if (!check_nvcodec_available (encoder_name)) {
     g_printerr ("Cannot load nvcodec plugin");
     exit (1);
   }
@@ -400,11 +414,10 @@ main (gint argc, gchar ** argv)
 
   capsfilter = gst_element_factory_make ("capsfilter", NULL);
   queue = gst_element_factory_make ("queue", NULL);
-  enc = gst_element_factory_make ("nvh264enc", NULL);
+  enc = gst_element_factory_make (encoder_name, NULL);
   parse = gst_element_factory_make ("h264parse", NULL);
 
-  /* vbr with target bitrate */
-  g_object_set (G_OBJECT (enc), "rc-mode", 4, "bitrate", bitrate, NULL);
+  g_object_set (G_OBJECT (enc), "bitrate", bitrate, NULL);
 
   dec = gst_element_factory_make ("nvh264dec", NULL);
 
@@ -445,10 +458,9 @@ main (gint argc, gchar ** argv)
 
   gst_bus_add_watch (GST_ELEMENT_BUS (pipeline), bus_msg, &data);
 
-  if (gst_nvcodec_kb_set_key_handler (keyboard_cb, &data)) {
-    g_print ("Press 'k' to see a list of keyboard shortcuts.\n");
-    atexit (restore_terminal);
-  }
+  set_key_handler (keyboard_cb, &data);
+  g_print ("Press 'k' to see a list of keyboard shortcuts.\n");
+  atexit (unset_key_handler);
 
   /* run the pipeline */
   sret = gst_element_set_state (pipeline, GST_STATE_PLAYING);
@@ -467,6 +479,7 @@ terminate:
 
   gst_object_unref (pipeline);
   g_main_loop_unref (loop);
+  g_free (encoder_name);
 
   return exitcode;
 }

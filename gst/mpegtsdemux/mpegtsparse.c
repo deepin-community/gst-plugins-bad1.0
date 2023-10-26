@@ -125,6 +125,11 @@ static gboolean push_event (MpegTSBase * base, GstEvent * event);
 
 #define mpegts_parse_parent_class parent_class
 G_DEFINE_TYPE (MpegTSParse2, mpegts_parse, GST_TYPE_MPEGTS_BASE);
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (tsparse, "tsparse",
+    GST_RANK_NONE, GST_TYPE_MPEGTS_PARSE,
+    GST_DEBUG_CATEGORY_INIT (mpegts_parse_debug, "tsparse", 0,
+        "MPEG transport stream parser"));
+
 static void mpegts_parse_reset (MpegTSBase * base);
 static GstFlowReturn mpegts_parse_input_done (MpegTSBase * base);
 static GstFlowReturn
@@ -418,9 +423,12 @@ push_event (MpegTSBase * base, GstEvent * event)
     prepare_src_pad (base, parse);
   }
   if (G_UNLIKELY (GST_EVENT_TYPE (event) == GST_EVENT_EOS)) {
+    gsize packet_size = base->packetizer->packet_size;
+
     parse->is_eos = TRUE;
 
-    if (parse->alignment > 0 && parse->ts_adapter.packets_in_adapter > 0
+    if (packet_size > 0 && parse->alignment > 0 &&
+        parse->ts_adapter.packets_in_adapter > 0
         && parse->ts_adapter.packets_in_adapter < parse->alignment) {
       GstBuffer *buf;
       GstMapInfo map;
@@ -428,15 +436,12 @@ push_event (MpegTSBase * base, GstEvent * event)
       gint missing_packets =
           parse->alignment - parse->ts_adapter.packets_in_adapter;
       gint i = missing_packets;
-      gsize packet_size = base->packetizer->packet_size;
 
       GST_DEBUG_OBJECT (parse, "Adding %d dummy packets", missing_packets);
 
       buf = gst_buffer_new_and_alloc (missing_packets * packet_size);
       gst_buffer_map (buf, &map, GST_MAP_READWRITE);
       data = map.data;
-
-      g_assert (packet_size > 0);
 
       for (; i > 0; i--) {
         gint offset;
@@ -643,7 +648,7 @@ empty_adapter_into_pad (MpegTSParse2 * parse, MpegTSParse2Adapter * ts_adapter,
   pts = gst_adapter_prev_pts_at_offset (adapter, offset, &pts_dist);
   dts = gst_adapter_prev_dts_at_offset (adapter, offset, &dts_dist);
 
-  GST_LOG_OBJECT (ts_adapter,
+  GST_LOG_OBJECT (pad,
       "prev pts:%" GST_TIME_FORMAT " (dist:%" G_GUINT64_FORMAT ") dts:%"
       GST_TIME_FORMAT " (dist:%" G_GUINT64_FORMAT ")",
       GST_TIME_ARGS (pts), pts_dist, GST_TIME_ARGS (dts), dts_dist);
@@ -1205,14 +1210,4 @@ mpegts_parse_src_pad_query (GstPad * pad, GstObject * parent, GstQuery * query)
       res = gst_pad_query_default (pad, parent, query);
   }
   return res;
-}
-
-gboolean
-gst_mpegtsparse_plugin_init (GstPlugin * plugin)
-{
-  GST_DEBUG_CATEGORY_INIT (mpegts_parse_debug, "tsparse", 0,
-      "MPEG transport stream parser");
-
-  return gst_element_register (plugin, "tsparse",
-      GST_RANK_NONE, GST_TYPE_MPEGTS_PARSE);
 }

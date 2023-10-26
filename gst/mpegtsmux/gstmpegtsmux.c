@@ -6,10 +6,9 @@
  *
  * Copyright (C) 2011 Jan Schmidt <thaytan@noraisin.net>
  *
- * This library is licensed under 4 different licenses and you
+ * This library is licensed under 3 different licenses and you
  * can choose to use it under the terms of any one of them. The
- * four licenses are the MPL 1.1, the LGPL, the GPL and the MIT
- * license.
+ * three licenses are the MPL 1.1, the LGPL and the MIT license.
  *
  * MPL:
  *
@@ -40,22 +39,6 @@
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
  *
- * GPL:
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.
- *
  * MIT:
  *
  * Unless otherwise indicated, Source Code is licensed under MIT license.
@@ -80,6 +63,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  *
+ * SPDX-License-Identifier: MPL-1.1 OR MIT OR LGPL-2.0-or-later
  */
 
 /**
@@ -92,6 +76,9 @@
  *
  * {{ tests/examples/mpegts/ts-section-writer.c }}
  */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include "gstmpegtsmux.h"
 #include <string.h>
@@ -115,7 +102,7 @@ static GstStaticPadTemplate gst_mpeg_ts_mux_sink_factory =
         "mpegversion = (int) { 1, 2, 4 }, "
         "systemstream = (boolean) false; "
         "video/x-dirac;"
-        "image/x-jpc;"
+        "image/x-jpc, alignment = (string) frame;"
         "video/x-h264,stream-format=(string)byte-stream,"
         "alignment=(string){au, nal}; "
         "video/x-h265,stream-format=(string)byte-stream,"
@@ -139,7 +126,7 @@ static GstStaticPadTemplate gst_mpeg_ts_mux_sink_factory =
         "channels = (int) [1, 8], "
         "channel-mapping-family = (int) {0, 1};"
         "subpicture/x-dvb; application/x-teletext; meta/x-klv, parsed=true;"
-        "image/x-jpc, profile = (int)[0, 49151];"));
+        "image/x-jpc, alignment = (string) frame, profile = (int)[0, 49151];"));
 
 static GstStaticPadTemplate gst_mpeg_ts_mux_src_factory =
 GST_STATIC_PAD_TEMPLATE ("src",
@@ -152,8 +139,10 @@ GST_STATIC_PAD_TEMPLATE ("src",
 GST_DEBUG_CATEGORY (gst_mpeg_ts_mux_debug);
 #define GST_CAT_DEFAULT gst_mpeg_ts_mux_debug
 
-G_DEFINE_TYPE (GstMpegTsMux, gst_mpeg_ts_mux, GST_TYPE_BASE_TS_MUX);
 #define parent_class gst_mpeg_ts_mux_parent_class
+G_DEFINE_TYPE (GstMpegTsMux, gst_mpeg_ts_mux, GST_TYPE_BASE_TS_MUX);
+GST_ELEMENT_REGISTER_DEFINE (mpegtsmux, "mpegtsmux", GST_RANK_PRIMARY,
+    gst_mpeg_ts_mux_get_type ());
 
 /* Internals */
 

@@ -37,6 +37,23 @@
 GST_DEBUG_CATEGORY_EXTERN (gst_debug_srtobject);
 #define GST_CAT_DEFAULT gst_debug_srtobject
 
+#if SRT_VERSION_VALUE > 0x10402
+#define REASON_FORMAT "s"
+#define REASON_ARGS(reason) srt_rejectreason_str (reason)
+#else
+/* srt_rejectreason_str() is unavailable in libsrt 1.4.2 and prior due to
+ * unexported symbol. See https://github.com/Haivision/srt/pull/1728. */
+#define REASON_FORMAT "s %d"
+#define REASON_ARGS(reason) "reject reason code", (reason)
+#endif
+
+/* Define options added in later revisions */
+#if SRT_VERSION_VALUE < 0x10402
+#define SRTO_DRIFTTRACER 37
+/* We can't define SRTO_BINDTODEVICE since it depends on configuration flags *sigh* */
+#define SRTO_RETRANSMITALGO 61
+#endif
+
 enum
 {
   PROP_URI = 1,
@@ -51,6 +68,8 @@ enum
   PROP_STATS,
   PROP_WAIT_FOR_CONNECTION,
   PROP_STREAMID,
+  PROP_AUTHENTICATION,
+  PROP_AUTO_RECONNECT,
   PROP_LAST
 };
 
@@ -61,9 +80,6 @@ typedef struct
   GSocketAddress *sockaddr;
   gboolean sent_headers;
 } SRTCaller;
-
-static GstStructure *gst_srt_object_accumulate_stats (GstSRTObject * srtobject,
-    SRTSOCKET srtsock);
 
 static SRTCaller *
 srt_caller_new (void)
@@ -98,15 +114,7 @@ srt_caller_free (SRTCaller * caller)
 static void
 srt_caller_signal_removed (SRTCaller * caller, GstSRTObject * srtobject)
 {
-  GstStructure *stats;
-
-  stats = gst_srt_object_accumulate_stats (srtobject, caller->sock);
-
-  /* FIXME: These are the final statistics for the caller before we close its
-   * socket. Deliver the stats to the app before we throw them away. */
-  gst_structure_free (stats);
-
-  g_signal_emit_by_name (srtobject->element, "caller-removed", caller->sock,
+  g_signal_emit_by_name (srtobject->element, "caller-removed", 0,
       caller->sockaddr);
 }
 
@@ -131,6 +139,54 @@ static const struct srt_constant_params srt_params[] = {
   {NULL, -1, NULL, 0},
 };
 /* *INDENT-ON* */
+
+typedef struct
+{
+  const gchar *name;
+  SRT_SOCKOPT opt;
+  GType gtype;
+} SrtOption;
+
+SrtOption srt_options[] = {
+  {"mss", SRTO_MSS, G_TYPE_INT},
+  {"fc", SRTO_FC, G_TYPE_INT},
+  {"sndbuf", SRTO_SNDBUF, G_TYPE_INT},
+  {"rcvbuf", SRTO_RCVBUF, G_TYPE_INT},
+  {"maxbw", SRTO_MAXBW, G_TYPE_INT64},
+  {"tsbpdmode", SRTO_TSBPDMODE, G_TYPE_BOOLEAN},
+  {"latency", SRTO_LATENCY, G_TYPE_INT},
+  {"inputbw", SRTO_INPUTBW, G_TYPE_INT64},
+  {"oheadbw", SRTO_OHEADBW, G_TYPE_INT},
+  {"passphrase", SRTO_PASSPHRASE, G_TYPE_STRING},
+  {"pbkeylen", SRTO_PBKEYLEN, G_TYPE_INT},
+  {"ipttl", SRTO_IPTTL, G_TYPE_INT},
+  {"iptos", SRTO_IPTOS, G_TYPE_INT},
+  {"tlpktdrop", SRTO_TLPKTDROP, G_TYPE_BOOLEAN},
+  {"snddropdelay", SRTO_SNDDROPDELAY, G_TYPE_INT},
+  {"nakreport", SRTO_NAKREPORT, G_TYPE_BOOLEAN},
+  {"conntimeo", SRTO_CONNTIMEO, G_TYPE_INT},
+  {"drifttracer", SRTO_DRIFTTRACER, G_TYPE_BOOLEAN},
+  {"lossmaxttl", SRTO_LOSSMAXTTL, G_TYPE_INT},
+  {"rcvlatency", SRTO_RCVLATENCY, G_TYPE_INT},
+  {"peerlatency", SRTO_PEERLATENCY, G_TYPE_INT},
+  {"minversion", SRTO_MINVERSION, G_TYPE_INT},
+  {"streamid", SRTO_STREAMID, G_TYPE_STRING},
+  {"congestion", SRTO_CONGESTION, G_TYPE_STRING},
+  {"messageapi", SRTO_MESSAGEAPI, G_TYPE_BOOLEAN},
+  {"payloadsize", SRTO_PAYLOADSIZE, G_TYPE_INT},
+  {"transtype", SRTO_TRANSTYPE, G_TYPE_INT},
+  {"kmrefreshrate", SRTO_KMREFRESHRATE, G_TYPE_INT},
+  {"kmpreannounce", SRTO_KMPREANNOUNCE, G_TYPE_INT},
+  {"enforcedencryption", SRTO_ENFORCEDENCRYPTION, G_TYPE_BOOLEAN},
+  {"ipv6only", SRTO_IPV6ONLY, G_TYPE_INT},
+  {"peeridletimeo", SRTO_PEERIDLETIMEO, G_TYPE_INT},
+#if SRT_VERSION_VALUE >= 0x10402
+  {"bindtodevice", SRTO_BINDTODEVICE, G_TYPE_STRING},
+#endif
+  {"packetfilter", SRTO_PACKETFILTER, G_TYPE_STRING},
+  {"retransmitalgo", SRTO_RETRANSMITALGO, G_TYPE_INT},
+  {NULL}
+};
 
 static gint srt_init_refcount = 0;
 
@@ -185,11 +241,68 @@ name_resolve:
 }
 
 static gboolean
+gst_srt_object_apply_socket_option (SRTSOCKET sock, SrtOption * option,
+    const GValue * value, GError ** error)
+{
+  union
+  {
+    int32_t i;
+    int64_t i64;
+    gboolean b;
+    const gchar *c;
+  } u;
+  const void *optval = &u;
+  gint optlen;
+
+  if (!G_VALUE_HOLDS (value, option->gtype)) {
+    goto bad_type;
+  }
+
+  switch (option->gtype) {
+    case G_TYPE_INT:
+      u.i = g_value_get_int (value);
+      optlen = sizeof u.i;
+      break;
+    case G_TYPE_INT64:
+      u.i64 = g_value_get_int64 (value);
+      optlen = sizeof u.i64;
+      break;
+    case G_TYPE_BOOLEAN:
+      u.b = g_value_get_boolean (value);
+      optlen = sizeof u.b;
+      break;
+    case G_TYPE_STRING:
+      u.c = g_value_get_string (value);
+      optval = u.c;
+      optlen = u.c ? strlen (u.c) : 0;
+      if (optlen == 0) {
+        return TRUE;
+      }
+      break;
+    default:
+      goto bad_type;
+  }
+
+  if (srt_setsockopt (sock, 0, option->opt, optval, optlen)) {
+    g_set_error (error, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+        "failed to set %s (reason: %s)", option->name, srt_getlasterror_str ());
+    return FALSE;
+  }
+
+  return TRUE;
+
+bad_type:
+  g_set_error (error, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
+      "option %s has unsupported type", option->name);
+  return FALSE;
+}
+
+static gboolean
 gst_srt_object_set_common_params (SRTSOCKET sock, GstSRTObject * srtobject,
     GError ** error)
 {
   const struct srt_constant_params *params = srt_params;
-  const gchar *passphrase;
+  SrtOption *option = srt_options;
 
   GST_OBJECT_LOCK (srtobject->element);
 
@@ -202,50 +315,12 @@ gst_srt_object_set_common_params (SRTSOCKET sock, GstSRTObject * srtobject,
     }
   }
 
-  passphrase = gst_structure_get_string (srtobject->parameters, "passphrase");
-  if (passphrase != NULL && passphrase[0] != '\0') {
-    int32_t pbkeylen;
+  for (; option->name; ++option) {
+    const GValue *val;
 
-    if (srt_setsockopt (sock, 0, SRTO_PASSPHRASE, passphrase,
-            strlen (passphrase))) {
-      g_set_error (error, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
-          "failed to set passphrase (reason: %s)", srt_getlasterror_str ());
-
+    val = gst_structure_get_value (srtobject->parameters, option->name);
+    if (val && !gst_srt_object_apply_socket_option (sock, option, val, error)) {
       goto err;
-    }
-
-    if (!gst_structure_get_int (srtobject->parameters, "pbkeylen", &pbkeylen)) {
-      pbkeylen = GST_SRT_DEFAULT_PBKEYLEN;
-    }
-
-    if (srt_setsockopt (sock, 0, SRTO_PBKEYLEN, &pbkeylen, sizeof pbkeylen)) {
-      g_set_error (error, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
-          "failed to set pbkeylen (reason: %s)", srt_getlasterror_str ());
-      goto err;
-    }
-  }
-
-  {
-    int32_t latency;
-
-    if (!gst_structure_get_int (srtobject->parameters, "latency", &latency))
-      latency = GST_SRT_DEFAULT_LATENCY;
-    if (srt_setsockopt (sock, 0, SRTO_LATENCY, &latency, sizeof latency)) {
-      g_set_error (error, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
-          "failed to set latency (reason: %s)", srt_getlasterror_str ());
-      goto err;
-    }
-  }
-
-  if (gst_structure_has_field (srtobject->parameters, "streamid")) {
-    const gchar *streamid;
-
-    streamid = gst_structure_get_string (srtobject->parameters, "streamid");
-    if (streamid != NULL && streamid[0] != '\0') {
-      if (srt_setsockopt (sock, 0, SRTO_STREAMID, streamid, strlen (streamid))) {
-        g_set_error (error, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_SETTINGS,
-            "failed to set stream ID (reason: %s)", srt_getlasterror_str ());
-      }
     }
   }
 
@@ -279,6 +354,7 @@ gst_srt_object_new (GstElement * element)
   srtobject->listener_poll_id = SRT_ERROR;
   srtobject->sent_headers = FALSE;
   srtobject->wait_for_connection = GST_SRT_DEFAULT_WAIT_FOR_CONNECTION;
+  srtobject->auto_reconnect = GST_SRT_DEFAULT_AUTO_RECONNECT;
 
   g_cond_init (&srtobject->sock_cond);
   return srtobject;
@@ -289,10 +365,11 @@ gst_srt_object_destroy (GstSRTObject * srtobject)
 {
   g_return_if_fail (srtobject != NULL);
 
-  if (srtobject->poll_id != SRT_ERROR) {
-    srt_epoll_release (srtobject->poll_id);
-    srtobject->poll_id = SRT_ERROR;
+  if (srtobject->sock != SRT_INVALID_SOCK) {
+    srt_close (srtobject->sock);
   }
+
+  srt_epoll_release (srtobject->poll_id);
 
   g_cond_clear (&srtobject->sock_cond);
 
@@ -338,13 +415,19 @@ gst_srt_object_set_property_helper (GstSRTObject * srtobject,
       gst_structure_set_value (srtobject->parameters, "passphrase", value);
       break;
     case PROP_PBKEYLEN:
-      gst_structure_set_value (srtobject->parameters, "pbkeylen", value);
+      gst_structure_set (srtobject->parameters, "pbkeylen", G_TYPE_INT,
+          g_value_get_enum (value), NULL);
       break;
     case PROP_WAIT_FOR_CONNECTION:
       srtobject->wait_for_connection = g_value_get_boolean (value);
       break;
     case PROP_STREAMID:
       gst_structure_set_value (srtobject->parameters, "streamid", value);
+      break;
+    case PROP_AUTHENTICATION:
+      srtobject->authentication = g_value_get_boolean (value);
+    case PROP_AUTO_RECONNECT:
+      srtobject->auto_reconnect = g_value_get_boolean (value);
       break;
     default:
       goto err;
@@ -403,8 +486,8 @@ gst_srt_object_get_property_helper (GstSRTObject * srtobject,
       GstSRTKeyLength v;
 
       GST_OBJECT_LOCK (srtobject->element);
-      if (!gst_structure_get_enum (srtobject->parameters, "pbkeylen",
-              GST_TYPE_SRT_KEY_LENGTH, (gint *) & v)) {
+      if (!gst_structure_get_int (srtobject->parameters, "pbkeylen",
+              (gint *) & v)) {
         GST_WARNING_OBJECT (srtobject->element, "Failed to get 'pbkeylen'");
         v = GST_SRT_KEY_LENGTH_NO_KEY;
       }
@@ -448,6 +531,13 @@ gst_srt_object_get_property_helper (GstSRTObject * srtobject,
       GST_OBJECT_LOCK (srtobject->element);
       g_value_set_string (value,
           gst_structure_get_string (srtobject->parameters, "streamid"));
+      GST_OBJECT_UNLOCK (srtobject->element);
+      break;
+    case PROP_AUTHENTICATION:
+      g_value_set_boolean (value, srtobject->authentication);
+    case PROP_AUTO_RECONNECT:
+      GST_OBJECT_LOCK (srtobject->element);
+      g_value_set_boolean (value, srtobject->auto_reconnect);
       GST_OBJECT_UNLOCK (srtobject->element);
       break;
     default:
@@ -594,6 +684,38 @@ gst_srt_object_install_properties_helper (GObjectClass * gobject_class)
           "Stream ID for the SRT access control", "",
           G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
           G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstSRTSink:authentication:
+   *
+   * Boolean to authenticate a connection.  If TRUE,
+   * the incoming connection is authenticated. Else,
+   * all the connections are accepted.
+   *
+   * Since: 1.20
+   *
+   */
+  g_object_class_install_property (gobject_class, PROP_AUTHENTICATION,
+      g_param_spec_boolean ("authentication",
+          "Authentication",
+          "Authenticate a connection",
+          FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstSRTSrc:auto-reconnect:
+   *
+   * Boolean to choose whether to automatically reconnect.  If TRUE, an element
+   * in caller mode will try to reconnect instead of reporting an error.
+   *
+   * Since: 1.22
+   *
+   */
+  g_object_class_install_property (gobject_class, PROP_AUTO_RECONNECT,
+      g_param_spec_boolean ("auto-reconnect",
+          "Automatic reconnect",
+          "Automatically reconnect when connection fails",
+          GST_SRT_DEFAULT_AUTO_RECONNECT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 }
 
 static void
@@ -634,6 +756,65 @@ gst_srt_object_set_int_value (GstStructure * s, const gchar * key,
 {
   gst_structure_set (s, key, G_TYPE_INT,
       (gint) g_ascii_strtoll (value, NULL, 10), NULL);
+}
+
+static void
+gst_srt_object_set_int64_value (GstStructure * s, const gchar * key,
+    const gchar * value)
+{
+  gst_structure_set (s, key, G_TYPE_INT64,
+      g_ascii_strtoll (value, NULL, 10), NULL);
+}
+
+static void
+gst_srt_object_set_boolean_value (GstStructure * s, const gchar * key,
+    const gchar * value)
+{
+  gboolean bool_val;
+  static const gchar *true_names[] = {
+    "1", "yes", "on", "true", NULL
+  };
+  static const gchar *false_names[] = {
+    "0", "no", "off", "false", NULL
+  };
+
+  if (g_strv_contains (true_names, value)) {
+    bool_val = TRUE;
+  } else if (g_strv_contains (false_names, value)) {
+    bool_val = FALSE;
+  } else {
+    return;
+  }
+
+  gst_structure_set (s, key, G_TYPE_BOOLEAN, bool_val, NULL);
+}
+
+static void
+gst_srt_object_set_socket_option (GstStructure * s, const gchar * key,
+    const gchar * value)
+{
+  SrtOption *option = srt_options;
+
+  for (; option->name; ++option) {
+    if (g_str_equal (key, option->name)) {
+      switch (option->gtype) {
+        case G_TYPE_INT:
+          gst_srt_object_set_int_value (s, key, value);
+          break;
+        case G_TYPE_INT64:
+          gst_srt_object_set_int64_value (s, key, value);
+          break;
+        case G_TYPE_STRING:
+          gst_srt_object_set_string_value (s, key, value);
+          break;
+        case G_TYPE_BOOLEAN:
+          gst_srt_object_set_boolean_value (s, key, value);
+          break;
+      }
+
+      break;
+    }
+  }
 }
 
 static void
@@ -724,17 +905,10 @@ gst_srt_object_set_uri (GstSRTObject * srtobject, const gchar * uri,
         gst_srt_object_set_string_value (srtobject->parameters, key, value);
       } else if (!g_strcmp0 ("localport", key)) {
         gst_srt_object_set_uint_value (srtobject->parameters, key, value);
-      } else if (!g_strcmp0 ("passphrase", key)) {
-        gst_srt_object_set_string_value (srtobject->parameters, key, value);
-      } else if (!g_strcmp0 ("pbkeylen", key)) {
-        gst_srt_object_set_enum_value (srtobject->parameters,
-            GST_TYPE_SRT_KEY_LENGTH, key, value);
-      } else if (!g_strcmp0 ("streamid", key)) {
-        gst_srt_object_set_string_value (srtobject->parameters, key, value);
-      } else if (!g_strcmp0 ("latency", key)) {
-        gst_srt_object_set_int_value (srtobject->parameters, key, value);
       } else if (!g_strcmp0 ("poll-timeout", key)) {
         gst_srt_object_set_int_value (srtobject->parameters, key, value);
+      } else {
+        gst_srt_object_set_socket_option (srtobject->parameters, key, value);
       }
     }
 
@@ -773,19 +947,19 @@ thread_func (gpointer data)
 
     GST_DEBUG_OBJECT (srtobject->element, "Waiting a request from caller");
 
-    if (srt_epoll_wait (srtobject->listener_poll_id, &rsock,
-            &rsocklen, 0, 0, poll_timeout, NULL, 0, NULL, 0) < 0) {
+    if (srt_epoll_wait (srtobject->listener_poll_id, &rsock, &rsocklen, 0, 0,
+            poll_timeout, NULL, 0, NULL, 0) < 0) {
       gint srt_errno = srt_getlasterror (NULL);
 
       if (srtobject->listener_poll_id == SRT_ERROR)
         return NULL;
-      if (srt_errno == SRT_ETIMEOUT) {
+
+      if (srt_errno == SRT_ETIMEOUT)
         continue;
-      } else {
-        GST_ELEMENT_ERROR (srtobject->element, RESOURCE, FAILED,
-            ("abort polling: %s", srt_getlasterror_str ()), (NULL));
-        return NULL;
-      }
+
+      GST_ELEMENT_ERROR (srtobject->element, RESOURCE, FAILED,
+          ("abort polling: %s", srt_getlasterror_str ()), (NULL));
+      return NULL;
     }
 
     caller_sock =
@@ -823,12 +997,12 @@ thread_func (gpointer data)
           caller->sock);
 
       g_mutex_lock (&srtobject->sock_lock);
-      srtobject->callers = g_list_append (srtobject->callers, caller);
+      srtobject->callers = g_list_prepend (srtobject->callers, caller);
       g_cond_signal (&srtobject->sock_cond);
       g_mutex_unlock (&srtobject->sock_lock);
 
       /* notifying caller-added */
-      g_signal_emit_by_name (srtobject->element, "caller-added", caller->sock,
+      g_signal_emit_by_name (srtobject->element, "caller-added", 0,
           caller->sockaddr);
 
       if (gst_uri_handler_get_uri_type (GST_URI_HANDLER (srtobject->element)) ==
@@ -836,6 +1010,62 @@ thread_func (gpointer data)
         return NULL;
     }
   }
+}
+
+static GSocketAddress *
+peeraddr_to_g_socket_address (const struct sockaddr *peeraddr)
+{
+  gsize peeraddr_len;
+
+  switch (peeraddr->sa_family) {
+    case AF_INET:
+      peeraddr_len = sizeof (struct sockaddr_in);
+      break;
+    case AF_INET6:
+      peeraddr_len = sizeof (struct sockaddr_in6);
+      break;
+    default:
+      g_warning ("Unsupported address family %d", peeraddr->sa_family);
+      return NULL;
+  }
+  return g_socket_address_new_from_native ((gpointer) peeraddr, peeraddr_len);
+}
+
+static gint
+srt_listen_callback_func (GstSRTObject * self, SRTSOCKET sock, int hs_version,
+    const struct sockaddr *peeraddr, const char *stream_id)
+{
+  GSocketAddress *addr = peeraddr_to_g_socket_address (peeraddr);
+
+  if (!addr) {
+    GST_WARNING_OBJECT (self->element,
+        "Invalid peer address. Rejecting sink %d streamid: %s", sock,
+        stream_id);
+    return -1;
+  }
+
+  if (self->authentication) {
+    gboolean authenticated = FALSE;
+
+    /* notifying caller-connecting */
+    g_signal_emit_by_name (self->element, "caller-connecting", addr,
+        stream_id, &authenticated);
+
+    if (!authenticated)
+      goto reject;
+  }
+
+  GST_DEBUG_OBJECT (self->element,
+      "Accepting sink %d streamid: %s", sock, stream_id);
+  g_object_unref (addr);
+  return 0;
+reject:
+  /* notifying caller-rejected */
+  GST_WARNING_OBJECT (self->element,
+      "Rejecting sink %d streamid: %s", sock, stream_id);
+  g_signal_emit_by_name (self->element, "caller-rejected", addr, stream_id);
+  g_object_unref (addr);
+  return -1;
 }
 
 static gboolean
@@ -916,10 +1146,16 @@ gst_srt_object_wait_connect (GstSRTObject * srtobject,
 
   srtobject->listener_sock = sock;
 
+  /* Register the SRT listen callback */
+  if (srt_listen_callback (srtobject->listener_sock,
+          (srt_listen_callback_fn *) srt_listen_callback_func, srtobject)) {
+    goto failed;
+  }
+
   srtobject->thread =
       g_thread_try_new ("GstSRTObjectListener", thread_func, srtobject, error);
-
-  if (*error != NULL) {
+  if (srtobject->thread == NULL) {
+    GST_ERROR_OBJECT (srtobject->element, "Failed to start thread");
     goto failed;
   }
 
@@ -959,7 +1195,7 @@ gst_srt_object_connect (GstSRTObject * srtobject, GCancellable * cancellable,
   if (sock == SRT_INVALID_SOCK) {
     g_set_error (error, GST_LIBRARY_ERROR, GST_LIBRARY_ERROR_INIT, "%s",
         srt_getlasterror_str ());
-    goto failed;
+    return FALSE;
   }
 
   if (!gst_srt_object_set_common_params (sock, srtobject, error)) {
@@ -1043,6 +1279,7 @@ gst_srt_object_connect (GstSRTObject * srtobject, GCancellable * cancellable,
   if (srt_connect (sock, sa, sa_len) == SRT_ERROR) {
     g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_OPEN_READ, "%s",
         srt_getlasterror_str ());
+    srt_epoll_remove_usock (srtobject->poll_id, sock);
     goto failed;
   }
 
@@ -1051,18 +1288,7 @@ gst_srt_object_connect (GstSRTObject * srtobject, GCancellable * cancellable,
   return TRUE;
 
 failed:
-
-  if (srtobject->poll_id != SRT_ERROR) {
-    srt_epoll_release (srtobject->poll_id);
-  }
-
-  if (sock != SRT_INVALID_SOCK) {
-    srt_close (sock);
-  }
-
-  srtobject->poll_id = SRT_ERROR;
-  srtobject->sock = SRT_INVALID_SOCK;
-
+  srt_close (sock);
   return FALSE;
 }
 
@@ -1159,7 +1385,7 @@ gboolean
 gst_srt_object_open (GstSRTObject * srtobject, GCancellable * cancellable,
     GError ** error)
 {
-  srtobject->previous_bytes = 0;
+  srtobject->bytes = 0;
 
   return gst_srt_object_open_internal (srtobject, cancellable, error);
 }
@@ -1170,17 +1396,7 @@ gst_srt_object_close (GstSRTObject * srtobject)
   g_mutex_lock (&srtobject->sock_lock);
 
   if (srtobject->sock != SRT_INVALID_SOCK) {
-    GstStructure *stats;
-
-    if (srtobject->poll_id != SRT_ERROR) {
-      srt_epoll_remove_usock (srtobject->poll_id, srtobject->sock);
-    }
-
-    stats = gst_srt_object_accumulate_stats (srtobject, srtobject->sock);
-
-    /* FIXME: These are the final statistics for the socket before we close it.
-     * Deliver the stats to the app before we throw them away. */
-    gst_structure_free (stats);
+    srt_epoll_remove_usock (srtobject->poll_id, srtobject->sock);
 
     GST_DEBUG_OBJECT (srtobject->element, "Closing SRT socket (0x%x)",
         srtobject->sock);
@@ -1228,33 +1444,25 @@ gst_srt_object_close (GstSRTObject * srtobject)
 
 static gboolean
 gst_srt_object_wait_caller (GstSRTObject * srtobject,
-    GCancellable * cancellable, GError ** error)
+    GCancellable * cancellable)
 {
   gboolean ret;
 
   g_mutex_lock (&srtobject->sock_lock);
 
-  if (srtobject->callers == NULL) {
+  ret = (srtobject->callers != NULL);
+  if (!ret) {
     GST_INFO_OBJECT (srtobject->element, "Waiting for connection");
-
-    while (!g_cancellable_is_cancelled (cancellable)) {
-      ret = (srtobject->callers != NULL);
-      if (ret) {
-        GST_DEBUG_OBJECT (srtobject->element, "Got a connection");
-        break;
-      }
-
+    while (!ret && !g_cancellable_is_cancelled (cancellable)) {
       g_cond_wait (&srtobject->sock_cond, &srtobject->sock_lock);
+      ret = (srtobject->callers != NULL);
     }
-  } else {
-    ret = TRUE;
   }
 
   g_mutex_unlock (&srtobject->sock_lock);
 
-  if (!ret) {
-    g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_FAILED,
-        "Canceled waiting for a connection.");
+  if (ret) {
+    GST_DEBUG_OBJECT (srtobject->element, "Got a connection");
   }
 
   return ret;
@@ -1269,6 +1477,7 @@ gst_srt_object_read (GstSRTObject * srtobject,
   gint poll_timeout;
   GstSRTConnectionMode connection_mode = GST_SRT_CONNECTION_MODE_NONE;
   gint poll_id = SRT_ERROR;
+  gboolean auto_reconnect;
 
   /* Only source element can read data */
   g_return_val_if_fail (gst_uri_handler_get_uri_type (GST_URI_HANDLER
@@ -1284,11 +1493,13 @@ gst_srt_object_read (GstSRTObject * srtobject,
     poll_timeout = GST_SRT_DEFAULT_POLL_TIMEOUT;
   }
 
+  auto_reconnect = srtobject->auto_reconnect;
+
   GST_OBJECT_UNLOCK (srtobject->element);
 
   if (connection_mode == GST_SRT_CONNECTION_MODE_LISTENER) {
-    if (!gst_srt_object_wait_caller (srtobject, cancellable, error))
-      return -1;
+    if (!gst_srt_object_wait_caller (srtobject, cancellable))
+      return 0;
 
     g_mutex_lock (&srtobject->sock_lock);
     if (srtobject->callers) {
@@ -1307,47 +1518,70 @@ gst_srt_object_read (GstSRTObject * srtobject,
 
     SRTSOCKET rsock;
     gint rsocklen = 1;
-    int pollret;
+    SRTSOCKET wsock;
+    gint wsocklen = 1;
 
-    pollret = srt_epoll_wait (poll_id, &rsock,
-        &rsocklen, 0, 0, poll_timeout, NULL, 0, NULL, 0);
-    if (pollret < 0) {
+    if (srt_epoll_wait (poll_id, &rsock, &rsocklen, &wsock, &wsocklen,
+            poll_timeout, NULL, 0, NULL, 0) < 0) {
       gint srt_errno = srt_getlasterror (NULL);
 
-      if (srt_errno != SRT_ETIMEOUT) {
+#if SRT_VERSION_VALUE >= 0x010402
+      if (srt_errno == SRT_EPOLLEMPTY)
         return 0;
+#endif
+
+      if (srt_errno == SRT_ETIMEOUT)
+        continue;
+
+      g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_WRITE,
+          "Failed to poll socket: %s", srt_getlasterror_str ());
+      return -1;
+    }
+
+    if (wsocklen == 1 && rsocklen == 1) {
+      /* Socket reported in wsock AND rsock signifies an error. */
+      gint reason = srt_getrejectreason (wsock);
+
+      if (reason == SRT_REJ_BADSECRET || reason == SRT_REJ_UNSECURE) {
+        if (connection_mode == GST_SRT_CONNECTION_MODE_LISTENER) {
+          GST_ELEMENT_WARNING (srtobject->element, RESOURCE, NOT_AUTHORIZED,
+              ("Caller failed to authenticate: %" REASON_FORMAT,
+                  REASON_ARGS (reason)), (NULL));
+          return 0;
+        }
+
+        if (!auto_reconnect) {
+          g_set_error (error, GST_RESOURCE_ERROR,
+              GST_RESOURCE_ERROR_NOT_AUTHORIZED,
+              "Failed to authenticate: %" REASON_FORMAT, REASON_ARGS (reason));
+          return -1;
+        }
+
+        GST_ELEMENT_WARNING (srtobject->element, RESOURCE, NOT_AUTHORIZED,
+            ("Failed to authenticate: %" REASON_FORMAT ". Trying to reconnect",
+                REASON_ARGS (reason)), (NULL));
+      } else {
+        if (connection_mode == GST_SRT_CONNECTION_MODE_LISTENER) {
+          /* Caller has disappeared. */
+          return 0;
+        }
+
+        if (!auto_reconnect) {
+          g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_READ,
+              "Error on SRT socket: %" REASON_FORMAT, REASON_ARGS (reason));
+          return -1;
+        }
+
+        GST_ELEMENT_WARNING (srtobject->element, RESOURCE, READ,
+            ("Error on SRT socket: %" REASON_FORMAT ". Trying to reconnect",
+                REASON_ARGS (reason)), (NULL));
+      }
+
+      gst_srt_object_close (srtobject);
+      if (!gst_srt_object_open_internal (srtobject, cancellable, error)) {
+        return -1;
       }
       continue;
-    }
-
-    if (rsocklen < 0) {
-      GST_WARNING_OBJECT (srtobject->element,
-          "abnormal SRT socket is detected");
-      srt_close (rsock);
-    }
-
-    switch (srt_getsockstate (rsock)) {
-      case SRTS_BROKEN:
-      case SRTS_NONEXIST:
-      case SRTS_CLOSED:
-        if (connection_mode == GST_SRT_CONNECTION_MODE_LISTENER) {
-          /* Caller has been disappeared. */
-          return 0;
-        } else {
-          GST_WARNING_OBJECT (srtobject->element,
-              "Invalid SRT socket. Trying to reconnect");
-          gst_srt_object_close (srtobject);
-          if (!gst_srt_object_open_internal (srtobject, cancellable, error)) {
-            return -1;
-          }
-          continue;
-        }
-      case SRTS_CONNECTED:
-        /* good to go */
-        break;
-      default:
-        /* not-ready */
-        continue;
     }
 
 
@@ -1364,6 +1598,8 @@ gst_srt_object_read (GstSRTObject * srtobject,
         return -1;
       }
     }
+
+    srtobject->bytes += len;
     break;
   }
 
@@ -1377,7 +1613,7 @@ gst_srt_object_wakeup (GstSRTObject * srtobject, GCancellable * cancellable)
 
   /* Removing all socket descriptors from the monitoring list
    * wakes up SRT's threads. We only have one to remove. */
-  if (srtobject->sock != SRT_INVALID_SOCK && srtobject->poll_id != SRT_ERROR) {
+  if (srtobject->sock != SRT_INVALID_SOCK) {
     srt_epoll_remove_usock (srtobject->poll_id, srtobject->sock);
   }
 
@@ -1395,7 +1631,7 @@ gst_srt_object_wakeup (GstSRTObject * srtobject, GCancellable * cancellable)
 static gboolean
 gst_srt_object_send_headers (GstSRTObject * srtobject, SRTSOCKET sock,
     gint poll_id, gint poll_timeout, GstBufferList * headers,
-    GCancellable * cancellable)
+    GCancellable * cancellable, GError ** error)
 {
   guint size, i;
 
@@ -1409,35 +1645,50 @@ gst_srt_object_send_headers (GstSRTObject * srtobject, SRTSOCKET sock,
   for (i = 0; i < size; i++) {
     SRTSOCKET wsock = sock;
     gint wsocklen = 1;
+    gint sent;
 
     GstBuffer *buffer = gst_buffer_list_get (headers, i);
     GstMapInfo mapinfo;
 
     if (g_cancellable_is_cancelled (cancellable)) {
-      return FALSE;
+      return TRUE;
     }
 
-    if (poll_id > 0 && srt_epoll_wait (poll_id, 0, 0, &wsock,
-            &wsocklen, poll_timeout, NULL, 0, NULL, 0) < 0) {
-      continue;
+    if (poll_id >= 0 && srt_epoll_wait (poll_id, 0, 0, &wsock, &wsocklen,
+            poll_timeout, NULL, 0, NULL, 0) < 0) {
+      gint srt_errno = srt_getlasterror (NULL);
+
+#if SRT_VERSION_VALUE >= 0x010402
+      if (srt_errno == SRT_EPOLLEMPTY)
+        return TRUE;
+#endif
+
+      if (srt_errno == SRT_ETIMEOUT)
+        continue;
+
+      g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_WRITE,
+          "Failed to poll socket: %s", srt_getlasterror_str ());
+      return FALSE;
     }
 
     GST_TRACE_OBJECT (srtobject->element, "sending header %u %" GST_PTR_FORMAT,
         i, buffer);
 
     if (!gst_buffer_map (buffer, &mapinfo, GST_MAP_READ)) {
-      GST_ELEMENT_ERROR (srtobject->element, RESOURCE, READ,
-          ("Could not map the input stream"), (NULL));
+      g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_WRITE,
+          "Failed to map header buffer");
       return FALSE;
     }
 
-    if (srt_sendmsg2 (wsock, (char *) mapinfo.data, mapinfo.size,
-            0) == SRT_ERROR) {
-      GST_ELEMENT_ERROR (srtobject->element, RESOURCE, WRITE, NULL,
-          ("%s", srt_getlasterror_str ()));
+    sent = srt_sendmsg2 (wsock, (char *) mapinfo.data, mapinfo.size, 0);
+    if (sent == SRT_ERROR) {
+      g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_WRITE, "%s",
+          srt_getlasterror_str ());
       gst_buffer_unmap (buffer, &mapinfo);
       return FALSE;
     }
+
+    srtobject->bytes += sent;
 
     gst_buffer_unmap (buffer, &mapinfo);
   }
@@ -1448,30 +1699,36 @@ gst_srt_object_send_headers (GstSRTObject * srtobject, SRTSOCKET sock,
 static gssize
 gst_srt_object_write_to_callers (GstSRTObject * srtobject,
     GstBufferList * headers,
-    const GstMapInfo * mapinfo, GCancellable * cancellable, GError ** error)
+    const GstMapInfo * mapinfo, GCancellable * cancellable)
 {
-  GList *callers;
+  GList *item, *next;
 
   g_mutex_lock (&srtobject->sock_lock);
-  callers = srtobject->callers;
-  while (callers != NULL) {
+  for (item = srtobject->callers, next = NULL; item; item = next) {
+    SRTCaller *caller = item->data;
     gssize len = 0;
     const guint8 *msg = mapinfo->data;
     gint sent;
-    gint payload_size, optlen = 1;
+    gint payload_size, optlen = sizeof (payload_size);
 
-    SRTCaller *caller = callers->data;
-    callers = callers->next;
+    next = item->next;
 
     if (g_cancellable_is_cancelled (cancellable)) {
       goto cancelled;
     }
 
     if (!caller->sent_headers) {
-      if (!gst_srt_object_send_headers (srtobject, caller->sock, -1,
-              -1, headers, cancellable)) {
+      GError *error = NULL;
+
+      if (!gst_srt_object_send_headers (srtobject, caller->sock, -1, 0,
+              headers, cancellable, &error)) {
+        GST_WARNING_OBJECT (srtobject->element,
+            "Failed to send headers to caller %d: %s",
+            caller->sock, error->message);
+        g_error_free (error);
         goto err;
       }
+
       caller->sent_headers = TRUE;
     }
 
@@ -1490,12 +1747,13 @@ gst_srt_object_write_to_callers (GstSRTObject * srtobject,
         goto err;
       }
       len += sent;
+      srtobject->bytes += sent;
     }
 
     continue;
 
   err:
-    srtobject->callers = g_list_remove (srtobject->callers, caller);
+    srtobject->callers = g_list_delete_link (srtobject->callers, item);
     srt_caller_signal_removed (caller, srtobject);
     srt_caller_free (caller);
   }
@@ -1505,7 +1763,7 @@ gst_srt_object_write_to_callers (GstSRTObject * srtobject,
 
 cancelled:
   g_mutex_unlock (&srtobject->sock_lock);
-  return -1;
+  return 0;
 }
 
 static gssize
@@ -1516,9 +1774,13 @@ gst_srt_object_write_one (GstSRTObject * srtobject,
   gssize len = 0;
   gint poll_timeout;
   const guint8 *msg = mapinfo->data;
-  gint payload_size, optlen = 1;
+  gint payload_size, optlen = sizeof (payload_size);
+  gboolean wait_for_connection, auto_reconnect;
 
   GST_OBJECT_LOCK (srtobject->element);
+  wait_for_connection = srtobject->wait_for_connection;
+  auto_reconnect = srtobject->auto_reconnect;
+
   if (!gst_structure_get_int (srtobject->parameters, "poll-timeout",
           &poll_timeout)) {
     poll_timeout = GST_SRT_DEFAULT_POLL_TIMEOUT;
@@ -1527,13 +1789,16 @@ gst_srt_object_write_one (GstSRTObject * srtobject,
 
   if (!srtobject->sent_headers) {
     if (!gst_srt_object_send_headers (srtobject, srtobject->sock,
-            srtobject->poll_id, poll_timeout, headers, cancellable)) {
+            srtobject->poll_id, poll_timeout, headers, cancellable, error)) {
       return -1;
     }
+
     srtobject->sent_headers = TRUE;
   }
 
   while (len < mapinfo->size) {
+    SRTSOCKET rsock;
+    gint rsocklen = 1;
     SRTSOCKET wsock;
     gint wsocklen = 1;
 
@@ -1544,47 +1809,80 @@ gst_srt_object_write_one (GstSRTObject * srtobject,
       break;
     }
 
-    if (srt_epoll_wait (srtobject->poll_id, 0, 0, &wsock,
+    if (!wait_for_connection &&
+        srt_getsockstate (srtobject->sock) == SRTS_CONNECTING) {
+      GST_LOG_OBJECT (srtobject->element,
+          "Not connected yet. Dropping the buffer.");
+      break;
+    }
+
+    if (srt_epoll_wait (srtobject->poll_id, &rsock, &rsocklen, &wsock,
             &wsocklen, poll_timeout, NULL, 0, NULL, 0) < 0) {
+      gint srt_errno = srt_getlasterror (NULL);
+
+#if SRT_VERSION_VALUE >= 0x010402
+      if (srt_errno == SRT_EPOLLEMPTY)
+        return 0;
+#endif
+
+      if (srt_errno == SRT_ETIMEOUT)
+        continue;
+
+      g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_WRITE,
+          "Failed to poll socket: %s", srt_getlasterror_str ());
+      return -1;
+    }
+
+    if (wsocklen == 1 && rsocklen == 1) {
+      /* Socket reported in wsock AND rsock signifies an error. */
+      gint reason = srt_getrejectreason (wsock);
+
+      if (reason == SRT_REJ_BADSECRET || reason == SRT_REJ_UNSECURE) {
+        if (!auto_reconnect) {
+          g_set_error (error, GST_RESOURCE_ERROR,
+              GST_RESOURCE_ERROR_NOT_AUTHORIZED,
+              "Failed to authenticate: %" REASON_FORMAT, REASON_ARGS (reason));
+          return -1;
+        }
+
+        GST_ELEMENT_WARNING (srtobject->element, RESOURCE, NOT_AUTHORIZED,
+            ("Failed to authenticate: %" REASON_FORMAT ". Trying to reconnect",
+                REASON_ARGS (reason)), (NULL));
+      } else {
+        if (!auto_reconnect) {
+          g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_WRITE,
+              "Error on SRT socket: %" REASON_FORMAT, REASON_ARGS (reason));
+          return -1;
+        }
+
+        GST_ELEMENT_WARNING (srtobject->element, RESOURCE, WRITE,
+            ("Error on SRT socket: %" REASON_FORMAT ". Trying to reconnect",
+                REASON_ARGS (reason)), (NULL));
+      }
+
+      gst_srt_object_close (srtobject);
+      if (!gst_srt_object_open_internal (srtobject, cancellable, error)) {
+        return -1;
+      }
       continue;
     }
 
-    switch (srt_getsockstate (wsock)) {
-      case SRTS_BROKEN:
-      case SRTS_NONEXIST:
-      case SRTS_CLOSED:
-        GST_WARNING_OBJECT (srtobject->element,
-            "Invalid SRT socket. Trying to reconnect");
-        gst_srt_object_close (srtobject);
-        if (!gst_srt_object_open_internal (srtobject, cancellable, error)) {
-          return -1;
-        }
-        continue;
-      case SRTS_CONNECTED:
-        /* good to go */
-        GST_LOG_OBJECT (srtobject->element, "good to go");
-        break;
-      default:
-        GST_WARNING_OBJECT (srtobject->element, "not ready");
-        /* not-ready */
-        continue;
-    }
-
     if (srt_getsockflag (wsock, SRTO_PAYLOADSIZE, &payload_size, &optlen)) {
-      GST_ELEMENT_ERROR (srtobject->element, RESOURCE, WRITE, NULL,
-          ("%s", srt_getlasterror_str ()));
-      break;
+      g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_WRITE, "%s",
+          srt_getlasterror_str ());
+      return -1;
     }
 
     rest = MIN (mapinfo->size - len, payload_size);
 
     sent = srt_sendmsg2 (wsock, (char *) (msg + len), rest, 0);
     if (sent < 0) {
-      GST_ELEMENT_ERROR (srtobject->element, RESOURCE, WRITE, NULL,
-          ("%s", srt_getlasterror_str ()));
-      break;
+      g_set_error (error, GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_WRITE, "%s",
+          srt_getlasterror_str ());
+      return -1;
     }
     len += sent;
+    srtobject->bytes += sent;
   }
 
   return len;
@@ -1611,12 +1909,12 @@ gst_srt_object_write (GstSRTObject * srtobject,
 
   if (connection_mode == GST_SRT_CONNECTION_MODE_LISTENER) {
     if (wait_for_connection) {
-      if (!gst_srt_object_wait_caller (srtobject, cancellable, error))
-        return -1;
+      if (!gst_srt_object_wait_caller (srtobject, cancellable))
+        return 0;
     }
     len =
         gst_srt_object_write_to_callers (srtobject, headers, mapinfo,
-        cancellable, error);
+        cancellable);
   } else {
     len =
         gst_srt_object_write_one (srtobject, headers, mapinfo, cancellable,
@@ -1627,65 +1925,62 @@ gst_srt_object_write (GstSRTObject * srtobject,
 }
 
 static GstStructure *
-get_stats_for_srtsock (SRTSOCKET srtsock, gboolean is_sender, guint64 * bytes)
+get_stats_for_srtsock (GstSRTObject * srtobject, SRTSOCKET srtsock)
 {
-  GstStructure *s = gst_structure_new_empty ("application/x-srt-statistics");
+  GstStructure *s;
   int ret;
   SRT_TRACEBSTATS stats;
 
   ret = srt_bstats (srtsock, &stats, 0);
-
-  if (ret >= 0) {
-    if (is_sender) {
-      gst_structure_set (s,
-          /* number of sent data packets, including retransmissions */
-          "packets-sent", G_TYPE_INT64, stats.pktSent,
-          /* number of lost packets (sender side) */
-          "packets-sent-lost", G_TYPE_INT, stats.pktSndLoss,
-          /* number of retransmitted packets */
-          "packets-retransmitted", G_TYPE_INT, stats.pktRetrans,
-          /* number of received ACK packets */
-          "packet-ack-received", G_TYPE_INT, stats.pktRecvACK,
-          /* number of received NAK packets */
-          "packet-nack-received", G_TYPE_INT, stats.pktRecvNAK,
-          /* time duration when UDT is sending data (idle time exclusive) */
-          "send-duration-us", G_TYPE_INT64, stats.usSndDuration,
-          /* number of sent data bytes, including retransmissions */
-          "bytes-sent", G_TYPE_UINT64, stats.byteSent,
-          /* number of retransmitted bytes */
-          "bytes-retransmitted", G_TYPE_UINT64, stats.byteRetrans,
-          /* number of too-late-to-send dropped bytes */
-          "bytes-sent-dropped", G_TYPE_UINT64, stats.byteSndDrop,
-          /* number of too-late-to-send dropped packets */
-          "packets-sent-dropped", G_TYPE_INT, stats.pktSndDrop,
-          /* sending rate in Mb/s */
-          "send-rate-mbps", G_TYPE_DOUBLE, stats.mbpsSendRate,
-          /* busy sending time (i.e., idle time exclusive) */
-          "send-duration-us", G_TYPE_UINT64, stats.usSndDuration,
-          "negotiated-latency-ms", G_TYPE_INT, stats.msSndTsbPdDelay, NULL);
-      *bytes += stats.byteSent;
-    } else {
-      gst_structure_set (s,
-          "packets-received", G_TYPE_INT64, stats.pktRecvTotal,
-          "packets-received-lost", G_TYPE_INT, stats.pktRcvLossTotal,
-          /* number of sent ACK packets */
-          "packet-ack-sent", G_TYPE_INT, stats.pktSentACK,
-          /* number of sent NAK packets */
-          "packet-nack-sent", G_TYPE_INT, stats.pktSentNAK,
-          "bytes-received", G_TYPE_UINT64, stats.byteRecvTotal,
-          "bytes-received-lost", G_TYPE_UINT64, stats.byteRcvLossTotal,
-          "receive-rate-mbps", G_TYPE_DOUBLE, stats.mbpsRecvRate,
-          "negotiated-latency-ms", G_TYPE_INT, stats.msRcvTsbPdDelay, NULL);
-      *bytes += stats.byteRecvTotal;
-    }
-
-    gst_structure_set (s,
-        /* estimated bandwidth, in Mb/s */
-        "bandwidth-mbps", G_TYPE_DOUBLE, stats.mbpsBandwidth,
-        "rtt-ms", G_TYPE_DOUBLE, stats.msRTT, NULL);
-
+  if (ret < 0) {
+    GST_WARNING_OBJECT (srtobject->element,
+        "failed to retrieve stats for socket %d (reason %s)",
+        srtsock, srt_getlasterror_str ());
+    return NULL;
   }
 
+  s = gst_structure_new ("application/x-srt-statistics",
+      /* number of sent data packets, including retransmissions */
+      "packets-sent", G_TYPE_INT64, stats.pktSent,
+      /* number of lost packets (sender side) */
+      "packets-sent-lost", G_TYPE_INT, stats.pktSndLoss,
+      /* number of retransmitted packets */
+      "packets-retransmitted", G_TYPE_INT, stats.pktRetrans,
+      /* number of received ACK packets */
+      "packet-ack-received", G_TYPE_INT, stats.pktRecvACK,
+      /* number of received NAK packets */
+      "packet-nack-received", G_TYPE_INT, stats.pktRecvNAK,
+      /* time duration when UDT is sending data (idle time exclusive) */
+      "send-duration-us", G_TYPE_INT64, stats.usSndDuration,
+      /* number of sent data bytes, including retransmissions */
+      "bytes-sent", G_TYPE_UINT64, stats.byteSent,
+      /* number of retransmitted bytes */
+      "bytes-retransmitted", G_TYPE_UINT64, stats.byteRetrans,
+      /* number of too-late-to-send dropped bytes */
+      "bytes-sent-dropped", G_TYPE_UINT64, stats.byteSndDrop,
+      /* number of too-late-to-send dropped packets */
+      "packets-sent-dropped", G_TYPE_INT, stats.pktSndDrop,
+      /* sending rate in Mb/s */
+      "send-rate-mbps", G_TYPE_DOUBLE, stats.mbpsSendRate,
+      /* busy sending time (i.e., idle time exclusive) */
+      "send-duration-us", G_TYPE_UINT64, stats.usSndDuration,
+      "negotiated-latency-ms", G_TYPE_INT, stats.msSndTsbPdDelay,
+      "packets-received", G_TYPE_INT64, stats.pktRecvTotal,
+      "packets-received-lost", G_TYPE_INT, stats.pktRcvLossTotal,
+      /* number of sent ACK packets */
+      "packet-ack-sent", G_TYPE_INT, stats.pktSentACK,
+      /* number of sent NAK packets */
+      "packet-nack-sent", G_TYPE_INT, stats.pktSentNAK,
+      "bytes-received", G_TYPE_UINT64, stats.byteRecvTotal,
+      "bytes-received-lost", G_TYPE_UINT64, stats.byteRcvLossTotal,
+      "receive-rate-mbps", G_TYPE_DOUBLE, stats.mbpsRecvRate,
+      "negotiated-latency-ms", G_TYPE_INT, stats.msRcvTsbPdDelay,
+      /* estimated bandwidth, in Mb/s */
+      "bandwidth-mbps", G_TYPE_DOUBLE, stats.mbpsBandwidth,
+      "rtt-ms", G_TYPE_DOUBLE, stats.msRTT, NULL);
+
+  GST_DEBUG_OBJECT (srtobject->element,
+      "retreived stats for socket %d: %" GST_PTR_FORMAT, srtsock, s);
   return s;
 }
 
@@ -1694,30 +1989,39 @@ gst_srt_object_get_stats (GstSRTObject * srtobject)
 {
   GstStructure *s = NULL;
   gboolean is_sender = GST_IS_BASE_SINK (srtobject->element);
-  guint64 bytes;
 
   g_mutex_lock (&srtobject->sock_lock);
 
-  bytes = srtobject->previous_bytes;
-
   if (srtobject->sock != SRT_INVALID_SOCK) {
-    s = get_stats_for_srtsock (srtobject->sock, is_sender, &bytes);
-    goto done;
+    s = get_stats_for_srtsock (srtobject, srtobject->sock);
   }
 
-  s = gst_structure_new_empty ("application/x-srt-statistics");
+  if (s == NULL) {
+    s = gst_structure_new_empty ("application/x-srt-statistics");
+  }
 
   if (srtobject->callers) {
     GValueArray *callers_stats = g_value_array_new (1);
     GValue callers_stats_v = G_VALUE_INIT;
-    GList *item;
+    GList *item, *next;
 
-    for (item = srtobject->callers; item; item = item->next) {
+    for (item = srtobject->callers, next = NULL; item; item = next) {
       SRTCaller *caller = item->data;
       GstStructure *tmp;
       GValue *v;
 
-      tmp = get_stats_for_srtsock (caller->sock, is_sender, &bytes);
+      next = item->next;
+
+      tmp = get_stats_for_srtsock (srtobject, caller->sock);
+      if (tmp == NULL) {
+        srtobject->callers = g_list_delete_link (srtobject->callers, item);
+        srt_caller_signal_removed (caller, srtobject);
+        srt_caller_free (caller);
+        continue;
+      }
+
+      gst_structure_set (tmp, "caller-address", G_TYPE_SOCKET_ADDRESS,
+          caller->sockaddr, NULL);
 
       g_value_array_append (callers_stats, NULL);
       v = g_value_array_get_nth (callers_stats, callers_stats->n_values - 1);
@@ -1730,24 +2034,10 @@ gst_srt_object_get_stats (GstSRTObject * srtobject)
     gst_structure_take_value (s, "callers", &callers_stats_v);
   }
 
-done:
   gst_structure_set (s, is_sender ? "bytes-sent-total" : "bytes-received-total",
-      G_TYPE_UINT64, bytes, NULL);
+      G_TYPE_UINT64, srtobject->bytes, NULL);
 
   g_mutex_unlock (&srtobject->sock_lock);
 
   return s;
-}
-
-static GstStructure *
-gst_srt_object_accumulate_stats (GstSRTObject * srtobject, SRTSOCKET srtsock)
-{
-  gboolean is_sender = GST_IS_BASE_SINK (srtobject->element);
-  GstStructure *stats;
-  guint64 bytes = 0;
-
-  stats = get_stats_for_srtsock (srtsock, is_sender, &bytes);
-  srtobject->previous_bytes += bytes;
-
-  return stats;
 }

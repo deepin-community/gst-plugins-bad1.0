@@ -36,6 +36,49 @@ G_BEGIN_DECLS
 #define GST_IS_H264_DECODER_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_H264_DECODER))
 #define GST_H264_DECODER_CAST(obj)       ((GstH264Decoder*)obj)
 
+/**
+ * GstH264DecoderCompliance:
+ * @GST_H264_DECODER_COMPLIANCE_AUTO: The decoder behavior is
+ *     automatically choosen.
+ * @GST_H264_DECODER_COMPLIANCE_STRICT: The decoder behavior strictly
+ *     conforms to the SPEC. All the decoder behaviors conform to the
+ *     SPEC, not including any nonstandard behavior which is not
+ *     mentioned in the SPEC.
+ * @GST_H264_DECODER_COMPLIANCE_NORMAL: The decoder behavior normally
+ *     conforms to the SPEC. Most behaviors conform to the SPEC but
+ *     including some nonstandard features which are widely used or
+ *     often used in the industry practice. This meets the request of
+ *     real streams and usages, but may not 100% conform to the
+ *     SPEC. It has very low risk. E.g., we will output pictures
+ *     without waiting DPB being full for the lower latency, which may
+ *     cause B frame disorder when there are reference frames with
+ *     smaller POC after it in decoder order. And the baseline profile
+ *     may be mapped to the constrained-baseline profile, but it may
+ *     have problems when a real baseline stream comes with FMO or
+ *     ASO.
+ * @GST_H264_DECODER_COMPLIANCE_FLEXIBLE: The decoder behavior
+ *     flexibly conforms to the SPEC. It uses the nonstandard features
+ *     more aggressively in order to get better performance(for
+ *     example, lower latency). It may change the result of the
+ *     decoder and should be used carefully. Besides including all
+ *     risks in *normal* mode, it has more risks, such as frames
+ *     disorder when reference frames POC decrease in decoder order.
+ *
+ * Since: 1.20
+ */
+typedef enum
+{
+  GST_H264_DECODER_COMPLIANCE_AUTO,
+  GST_H264_DECODER_COMPLIANCE_STRICT,
+  GST_H264_DECODER_COMPLIANCE_NORMAL,
+  GST_H264_DECODER_COMPLIANCE_FLEXIBLE
+} GstH264DecoderCompliance;
+
+#define GST_TYPE_H264_DECODER_COMPLIANCE (gst_h264_decoder_compliance_get_type())
+
+GST_CODECS_API
+GType gst_h264_decoder_compliance_get_type (void);
+
 typedef struct _GstH264Decoder GstH264Decoder;
 typedef struct _GstH264DecoderClass GstH264DecoderClass;
 typedef struct _GstH264DecoderPrivate GstH264DecoderPrivate;
@@ -60,69 +103,136 @@ struct _GstH264Decoder
 
 /**
  * GstH264DecoderClass:
- * @new_sequence:   Notifies subclass of SPS update
- * @new_picture:    Optional.
- *                  Called whenever new #GstH264Picture is created.
- *                  Subclass can set implementation specific user data
- *                  on the #GstH264Picture via gst_h264_picture_set_user_data()
- * @start_picture:  Optional.
- *                  Called per one #GstH264Picture to notify subclass to prepare
- *                  decoding process for the #GstH264Picture
- * @decode_slice:   Provides per slice data with parsed slice header and
- *                  required raw bitstream for subclass to decode it.
- *                  if gst_h264_decoder_set_process_ref_pic_lists() is called
- *                  with %TRUE by the subclass, @ref_pic_list0 and @ref_pic_list1
- *                  are non-%NULL.
- * @end_picture:    Optional.
- *                  Called per one #GstH264Picture to notify subclass to finish
- *                  decoding process for the #GstH264Picture
- * @output_picture: Called with a #GstH264Picture which is required to be outputted.
- *                  Subclass can retrieve parent #GstVideoCodecFrame by using
- *                  gst_video_decoder_get_frame() with system_frame_number
- *                  and the #GstVideoCodecFrame must be consumed by subclass via
- *                  gst_video_decoder_{finish,drop,release}_frame().
+ *
+ * The opaque #GstH264DecoderClass data structure.
  */
 struct _GstH264DecoderClass
 {
+  /*< private >*/
   GstVideoDecoderClass parent_class;
 
-  gboolean      (*new_sequence)     (GstH264Decoder * decoder,
+  /**
+   * GstH264DecoderClass::new_sequence:
+   * @decoder: a #GstH264Decoder
+   * @sps: a #GstH264SPS
+   * @max_dpb_size: the size of dpb including preferred output delay
+   *   by subclass reported via get_preferred_output_delay method.
+   *
+   * Notifies subclass of SPS update
+   */
+  GstFlowReturn (*new_sequence)     (GstH264Decoder * decoder,
                                      const GstH264SPS * sps,
                                      gint max_dpb_size);
 
   /**
-   * GstH264Decoder:new_picture:
+   * GstH264DecoderClass::new_picture:
    * @decoder: a #GstH264Decoder
    * @frame: (transfer none): a #GstVideoCodecFrame
    * @picture: (transfer none): a #GstH264Picture
+   *
+   * Optional. Called whenever new #GstH264Picture is created.
+   * Subclass can set implementation specific user data
+   * on the #GstH264Picture via gst_h264_picture_set_user_data()
    */
-  gboolean      (*new_picture)      (GstH264Decoder * decoder,
+  GstFlowReturn (*new_picture)      (GstH264Decoder * decoder,
                                      GstVideoCodecFrame * frame,
                                      GstH264Picture * picture);
 
-  gboolean      (*start_picture)    (GstH264Decoder * decoder,
+  /**
+   * GstH264DecoderClass::new_field_picture:
+   * @decoder: a #GstH264Decoder
+   * @first_field: (transfer none): the first field #GstH264Picture already decoded
+   * @second_field: (transfer none): a #GstH264Picture for the second field
+   *
+   * Called when a new field picture is created for interlaced field picture.
+   * Subclass can attach implementation specific user data on @second_field via
+   * gst_h264_picture_set_user_data()
+   *
+   * Since: 1.20
+   */
+  GstFlowReturn (*new_field_picture)  (GstH264Decoder * decoder,
+                                       GstH264Picture * first_field,
+                                       GstH264Picture * second_field);
+
+  /**
+   * GstH264DecoderClass::start_picture:
+   * @decoder: a #GstH264Decoder
+   * @picture: (transfer none): a #GstH264Picture
+   * @slice: (transfer none): a #GstH264Slice
+   * @dpb: (transfer none): a #GstH264Dpb
+   *
+   * Optional. Called per one #GstH264Picture to notify subclass to prepare
+   * decoding process for the #GstH264Picture
+   */
+  GstFlowReturn (*start_picture)    (GstH264Decoder * decoder,
                                      GstH264Picture * picture,
                                      GstH264Slice * slice,
                                      GstH264Dpb * dpb);
 
-  gboolean      (*decode_slice)     (GstH264Decoder * decoder,
+  /**
+   * GstH264DecoderClass::decode_slice:
+   * @decoder: a #GstH264Decoder
+   * @picture: (transfer none): a #GstH264Picture
+   * @slice: (transfer none): a #GstH264Slice
+   * @ref_pic_list0: (element-type GstH264Picture) (transfer none):
+   *    an array of #GstH264Picture pointers
+   * @ref_pic_list1: (element-type GstH264Picture) (transfer none):
+   *    an array of #GstH264Picture pointers
+   *
+   * Provides per slice data with parsed slice header and required raw bitstream
+   * for subclass to decode it. If gst_h264_decoder_set_process_ref_pic_lists()
+   * is called with %TRUE by the subclass, @ref_pic_list0 and @ref_pic_list1
+   * are non-%NULL.
+   * In case of interlaced stream, @ref_pic_list0 and @ref_pic_list1 will
+   * contain only the first field of complementary reference field pair
+   * if currently being decoded picture is a frame picture. Subclasses might
+   * need to retrive the other field (i.e., the second field) of the picture
+   * if needed.
+   */
+  GstFlowReturn (*decode_slice)     (GstH264Decoder * decoder,
                                      GstH264Picture * picture,
                                      GstH264Slice * slice,
                                      GArray * ref_pic_list0,
                                      GArray * ref_pic_list1);
 
-  gboolean      (*end_picture)      (GstH264Decoder * decoder,
+  /**
+   * GstH264DecoderClass::end_picture:
+   * @decoder: a #GstH264Decoder
+   * @picture: (transfer none): a #GstH264Picture
+   *
+   * Optional. Called per one #GstH264Picture to notify subclass to finish
+   * decoding process for the #GstH264Picture
+   */
+  GstFlowReturn (*end_picture)      (GstH264Decoder * decoder,
                                      GstH264Picture * picture);
 
   /**
-   * GstH264Decoder:output_picture:
+   * GstH264DecoderClass::output_picture:
    * @decoder: a #GstH264Decoder
    * @frame: (transfer full): a #GstVideoCodecFrame
    * @picture: (transfer full): a #GstH264Picture
+   *
+   * Called with a #GstH264Picture which is required to be outputted.
+   * The #GstVideoCodecFrame must be consumed by subclass.
    */
   GstFlowReturn (*output_picture)   (GstH264Decoder * decoder,
                                      GstVideoCodecFrame * frame,
                                      GstH264Picture * picture);
+
+  /**
+   * GstH264DecoderClass::get_preferred_output_delay:
+   * @decoder: a #GstH264Decoder
+   * @live: whether upstream is live or not
+   *
+   * Optional. Called by baseclass to query whether delaying output is
+   * preferred by subclass or not.
+   *
+   * Returns: the number of perferred delayed output frame
+   *
+   * Since: 1.20
+   */
+  guint (*get_preferred_output_delay)   (GstH264Decoder * decoder,
+                                         gboolean live);
 
   /*< private >*/
   gpointer padding[GST_PADDING_LARGE];
