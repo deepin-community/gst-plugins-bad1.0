@@ -22,6 +22,8 @@
 #endif
 
 #include "WPEThreadedView.h"
+#include "gstwpe.h"
+#include "gstwpesrcbin.h"
 
 #include <gst/gl/gl.h>
 #include <gst/gl/egl/gsteglimage.h>
@@ -31,20 +33,10 @@
 #include <cstdio>
 #include <mutex>
 
-#if ENABLE_SHM_BUFFER_SUPPORT
 #include <wpe/unstable/fdo-shm.h>
-#endif
 
-GST_DEBUG_CATEGORY_EXTERN (wpe_src_debug);
-#define GST_CAT_DEFAULT wpe_src_debug
-
-#if defined(WPE_FDO_CHECK_VERSION) && WPE_FDO_CHECK_VERSION(1, 3, 0)
-#define USE_DEPRECATED_FDO_EGL_IMAGE 0
-#define WPE_GLIB_SOURCE_PRIORITY G_PRIORITY_DEFAULT
-#else
-#define USE_DEPRECATED_FDO_EGL_IMAGE 1
-#define WPE_GLIB_SOURCE_PRIORITY -70
-#endif
+GST_DEBUG_CATEGORY_EXTERN (wpe_view_debug);
+#define GST_CAT_DEFAULT wpe_view_debug
 
 class GMutexHolder {
 public:
@@ -85,7 +77,9 @@ WPEContextThread::WPEContextThread()
     {
         GMutexHolder lock(threading.mutex);
         threading.thread = g_thread_new("WPEContextThread", s_viewThread, this);
-        g_cond_wait(&threading.cond, &threading.mutex);
+        while (!threading.ready) {
+            g_cond_wait(&threading.cond, &threading.mutex);
+        }
         GST_DEBUG("thread spawned");
     }
 }
@@ -104,30 +98,49 @@ WPEContextThread::~WPEContextThread()
 template<typename Function>
 void WPEContextThread::dispatch(Function func)
 {
-    struct Payload {
-        Function& func;
-    };
-    struct Payload payload { func };
+    struct Job {
+        Job(Function& f)
+            : func(f)
+        {
+            g_mutex_init(&mutex);
+            g_cond_init(&cond);
+            dispatched = FALSE;
+        }
+        ~Job() {
+            g_mutex_clear(&mutex);
+            g_cond_clear(&cond);
+        }
 
+        void dispatch() {
+            GMutexHolder lock(mutex);
+            func();
+            dispatched = TRUE;
+            g_cond_signal(&cond);
+        }
+
+        void waitCompletion() {
+            GMutexHolder lock(mutex);
+            while(!dispatched) {
+                g_cond_wait(&cond, &mutex);
+            }
+        }
+
+        Function& func;
+        GMutex mutex;
+        GCond cond;
+        gboolean dispatched;
+    };
+
+    struct Job job(func);
     GSource* source = g_idle_source_new();
     g_source_set_callback(source, [](gpointer data) -> gboolean {
-        auto& view = WPEContextThread::singleton();
-        GMutexHolder lock(view.threading.mutex);
-
-        auto* payload = static_cast<struct Payload*>(data);
-        payload->func();
-
-        g_cond_signal(&view.threading.cond);
+        auto* job = static_cast<struct Job*>(data);
+        job->dispatch();
         return G_SOURCE_REMOVE;
-    }, &payload, nullptr);
-    g_source_set_priority(source, WPE_GLIB_SOURCE_PRIORITY);
-
-    {
-        GMutexHolder lock(threading.mutex);
-        g_source_attach(source, glib.context);
-        g_cond_wait(&threading.cond, &threading.mutex);
-    }
-
+    }, &job, nullptr);
+    g_source_set_priority(source, G_PRIORITY_DEFAULT);
+    g_source_attach(source, glib.context);
+    job.waitCompletion();
     g_source_unref(source);
 }
 
@@ -146,6 +159,7 @@ gpointer WPEContextThread::s_viewThread(gpointer data)
             [](gpointer data) -> gboolean {
                 auto& view = *static_cast<WPEContextThread*>(data);
                 GMutexHolder lock(view.threading.mutex);
+                view.threading.ready = TRUE;
                 g_cond_signal(&view.threading.cond);
                 return G_SOURCE_REMOVE;
             },
@@ -165,26 +179,180 @@ gpointer WPEContextThread::s_viewThread(gpointer data)
     return nullptr;
 }
 
-WPEView* WPEContextThread::createWPEView(GstWpeSrc* src, GstGLContext* context, GstGLDisplay* display, int width, int height)
+#ifdef G_OS_UNIX
+static void
+initialize_web_extensions (WebKitWebContext *context)
+{
+    const gchar *local_path = gst_wpe_get_devenv_extension_path ();
+    const gchar *path = g_file_test (local_path, G_FILE_TEST_IS_DIR) ? local_path : G_STRINGIFY (WPE_EXTENSION_INSTALL_DIR);
+    GST_INFO ("Loading WebExtension from %s", path);
+    webkit_web_context_set_web_extensions_directory (context, path);
+}
+
+static void
+webkit_extension_gerror_msg_received (GstWpeSrc *src, GVariant *params)
+{
+    GstStructure *structure;
+    GstMessage *forwarded;
+    const gchar *src_path, *src_type, *src_name, *error_domain, *msg, *debug_str, *details_str;
+    gint message_type;
+    guint32 error_code;
+
+    g_variant_get (params, "(issssusss)",
+       &message_type,
+       &src_type,
+       &src_name,
+       &src_path,
+       &error_domain,
+       &error_code,
+       &msg,
+       &debug_str,
+       &details_str
+    );
+
+    GError *error = g_error_new(g_quark_from_string(error_domain), error_code, "%s", msg);
+    GstStructure *details = (details_str[0] != '\0') ? gst_structure_new_from_string(details_str) : NULL;
+    gchar * our_message = g_strdup_printf(
+        "`%s` posted from %s running inside the web page",
+        debug_str, src_path
+    );
+
+
+    if (message_type == GST_MESSAGE_ERROR) {
+        forwarded =
+            gst_message_new_error_with_details(GST_OBJECT(src), error,
+                                               our_message, details);
+    } else if (message_type == GST_MESSAGE_WARNING) {
+        forwarded =
+            gst_message_new_warning_with_details(GST_OBJECT(src), error,
+                                                 our_message, details);
+    } else {
+        forwarded =
+            gst_message_new_info_with_details(GST_OBJECT(src), error, our_message, details);
+    }
+
+    structure = gst_structure_new ("WpeForwarded",
+        "message", GST_TYPE_MESSAGE, forwarded,
+        "wpe-original-src-name", G_TYPE_STRING, src_name,
+        "wpe-original-src-type", G_TYPE_STRING, src_type,
+        "wpe-original-src-path", G_TYPE_STRING, src_path,
+        NULL
+    );
+
+    g_free (our_message);
+    gst_element_post_message(GST_ELEMENT(src), gst_message_new_custom(GST_MESSAGE_ELEMENT,
+                                                                      GST_OBJECT(src), structure));
+    g_error_free(error);
+    gst_message_unref (forwarded);
+}
+
+static void
+webkit_extension_bus_message_received (GstWpeSrc *src, GVariant *params)
+{
+    GstStructure *original_structure, *structure;
+    const gchar *src_name, *src_type, *src_path, *struct_str;
+    GstMessageType message_type;
+    GstMessage *forwarded;
+
+    g_variant_get (params, "(issss)",
+       &message_type,
+       &src_name,
+       &src_type,
+       &src_path,
+       &struct_str
+    );
+
+    original_structure = (struct_str[0] != '\0') ? gst_structure_new_from_string(struct_str) : NULL;
+    if (!original_structure)
+    {
+        if (struct_str[0] != '\0')
+            GST_ERROR_OBJECT(src, "Could not deserialize: %s", struct_str);
+        original_structure = gst_structure_new_empty("wpesrc");
+
+    }
+
+    forwarded = gst_message_new_custom(message_type,
+        GST_OBJECT (src), original_structure);
+    structure = gst_structure_new ("WpeForwarded",
+        "message", GST_TYPE_MESSAGE, forwarded,
+        "wpe-original-src-name", G_TYPE_STRING, src_name,
+        "wpe-original-src-type", G_TYPE_STRING, src_type,
+        "wpe-original-src-path", G_TYPE_STRING, src_path,
+        NULL
+    );
+
+    gst_element_post_message(GST_ELEMENT(src), gst_message_new_custom(GST_MESSAGE_ELEMENT,
+                                                                      GST_OBJECT(src), structure));
+
+    gst_message_unref (forwarded);
+}
+
+static gboolean
+webkit_extension_msg_received (WebKitWebContext  *context,
+               WebKitUserMessage *message,
+               GstWpeSrc           *src)
+{
+    const gchar *name = webkit_user_message_get_name (message);
+    GVariant *params = webkit_user_message_get_parameters (message);
+    gboolean res = TRUE;
+
+    GST_TRACE_OBJECT(src, "Handling message %s", name);
+    if (!g_strcmp0(name, "gstwpe.new_stream")) {
+        guint32 id = g_variant_get_uint32 (g_variant_get_child_value (params, 0));
+        const gchar *capsstr = g_variant_get_string (g_variant_get_child_value (params, 1), NULL);
+        GstCaps *caps = gst_caps_from_string (capsstr);
+        const gchar *stream_id = g_variant_get_string (g_variant_get_child_value (params, 2), NULL);
+        gst_wpe_src_new_audio_stream(src, id, caps, stream_id);
+        gst_caps_unref (caps);
+    } else if (!g_strcmp0(name, "gstwpe.set_shm")) {
+        auto fdlist = webkit_user_message_get_fd_list (message);
+        gint id = g_variant_get_uint32 (g_variant_get_child_value (params, 0));
+        gst_wpe_src_set_audio_shm (src, fdlist, id);
+    } else if (!g_strcmp0(name, "gstwpe.new_buffer")) {
+        guint32 id = g_variant_get_uint32 (g_variant_get_child_value (params, 0));
+        guint64 size = g_variant_get_uint64 (g_variant_get_child_value (params, 1));
+        gst_wpe_src_push_audio_buffer (src, id, size);
+
+        webkit_user_message_send_reply(message, webkit_user_message_new ("gstwpe.buffer_processed", NULL));
+    } else if (!g_strcmp0(name, "gstwpe.pause")) {
+        guint32 id = g_variant_get_uint32 (params);
+
+        gst_wpe_src_pause_audio_stream (src, id);
+    } else if (!g_strcmp0(name, "gstwpe.stop")) {
+        guint32 id = g_variant_get_uint32 (params);
+
+        gst_wpe_src_stop_audio_stream (src, id);
+    } else if (!g_strcmp0(name, "gstwpe.bus_gerror_message")) {
+        webkit_extension_gerror_msg_received (src, params);
+    } else if (!g_strcmp0(name, "gstwpe.bus_message")) {
+        webkit_extension_bus_message_received (src, params);
+    } else {
+        res = FALSE;
+        g_error("Unknown event: %s", name);
+    }
+
+    return res;
+}
+#endif
+
+WPEView* WPEContextThread::createWPEView(GstWpeVideoSrc* src, GstGLContext* context, GstGLDisplay* display, int width, int height)
 {
     GST_DEBUG("context %p display %p, size (%d,%d)", context, display, width, height);
 
     static std::once_flag s_loaderFlag;
     std::call_once(s_loaderFlag,
         [] {
-#if defined(WPE_BACKEND_CHECK_VERSION) && WPE_BACKEND_CHECK_VERSION(1, 2, 0)
             wpe_loader_init("libWPEBackend-fdo-1.0.so");
-#endif
         });
 
     WPEView* view = nullptr;
     dispatch([&]() mutable {
         if (!glib.web_context) {
-            auto* manager = webkit_website_data_manager_new_ephemeral();
-            glib.web_context = webkit_web_context_new_with_website_data_manager(manager);
+            auto *manager = webkit_website_data_manager_new_ephemeral();
+            glib.web_context =
+                webkit_web_context_new_with_website_data_manager(manager);
             g_object_unref(manager);
         }
-
         view = new WPEView(glib.web_context, src, context, display, width, height);
     });
 
@@ -199,7 +367,14 @@ WPEView* WPEContextThread::createWPEView(GstWpeSrc* src, GstGLContext* context, 
 
 static gboolean s_loadFailed(WebKitWebView*, WebKitLoadEvent, gchar* failing_uri, GError* error, gpointer data)
 {
-    GstWpeSrc* src = GST_WPE_SRC(data);
+    GstWpeVideoSrc* src = GST_WPE_VIDEO_SRC(data);
+
+    if (g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED)) {
+        GST_INFO_OBJECT (src, "Loading cancelled.");
+
+        return FALSE;
+    }
+
     GST_ELEMENT_ERROR (GST_ELEMENT_CAST(src), RESOURCE, FAILED, (NULL), ("Failed to load %s (%s)", failing_uri, error->message));
     return FALSE;
 }
@@ -210,8 +385,42 @@ static gboolean s_loadFailedWithTLSErrors(WebKitWebView*,  gchar* failing_uri, G
     return FALSE;
 }
 
-WPEView::WPEView(WebKitWebContext* web_context, GstWpeSrc* src, GstGLContext* context, GstGLDisplay* display, int width, int height)
+static void s_loadProgressChaned(GObject* object, GParamSpec*, gpointer data)
 {
+    GstElement* src = GST_ELEMENT_CAST (data);
+    // The src element is locked already so we can't call
+    // gst_element_post_message(). Instead retrieve the bus manually and use it
+    // directly.
+    GstBus* bus = GST_ELEMENT_BUS (src);
+    double estimatedProgress;
+    g_object_get(object, "estimated-load-progress", &estimatedProgress, nullptr);
+    gst_object_ref (bus);
+    gst_bus_post (bus, gst_message_new_element(GST_OBJECT_CAST(src), gst_structure_new("wpe-stats", "estimated-load-progress", G_TYPE_DOUBLE, estimatedProgress * 100, nullptr)));
+    gst_object_unref (bus);
+}
+
+WPEView::WPEView(WebKitWebContext* web_context, GstWpeVideoSrc* src, GstGLContext* context, GstGLDisplay* display, int width, int height)
+{
+#ifdef G_OS_UNIX
+{
+        GstObject *parent = gst_object_get_parent (GST_OBJECT (src));
+
+        if (parent && GST_IS_WPE_SRC (parent)) {
+            audio.init_ext_sigid = g_signal_connect (web_context,
+                              "initialize-web-extensions",
+                              G_CALLBACK (initialize_web_extensions),
+                              NULL);
+            audio.extension_msg_sigid = g_signal_connect (web_context,
+                                "user-message-received",
+                                G_CALLBACK (webkit_extension_msg_received),
+                                parent);
+            GST_INFO_OBJECT (parent, "Enabled audio");
+        }
+
+        gst_clear_object (&parent);
+}
+#endif // G_OS_UNIX
+
     g_mutex_init(&threading.ready_mutex);
     g_cond_init(&threading.ready_cond);
     threading.ready = FALSE;
@@ -219,62 +428,76 @@ WPEView::WPEView(WebKitWebContext* web_context, GstWpeSrc* src, GstGLContext* co
     g_mutex_init(&images_mutex);
     if (context)
         gst.context = GST_GL_CONTEXT(gst_object_ref(context));
-    if (display)
+    if (display) {
         gst.display = GST_GL_DISPLAY(gst_object_ref(display));
+    }
 
     wpe.width = width;
     wpe.height = height;
 
-    EGLDisplay eglDisplay = EGL_NO_DISPLAY;
-    if (context && display)
-        eglDisplay = gst_gl_display_egl_get_from_native(GST_GL_DISPLAY_TYPE_WAYLAND, gst_gl_display_get_handle(display));
-    GST_DEBUG("eglDisplay %p", eglDisplay);
+    if (context && display) {
+      if (gst_gl_context_get_gl_platform(context) == GST_GL_PLATFORM_EGL) {
+        gst.display_egl = gst_gl_display_egl_from_gl_display (gst.display);
+      } else {
+        GST_DEBUG ("Available GStreamer GL Context is not EGL - not creating an EGL display from it");
+      }
+    }
 
-    if (eglDisplay) {
+    if (gst.display_egl) {
+        EGLDisplay eglDisplay = (EGLDisplay)gst_gl_display_get_handle (GST_GL_DISPLAY(gst.display_egl));
+        GST_DEBUG("eglDisplay %p", eglDisplay);
+
         m_isValid = wpe_fdo_initialize_for_egl_display(eglDisplay);
         GST_DEBUG("FDO EGL display initialisation result: %d", m_isValid);
     } else {
-#if ENABLE_SHM_BUFFER_SUPPORT
         m_isValid = wpe_fdo_initialize_shm();
         GST_DEBUG("FDO SHM initialisation result: %d", m_isValid);
-#else
-        GST_WARNING("FDO SHM support is available only in WPEBackend-FDO 1.7.0");
-#endif
     }
     if (!m_isValid)
         return;
 
-    if (eglDisplay) {
+    if (gst.display_egl) {
         wpe.exportable = wpe_view_backend_exportable_fdo_egl_create(&s_exportableEGLClient, this, wpe.width, wpe.height);
     } else {
-#if ENABLE_SHM_BUFFER_SUPPORT
         wpe.exportable = wpe_view_backend_exportable_fdo_create(&s_exportableClient, this, wpe.width, wpe.height);
-#endif
     }
 
     auto* wpeViewBackend = wpe_view_backend_exportable_fdo_get_view_backend(wpe.exportable);
     auto* viewBackend = webkit_web_view_backend_new(wpeViewBackend, (GDestroyNotify) wpe_view_backend_exportable_fdo_destroy, wpe.exportable);
-#if defined(WPE_BACKEND_CHECK_VERSION) && WPE_BACKEND_CHECK_VERSION(1, 1, 0)
     wpe_view_backend_add_activity_state(wpeViewBackend, wpe_view_activity_state_visible | wpe_view_activity_state_focused | wpe_view_activity_state_in_window);
-#endif
 
-    webkit.view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW, "web-context", web_context, "backend", viewBackend, nullptr));
+    webkit.view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
+        "web-context", web_context,
+        "backend", viewBackend,
+        nullptr));
 
     g_signal_connect(webkit.view, "load-failed", G_CALLBACK(s_loadFailed), src);
     g_signal_connect(webkit.view, "load-failed-with-tls-errors", G_CALLBACK(s_loadFailedWithTLSErrors), src);
+    g_signal_connect(webkit.view, "notify::estimated-load-progress", G_CALLBACK(s_loadProgressChaned), src);
 
-    gst_wpe_src_configure_web_view(src, webkit.view);
+    auto* settings = webkit_web_view_get_settings(webkit.view);
+    webkit_settings_set_enable_webaudio(settings, TRUE);
 
-    const gchar* location;
+    gst_wpe_video_src_configure_web_view(src, webkit.view);
+
+    gchar* location;
     gboolean drawBackground = TRUE;
     g_object_get(src, "location", &location, "draw-background", &drawBackground, nullptr);
     setDrawBackground(drawBackground);
-    if (location)
+    if (location) {
         loadUriUnlocked(location);
+        g_free(location);
+    }
 }
 
 WPEView::~WPEView()
 {
+    GstEGLImage *egl_pending = NULL;
+    GstEGLImage *egl_committed = NULL;
+    GstBuffer *shm_pending = NULL;
+    GstBuffer *shm_committed = NULL;
+    GST_TRACE ("%p destroying", this);
+
     g_mutex_clear(&threading.ready_mutex);
     g_cond_clear(&threading.ready_cond);
 
@@ -282,21 +505,41 @@ WPEView::~WPEView()
         GMutexHolder lock(images_mutex);
 
         if (egl.pending) {
-            gst_egl_image_unref(egl.pending);
+            egl_pending = egl.pending;
             egl.pending = nullptr;
         }
         if (egl.committed) {
-            gst_egl_image_unref(egl.committed);
+            egl_committed = egl.committed;
             egl.committed = nullptr;
         }
         if (shm.pending) {
-            gst_buffer_unref(shm.pending);
+            GST_TRACE ("%p freeing shm pending %" GST_PTR_FORMAT, this, shm.pending);
+            shm_pending = shm.pending;
             shm.pending = nullptr;
         }
         if (shm.committed) {
-            gst_buffer_unref(shm.committed);
+            GST_TRACE ("%p freeing shm commited %" GST_PTR_FORMAT, this, shm.committed);
+            shm_committed = shm.committed;
             shm.committed = nullptr;
         }
+    }
+
+    if (egl_pending)
+        gst_egl_image_unref (egl_pending);
+    if (egl_committed)
+        gst_egl_image_unref (egl_committed);
+    if (shm_pending)
+        gst_buffer_unref (shm_pending);
+    if (shm_committed)
+        gst_buffer_unref (shm_committed);
+
+    if (audio.init_ext_sigid) {
+        WebKitWebContext* web_context = webkit_web_view_get_context (webkit.view);
+
+        g_signal_handler_disconnect(web_context, audio.init_ext_sigid);
+        g_signal_handler_disconnect(web_context, audio.extension_msg_sigid);
+        audio.init_ext_sigid = 0;
+        audio.extension_msg_sigid = 0;
     }
 
     WPEContextThread::singleton().dispatch([&]() {
@@ -305,6 +548,11 @@ WPEView::~WPEView()
             webkit.view = nullptr;
         }
     });
+
+    if (gst.display_egl) {
+        gst_object_unref(gst.display_egl);
+        gst.display_egl = nullptr;
+    }
 
     if (gst.display) {
         gst_object_unref(gst.display);
@@ -321,6 +569,7 @@ WPEView::~WPEView()
     }
 
     g_mutex_clear(&images_mutex);
+    GST_TRACE ("%p destroyed", this);
 }
 
 void WPEView::notifyLoadFinished()
@@ -343,6 +592,7 @@ GstEGLImage* WPEView::image()
 {
     GstEGLImage* ret = nullptr;
     bool dispatchFrameComplete = false;
+    GstEGLImage *prev_image = NULL;
 
     {
         GMutexHolder lock(images_mutex);
@@ -353,18 +603,19 @@ GstEGLImage* WPEView::image()
                   GST_IS_EGL_IMAGE(egl.committed) ? GST_MINI_OBJECT_REFCOUNT_VALUE(GST_MINI_OBJECT_CAST(egl.committed)) : 0);
 
         if (egl.pending) {
-            auto* previousImage = egl.committed;
+            prev_image = egl.committed;
             egl.committed = egl.pending;
             egl.pending = nullptr;
 
-            if (previousImage)
-                gst_egl_image_unref(previousImage);
             dispatchFrameComplete = true;
         }
 
         if (egl.committed)
             ret = egl.committed;
     }
+
+    if (prev_image)
+        gst_egl_image_unref(prev_image);
 
     if (dispatchFrameComplete)
         frameComplete();
@@ -376,6 +627,7 @@ GstBuffer* WPEView::buffer()
 {
     GstBuffer* ret = nullptr;
     bool dispatchFrameComplete = false;
+    GstBuffer *prev_image = NULL;
 
     {
         GMutexHolder lock(images_mutex);
@@ -386,18 +638,19 @@ GstBuffer* WPEView::buffer()
                   GST_IS_BUFFER(shm.committed) ? GST_MINI_OBJECT_REFCOUNT_VALUE(GST_MINI_OBJECT_CAST(shm.committed)) : 0);
 
         if (shm.pending) {
-            auto* previousImage = shm.committed;
+            prev_image = shm.committed;
             shm.committed = shm.pending;
             shm.pending = nullptr;
 
-            if (previousImage)
-                gst_buffer_unref(previousImage);
             dispatchFrameComplete = true;
         }
 
         if (shm.committed)
             ret = shm.committed;
     }
+
+    if (prev_image)
+        gst_buffer_unref(prev_image);
 
     if (dispatchFrameComplete)
         frameComplete();
@@ -443,6 +696,27 @@ void WPEView::loadUri(const gchar* uri)
     });
 }
 
+static void s_runJavascriptFinished(GObject* object, GAsyncResult* result, gpointer user_data)
+{
+    WebKitJavascriptResult* js_result;
+    GError* error = NULL;
+
+    js_result = webkit_web_view_run_javascript_finish(WEBKIT_WEB_VIEW(object), result, &error);
+    if (!js_result) {
+        GST_WARNING("Error running javascript: %s", error->message);
+        g_error_free(error);
+        return;
+    }
+    webkit_javascript_result_unref(js_result);
+}
+
+void WPEView::runJavascript(const char* script)
+{
+    s_view->dispatch([&]() {
+        webkit_web_view_run_javascript(webkit.view, script, nullptr, s_runJavascriptFinished, nullptr);
+    });
+}
+
 void WPEView::loadData(GBytes* bytes)
 {
     s_view->dispatch([this, bytes = g_bytes_ref(bytes)]() {
@@ -463,13 +737,8 @@ void WPEView::releaseImage(gpointer imagePointer)
 {
     s_view->dispatch([&]() {
         GST_TRACE("Dispatch release exported image %p", imagePointer);
-#if USE_DEPRECATED_FDO_EGL_IMAGE
-        wpe_view_backend_exportable_fdo_egl_dispatch_release_image(wpe.exportable,
-                                                                   static_cast<EGLImageKHR>(imagePointer));
-#else
         wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(wpe.exportable,
                                                                             static_cast<struct wpe_fdo_egl_exported_image*>(imagePointer));
-#endif
     });
 }
 
@@ -483,25 +752,20 @@ void WPEView::handleExportedImage(gpointer image)
     ImageContext* imageContext = g_slice_new(ImageContext);
     imageContext->view = this;
     imageContext->image = static_cast<gpointer>(image);
-    EGLImageKHR eglImage;
-#if USE_DEPRECATED_FDO_EGL_IMAGE
-    eglImage = static_cast<EGLImageKHR>(image);
-#else
-    eglImage = wpe_fdo_egl_exported_image_get_egl_image(static_cast<struct wpe_fdo_egl_exported_image*>(image));
-#endif
+    EGLImageKHR eglImage = wpe_fdo_egl_exported_image_get_egl_image(static_cast<struct wpe_fdo_egl_exported_image*>(image));
 
     auto* gstImage = gst_egl_image_new_wrapped(gst.context, eglImage, GST_GL_RGBA, imageContext, s_releaseImage);
     {
       GMutexHolder lock(images_mutex);
 
       GST_TRACE("EGLImage %p wrapped in GstEGLImage %" GST_PTR_FORMAT, eglImage, gstImage);
+      gst_clear_mini_object ((GstMiniObject **) &egl.pending);
       egl.pending = gstImage;
 
       notifyLoadFinished();
     }
 }
 
-#if ENABLE_SHM_BUFFER_SUPPORT
 struct SHMBufferContext {
     WPEView* view;
     struct wpe_fdo_shm_exported_buffer* buffer;
@@ -553,21 +817,13 @@ void WPEView::handleExportedBuffer(struct wpe_fdo_shm_exported_buffer* buffer)
     {
         GMutexHolder lock(images_mutex);
         GST_TRACE("SHM buffer %p wrapped in buffer %" GST_PTR_FORMAT, buffer, gstBuffer);
+        gst_clear_buffer (&shm.pending);
         shm.pending = gstBuffer;
         notifyLoadFinished();
     }
 }
-#endif
 
 struct wpe_view_backend_exportable_fdo_egl_client WPEView::s_exportableEGLClient = {
-#if USE_DEPRECATED_FDO_EGL_IMAGE
-    // export_egl_image
-    [](void* data, EGLImageKHR image) {
-        auto& view = *static_cast<WPEView*>(data);
-        view.handleExportedImage(static_cast<gpointer>(image));
-    },
-    nullptr, nullptr,
-#else
     // export_egl_image
     nullptr,
     [](void* data, struct wpe_fdo_egl_exported_image* image) {
@@ -575,12 +831,10 @@ struct wpe_view_backend_exportable_fdo_egl_client WPEView::s_exportableEGLClient
         view.handleExportedImage(static_cast<gpointer>(image));
     },
     nullptr,
-#endif // USE_DEPRECATED_FDO_EGL_IMAGE
     // padding
     nullptr, nullptr
 };
 
-#if ENABLE_SHM_BUFFER_SUPPORT
 struct wpe_view_backend_exportable_fdo_client WPEView::s_exportableClient = {
     nullptr,
     nullptr,
@@ -592,7 +846,6 @@ struct wpe_view_backend_exportable_fdo_client WPEView::s_exportableClient = {
     nullptr,
     nullptr,
 };
-#endif
 
 void WPEView::s_releaseImage(GstEGLImage* image, gpointer data)
 {
@@ -624,5 +877,12 @@ void WPEView::dispatchAxisEvent(struct wpe_input_axis_event& wpe_event)
 {
     s_view->dispatch([&]() {
         wpe_view_backend_dispatch_axis_event(backend(), &wpe_event);
+    });
+}
+
+void WPEView::dispatchTouchEvent(struct wpe_input_touch_event& wpe_event)
+{
+    s_view->dispatch([&]() {
+        wpe_view_backend_dispatch_touch_event(backend(), &wpe_event);
     });
 }

@@ -21,6 +21,7 @@
 #include "config.h"
 #endif
 
+#include <gst/base/base.h>
 #include <gst/video/video.h>
 #include "gstmfcapturewinrt.h"
 #include "gstmfutils.h"
@@ -29,18 +30,17 @@
 #include <memory>
 #include <algorithm>
 
+/* *INDENT-OFF* */
 using namespace Microsoft::WRL;
 using namespace Microsoft::WRL::Wrappers;
 using namespace ABI::Windows::Media::MediaProperties;
 using namespace ABI::Windows::Graphics::Imaging;
 using namespace ABI::Windows::Foundation;
-
-G_BEGIN_DECLS
+/* *INDENT-ON* */
 
 GST_DEBUG_CATEGORY_EXTERN (gst_mf_source_object_debug);
 #define GST_CAT_DEFAULT gst_mf_source_object_debug
 
-G_END_DECLS
 
 enum
 {
@@ -61,7 +61,7 @@ struct _GstMFCaptureWinRT
   GMainLoop *loop;
 
   /* protected by lock */
-  GQueue *queue;
+  GstQueueArray *queue;
 
   GstCaps *supported_caps;
   GstVideoInfo info;
@@ -71,6 +71,12 @@ struct _GstMFCaptureWinRT
   gpointer dispatcher;
 };
 
+typedef struct _GstMFCaptureWinRTFrame
+{
+  IMediaFrameReference *frame;
+  GstClockTime clock_time;
+} GstMFCaptureWinRTFrame;
+
 static void gst_mf_capture_winrt_constructed (GObject * object);
 static void gst_mf_capture_winrt_finalize (GObject * object);
 static void gst_mf_capture_winrt_get_property (GObject * object, guint prop_id,
@@ -79,20 +85,22 @@ static void gst_mf_capture_winrt_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);
 
 static gboolean gst_mf_capture_winrt_start (GstMFSourceObject * object);
-static gboolean gst_mf_capture_winrt_stop  (GstMFSourceObject * object);
+static gboolean gst_mf_capture_winrt_stop (GstMFSourceObject * object);
 static GstFlowReturn gst_mf_capture_winrt_fill (GstMFSourceObject * object,
     GstBuffer * buffer);
 static gboolean gst_mf_capture_winrt_unlock (GstMFSourceObject * object);
 static gboolean gst_mf_capture_winrt_unlock_stop (GstMFSourceObject * object);
-static GstCaps * gst_mf_capture_winrt_get_caps (GstMFSourceObject * object);
+static GstCaps *gst_mf_capture_winrt_get_caps (GstMFSourceObject * object);
 static gboolean gst_mf_capture_winrt_set_caps (GstMFSourceObject * object,
     GstCaps * caps);
-static HRESULT gst_mf_capture_winrt_on_frame (ISoftwareBitmap * bitmap,
-    void * user_data);
-static HRESULT gst_mf_capture_winrt_on_failed (const std::string &error,
-    UINT32 error_code, void * user_data);
+static HRESULT gst_mf_capture_winrt_on_frame (IMediaFrameReference * frame,
+    void *user_data);
+static HRESULT gst_mf_capture_winrt_on_failed (const std::string & error,
+    UINT32 error_code, void *user_data);
 
 static gpointer gst_mf_capture_winrt_thread_func (GstMFCaptureWinRT * self);
+static void
+gst_mf_capture_winrt_frame_clear (GstMFCaptureWinRTFrame * winrt_frame);
 
 #define gst_mf_capture_winrt_parent_class parent_class
 G_DEFINE_TYPE (GstMFCaptureWinRT, gst_mf_capture_winrt,
@@ -113,7 +121,7 @@ gst_mf_capture_winrt_class_init (GstMFCaptureWinRTClass * klass)
       g_param_spec_pointer ("dispatcher", "Dispatcher",
           "ICoreDispatcher COM object to use",
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY |
-          G_PARAM_STATIC_STRINGS)));
+              G_PARAM_STATIC_STRINGS)));
 
   source_class->start = GST_DEBUG_FUNCPTR (gst_mf_capture_winrt_start);
   source_class->stop = GST_DEBUG_FUNCPTR (gst_mf_capture_winrt_stop);
@@ -128,7 +136,10 @@ gst_mf_capture_winrt_class_init (GstMFCaptureWinRTClass * klass)
 static void
 gst_mf_capture_winrt_init (GstMFCaptureWinRT * self)
 {
-  self->queue = g_queue_new ();
+  self->queue =
+      gst_queue_array_new_for_struct (sizeof (GstMFCaptureWinRTFrame), 2);
+  gst_queue_array_set_clear_func (self->queue,
+      (GDestroyNotify) gst_mf_capture_winrt_frame_clear);
   g_mutex_init (&self->lock);
   g_cond_init (&self->cond);
 }
@@ -162,7 +173,7 @@ gst_mf_capture_winrt_finalize (GObject * object)
   g_main_loop_unref (self->loop);
   g_main_context_unref (self->context);
 
-  g_queue_free (self->queue);
+  gst_queue_array_free (self->queue);
   gst_clear_caps (&self->supported_caps);
   g_mutex_clear (&self->lock);
   g_cond_clear (&self->cond);
@@ -221,13 +232,13 @@ gst_mf_capture_winrt_thread_func (GstMFCaptureWinRT * self)
   HRESULT hr;
   guint index;
   GSource *idle_source;
-  std::shared_ptr<GstWinRTMediaFrameSourceGroup> target_group;
-  std::vector<GstWinRTMediaFrameSourceGroup> group_list;
+  std::shared_ptr < GstWinRTMediaFrameSourceGroup > target_group;
+  std::vector < GstWinRTMediaFrameSourceGroup > group_list;
   MediaCaptureWrapperCallbacks callbacks;
 
   RoInitializeWrapper init_wrapper (RO_INIT_MULTITHREADED);
 
-  self->capture = new MediaCaptureWrapper(self->dispatcher);
+  self->capture = new MediaCaptureWrapper (self->dispatcher);
   callbacks.frame_arrived = gst_mf_capture_winrt_on_frame;
   callbacks.failed = gst_mf_capture_winrt_on_failed;
   self->capture->RegisterCb (callbacks, self);
@@ -236,12 +247,13 @@ gst_mf_capture_winrt_thread_func (GstMFCaptureWinRT * self)
 
   idle_source = g_idle_source_new ();
   g_source_set_callback (idle_source,
-      (GSourceFunc) gst_mf_capture_winrt_main_loop_running_cb, self, NULL);
+      (GSourceFunc) gst_mf_capture_winrt_main_loop_running_cb, self, nullptr);
   g_source_attach (idle_source, self->context);
   g_source_unref (idle_source);
 
-  hr = self->capture->EnumrateFrameSourceGroup(group_list);
+  hr = self->capture->EnumrateFrameSourceGroup (group_list);
 
+  /* *INDENT-OFF* */
 #ifndef GST_DISABLE_GST_DEBUG
   index = 0;
   for (const auto& iter: group_list) {
@@ -279,6 +291,7 @@ gst_mf_capture_winrt_thread_func (GstMFCaptureWinRT * self)
 
     index++;
   }
+  /* *INDENT-ON* */
 
   if (!target_group) {
     GST_WARNING_OBJECT (self, "No matching device");
@@ -290,15 +303,17 @@ gst_mf_capture_winrt_thread_func (GstMFCaptureWinRT * self)
     goto run_loop;
   }
 
-  self->capture->SetSourceGroup(*target_group);
+  self->capture->SetSourceGroup (*target_group);
 
   std::sort (target_group->source_list_.begin (),
       target_group->source_list_.end (), WinRTCapsCompareFunc);
 
   self->supported_caps = gst_caps_new_empty ();
 
+  /* *INDENT-OFF* */
   for (auto iter: target_group->source_list_)
     gst_caps_append (self->supported_caps, gst_caps_copy (iter.caps_));
+  /* *INDENT-ON* */
 
   GST_DEBUG_OBJECT (self, "Available output caps %" GST_PTR_FORMAT,
       self->supported_caps);
@@ -306,10 +321,10 @@ gst_mf_capture_winrt_thread_func (GstMFCaptureWinRT * self)
   source->opened = TRUE;
 
   g_free (source->device_path);
-  source->device_path = g_strdup (target_group->id_.c_str());
+  source->device_path = g_strdup (target_group->id_.c_str ());
 
   g_free (source->device_name);
-  source->device_name = g_strdup (target_group->display_name_.c_str());
+  source->device_name = g_strdup (target_group->display_name_.c_str ());
 
   source->device_index = index;
 
@@ -323,9 +338,9 @@ run_loop:
   gst_mf_capture_winrt_stop (source);
 
   delete self->capture;
-  self->capture = NULL;
+  self->capture = nullptr;
 
-  return NULL;
+  return nullptr;
 }
 
 static gboolean
@@ -339,7 +354,7 @@ gst_mf_capture_winrt_start (GstMFSourceObject * object)
     return FALSE;
   }
 
-  hr = self->capture->StartCapture();
+  hr = self->capture->StartCapture ();
   if (!gst_mf_result (hr)) {
     GST_ERROR_OBJECT (self, "Capture object doesn't want to start capture");
     return FALSE;
@@ -359,13 +374,9 @@ gst_mf_capture_winrt_stop (GstMFSourceObject * object)
     return FALSE;
   }
 
-  hr = self->capture->StopCapture();
+  hr = self->capture->StopCapture ();
 
-  while (!g_queue_is_empty (self->queue)) {
-    ISoftwareBitmap *buffer =
-        (ISoftwareBitmap *) g_queue_pop_head (self->queue);
-    buffer->Release ();
-  }
+  gst_queue_array_clear (self->queue);
 
   if (!gst_mf_result (hr)) {
     GST_ERROR_OBJECT (self, "Capture object doesn't want to stop capture");
@@ -376,10 +387,10 @@ gst_mf_capture_winrt_stop (GstMFSourceObject * object)
 }
 
 static HRESULT
-gst_mf_capture_winrt_on_frame (ISoftwareBitmap * bitmap,
-    void * user_data)
+gst_mf_capture_winrt_on_frame (IMediaFrameReference * frame, void *user_data)
 {
   GstMFCaptureWinRT *self = GST_MF_CAPTURE_WINRT (user_data);
+  GstMFCaptureWinRTFrame winrt_frame;
 
   g_mutex_lock (&self->lock);
   if (self->flushing) {
@@ -387,8 +398,11 @@ gst_mf_capture_winrt_on_frame (ISoftwareBitmap * bitmap,
     return S_OK;
   }
 
-  g_queue_push_tail (self->queue, bitmap);
-  bitmap->AddRef ();
+  winrt_frame.frame = frame;
+  winrt_frame.clock_time =
+      gst_mf_source_object_get_running_time (GST_MF_SOURCE_OBJECT (self));
+  gst_queue_array_push_tail_struct (self->queue, &winrt_frame);
+  frame->AddRef ();
 
   g_cond_broadcast (&self->cond);
   g_mutex_unlock (&self->lock);
@@ -397,12 +411,12 @@ gst_mf_capture_winrt_on_frame (ISoftwareBitmap * bitmap,
 }
 
 static HRESULT
-gst_mf_capture_winrt_on_failed (const std::string &error,
-    UINT32 error_code, void * user_data)
+gst_mf_capture_winrt_on_failed (const std::string & error,
+    UINT32 error_code, void *user_data)
 {
   GstMFCaptureWinRT *self = GST_MF_CAPTURE_WINRT (user_data);
 
-  GST_DEBUG_OBJECT (self, "Have error %s (%d)", error.c_str(), error_code);
+  GST_DEBUG_OBJECT (self, "Have error %s (%d)", error.c_str (), error_code);
 
   g_mutex_lock (&self->lock);
   self->got_error = TRUE;
@@ -413,22 +427,19 @@ gst_mf_capture_winrt_on_failed (const std::string &error,
 }
 
 static GstFlowReturn
-gst_mf_capture_winrt_fill (GstMFSourceObject * object, GstBuffer * buffer)
+gst_mf_capture_winrt_get_video_media_frame (GstMFCaptureWinRT * self,
+    IVideoMediaFrame ** media_frame, GstClockTime * timestamp,
+    GstClockTime * duration)
 {
-  GstMFCaptureWinRT *self = GST_MF_CAPTURE_WINRT (object);
-  GstFlowReturn ret = GST_FLOW_OK;
+  GstMFCaptureWinRTFrame *winrt_frame = nullptr;
+  IMediaFrameReference *frame_ref;
   HRESULT hr;
-  GstVideoFrame frame;
-  BYTE *data;
-  UINT32 size;
-  gint i, j;
-  ComPtr<ISoftwareBitmap> bitmap;
-  ComPtr<IBitmapBuffer> bitmap_buffer;
-  ComPtr<IMemoryBuffer> mem_buf;
-  ComPtr<IMemoryBufferReference> mem_ref;
-  ComPtr<Windows::Foundation::IMemoryBufferByteAccess> byte_access;
-  INT32 plane_count;
-  BitmapPlaneDescription desc[GST_VIDEO_MAX_PLANES];
+  ComPtr < IReference < TimeSpan >> winrt_timestamp;
+  TimeSpan winrt_duration;
+
+  *media_frame = nullptr;
+  *timestamp = GST_CLOCK_TIME_NONE;
+  *duration = GST_CLOCK_TIME_NONE;
 
   g_mutex_lock (&self->lock);
   if (self->got_error) {
@@ -441,7 +452,8 @@ gst_mf_capture_winrt_fill (GstMFSourceObject * object, GstBuffer * buffer)
     return GST_FLOW_FLUSHING;
   }
 
-  while (!self->flushing && !self->got_error && g_queue_is_empty (self->queue))
+  while (!self->flushing && !self->got_error &&
+      gst_queue_array_is_empty (self->queue))
     g_cond_wait (&self->cond, &self->lock);
 
   if (self->got_error) {
@@ -454,8 +466,66 @@ gst_mf_capture_winrt_fill (GstMFSourceObject * object, GstBuffer * buffer)
     return GST_FLOW_FLUSHING;
   }
 
-  bitmap.Attach ((ISoftwareBitmap *) g_queue_pop_head (self->queue));
+  winrt_frame =
+      (GstMFCaptureWinRTFrame *) gst_queue_array_pop_head_struct (self->queue);
+
+  frame_ref = winrt_frame->frame;
+  g_assert (frame_ref);
+
+  hr = frame_ref->get_VideoMediaFrame (media_frame);
+  if (!gst_mf_result (hr)) {
+    GST_WARNING_OBJECT (self, "Couldn't get IVideoMediaFrame");
+    *media_frame = nullptr;
+    goto done;
+  }
+
+  hr = frame_ref->get_Duration (&winrt_duration);
+  if (gst_mf_result (hr))
+    *duration = winrt_duration.Duration * 100;
+
+  *timestamp = winrt_frame->clock_time;
+
+done:
+  gst_mf_capture_winrt_frame_clear (winrt_frame);
   g_mutex_unlock (&self->lock);
+
+  return GST_FLOW_OK;
+}
+
+static GstFlowReturn
+gst_mf_capture_winrt_fill (GstMFSourceObject * object, GstBuffer * buffer)
+{
+  GstMFCaptureWinRT *self = GST_MF_CAPTURE_WINRT (object);
+  GstFlowReturn ret = GST_FLOW_OK;
+  HRESULT hr;
+  GstVideoFrame frame;
+  BYTE *data;
+  UINT32 size;
+  gint i, j;
+  ComPtr < IVideoMediaFrame > video_frame;
+  ComPtr < ISoftwareBitmap > bitmap;
+  ComPtr < IBitmapBuffer > bitmap_buffer;
+  ComPtr < IMemoryBuffer > mem_buf;
+  ComPtr < IMemoryBufferReference > mem_ref;
+  ComPtr < Windows::Foundation::IMemoryBufferByteAccess > byte_access;
+  INT32 plane_count;
+  BitmapPlaneDescription desc[GST_VIDEO_MAX_PLANES];
+  GstClockTime timestamp = GST_CLOCK_TIME_NONE;
+  GstClockTime duration = GST_CLOCK_TIME_NONE;
+
+  do {
+    ret = gst_mf_capture_winrt_get_video_media_frame (self,
+        video_frame.ReleaseAndGetAddressOf (), &timestamp, &duration);
+  } while (ret == GST_FLOW_OK && !video_frame);
+
+  if (ret != GST_FLOW_OK)
+    return ret;
+
+  hr = video_frame->get_SoftwareBitmap (&bitmap);
+  if (!gst_mf_result (hr)) {
+    GST_ERROR_OBJECT (self, "Couldn't get ISoftwareBitmap");
+    return GST_FLOW_ERROR;
+  }
 
   hr = bitmap->LockBuffer (BitmapBufferAccessMode::BitmapBufferAccessMode_Read,
       &bitmap_buffer);
@@ -500,7 +570,7 @@ gst_mf_capture_winrt_fill (GstMFSourceObject * object, GstBuffer * buffer)
     return GST_FLOW_ERROR;
   }
 
-  hr = mem_ref.As(&byte_access);
+  hr = mem_ref.As (&byte_access);
   if (!gst_mf_result (hr)) {
     GST_ERROR_OBJECT (self, "Cannot get IMemoryBufferByteAccess");
     return GST_FLOW_ERROR;
@@ -543,6 +613,10 @@ gst_mf_capture_winrt_fill (GstMFSourceObject * object, GstBuffer * buffer)
   }
 
   gst_video_frame_unmap (&frame);
+
+  GST_BUFFER_PTS (buffer) = timestamp;
+  GST_BUFFER_DTS (buffer) = GST_CLOCK_TIME_NONE;
+  GST_BUFFER_DURATION (buffer) = duration;
 
   return ret;
 }
@@ -591,16 +665,17 @@ gst_mf_capture_winrt_get_caps (GstMFSourceObject * object)
   if (self->supported_caps)
     return gst_caps_ref (self->supported_caps);
 
-  return NULL;
+  return nullptr;
 }
 
+/* *INDENT-OFF* */
 static gboolean
 gst_mf_capture_winrt_set_caps (GstMFSourceObject * object, GstCaps * caps)
 {
   GstMFCaptureWinRT *self = GST_MF_CAPTURE_WINRT (object);
   std::vector<GstWinRTMediaDescription> desc_list;
   HRESULT hr;
-  GstCaps *target_caps = NULL;
+  GstCaps *target_caps = nullptr;
 
   hr = self->capture->GetAvailableDescriptions(desc_list);
   if (!gst_mf_result (hr) || desc_list.empty()) {
@@ -629,18 +704,32 @@ gst_mf_capture_winrt_set_caps (GstMFSourceObject * object, GstCaps * caps)
 
   return TRUE;
 }
+/* *INDENT-ON* */
+
+static void
+gst_mf_capture_winrt_frame_clear (GstMFCaptureWinRTFrame * winrt_frame)
+{
+  if (!winrt_frame)
+    return;
+
+  if (winrt_frame->frame)
+    winrt_frame->frame->Release ();
+
+  winrt_frame->frame = nullptr;
+  winrt_frame->clock_time = GST_CLOCK_TIME_NONE;
+}
 
 GstMFSourceObject *
 gst_mf_capture_winrt_new (GstMFSourceType type, gint device_index,
     const gchar * device_name, const gchar * device_path, gpointer dispatcher)
 {
   GstMFSourceObject *self;
-  ComPtr<ICoreDispatcher> core_dispatcher;
+  ComPtr < ICoreDispatcher > core_dispatcher;
   /* Multiple COM init is allowed */
   RoInitializeWrapper init_wrapper (RO_INIT_MULTITHREADED);
 
   /* TODO: Add audio capture support */
-  g_return_val_if_fail (type == GST_MF_SOURCE_TYPE_VIDEO, NULL);
+  g_return_val_if_fail (type == GST_MF_SOURCE_TYPE_VIDEO, nullptr);
 
   /* If application didn't pass ICoreDispatcher object,
    * try to get dispatcher object for the current thread */
@@ -660,7 +749,8 @@ gst_mf_capture_winrt_new (GstMFSourceType type, gint device_index,
 
   self = (GstMFSourceObject *) g_object_new (GST_TYPE_MF_CAPTURE_WINRT,
       "source-type", type, "device-index", device_index, "device-name",
-      device_name, "device-path", device_path, "dispatcher", dispatcher, NULL);
+      device_name, "device-path", device_path, "dispatcher", dispatcher,
+      nullptr);
 
   /* Reset explicitly to ensure that it happens before
    * RoInitializeWrapper dtor is called */
@@ -669,7 +759,7 @@ gst_mf_capture_winrt_new (GstMFSourceType type, gint device_index,
   if (!self->opened) {
     GST_WARNING_OBJECT (self, "Couldn't open device");
     gst_object_unref (self);
-    return NULL;
+    return nullptr;
   }
 
   gst_object_ref_sink (self);

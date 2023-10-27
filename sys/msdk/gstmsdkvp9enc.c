@@ -29,6 +29,22 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+/**
+ * SECTION: element-msdkvp9enc
+ * @title: msdkvp9enc
+ * @short_description: Intel MSDK VP9 encoder
+ *
+ * VP9 video encoder based on Intel MFX
+ *
+ * ## Example launch line
+ * ```
+ * gst-launch-1.0 videotestsrc num-buffers=90 ! msdkvp9enc ! matroskamux ! filesink location=output.webm
+ * ```
+ *
+ * Since: 1.18
+ *
+ */
+
 #ifdef HAVE_CONFIG_H
 #  include <config.h>
 #endif
@@ -51,11 +67,21 @@ GST_DEBUG_CATEGORY_EXTERN (gst_msdkvp9enc_debug);
 #define SRC_PROFILES  "{ " PROFILES " }"
 #endif
 
+#ifdef _WIN32
 static GstStaticPadTemplate sink_factory = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS (GST_MSDK_CAPS_STR (COMMON_FORMAT,
-            "{ NV12, P010_10LE }")));
+            "{ NV12, P010_10LE }") "; "
+        GST_MSDK_CAPS_MAKE_WITH_D3D11_FEATURE ("{ NV12, P010_10LE }")));
+#else
+static GstStaticPadTemplate sink_factory = GST_STATIC_PAD_TEMPLATE ("sink",
+    GST_PAD_SINK,
+    GST_PAD_ALWAYS,
+    GST_STATIC_CAPS (GST_MSDK_CAPS_STR (COMMON_FORMAT,
+            "{ NV12, P010_10LE }") "; "
+        GST_MSDK_CAPS_MAKE_WITH_VA_FEATURE ("NV12")));
+#endif
 
 static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
@@ -256,13 +282,15 @@ gst_msdkvp9enc_class_init (GstMsdkVP9EncClass * klass)
   encoder_class->set_format = gst_msdkvp9enc_set_format;
   encoder_class->configure = gst_msdkvp9enc_configure;
   encoder_class->set_src_caps = gst_msdkvp9enc_set_src_caps;
+  encoder_class->qp_max = 255;
+  encoder_class->qp_min = 0;
 
   gst_msdkenc_install_common_properties (encoder_class);
 
   gst_element_class_set_static_metadata (element_class,
       "Intel MSDK VP9 encoder",
       "Codec/Encoder/Video/Hardware",
-      "VP9 video encoder based on Intel Media SDK",
+      "VP9 video encoder based on " MFX_API_SDK,
       "Haihao Xiang <haihao.xiang@intel.com>");
 
   gst_element_class_add_static_pad_template (element_class, &sink_factory);

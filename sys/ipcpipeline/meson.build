@@ -1,5 +1,6 @@
 ipcpipeline_sources = [
   'gstipcpipeline.c',
+  'gstipcpipelineelement.c',
   'gstipcpipelinecomm.c',
   'gstipcpipelinesink.c',
   'gstipcpipelinesrc.c',
@@ -14,9 +15,8 @@ gstipcpipeline = library('gstipcpipeline',
   ipcpipeline_sources,
   c_args : gst_plugins_bad_args,
   include_directories : [configinc],
-  dependencies : [gstbase_dep],
+  dependencies : [gstbase_dep] + winsock2,
   install : true,
   install_dir : plugins_install_dir,
 )
-pkgconfig.generate(gstipcpipeline, install_dir : plugins_pkgconfig_install_dir)
 plugins += [gstipcpipeline]

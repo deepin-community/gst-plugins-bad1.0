@@ -1,5 +1,6 @@
 /* GStreamer
  * Copyright (C) 2019 Seungha Yang <seungha.yang@navercorp.com>
+ * Copyright (C) 2020 Seungha Yang <seungha@centricular.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -25,58 +26,38 @@
 #include <gst/video/gstvideosink.h>
 #include <gst/video/videooverlay.h>
 #include <gst/video/navigation.h>
-
-#include "gstd3d11_fwd.h"
+#include <gst/d3d11/gstd3d11.h>
 #include "gstd3d11window.h"
 
 G_BEGIN_DECLS
 
-#define GST_TYPE_D3D11_VIDEO_SINK                     (gst_d3d11_video_sink_get_type())
-#define GST_D3D11_VIDEO_SINK(obj)                     (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_D3D11_VIDEO_SINK,GstD3D11VideoSink))
-#define GST_D3D11_VIDEO_SINK_CLASS(klass)             (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_D3D11_VIDEO_SINK,GstD3D11VideoSinkClass))
-#define GST_D3D11_VIDEO_SINK_GET_CLASS(obj)           (GST_D3D11_VIDEO_SINK_CLASS(G_OBJECT_GET_CLASS(obj)))
-#define GST_IS_D3D11_VIDEO_SINK(obj)                  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_D3D11_VIDEO_SINK))
-#define GST_IS_D3D11_VIDEO_SINK_CLASS(klass)          (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_D3D11_VIDEO_SINK))
+#define GST_TYPE_D3D11_VIDEO_SINK             (gst_d3d11_video_sink_get_type())
+#define GST_D3D11_VIDEO_SINK(obj)             (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_D3D11_VIDEO_SINK, GstD3D11VideoSink))
+#define GST_D3D11_VIDEO_SINK_CLASS(klass)     (G_TYPE_CHECK_CLASS_CAST((klass), GST_TYPE_D3D11_VIDEO_SINK, GstD3D11VideoSinkClass))
+#define GST_IS_D3D11_VIDEO_SINK(obj)          (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_D3D11_VIDEO_SINK))
+#define GST_IS_D3D11_VIDEO_SINK_CLASS(klass)  (G_TYPE_CHECK_CLASS_TYPE((klass), GST_TYPE_D3D11_VIDEO_SINK))
+#define GST_D3D11_VIDEO_SINK_GET_CLASS(obj)   (G_TYPE_INSTANCE_GET_CLASS((obj), GST_TYPE_D3D11_VIDEO_SINK, GstD3D11VideoSinkClass))
+#define GST_D3D11_VIDEO_SINK_CAST(obj)        ((GstD3D11VideoSink *) obj)
 
 typedef struct _GstD3D11VideoSink GstD3D11VideoSink;
 typedef struct _GstD3D11VideoSinkClass GstD3D11VideoSinkClass;
-
-struct _GstD3D11VideoSink
-{
-  GstVideoSink sink;
-  GstD3D11Device *device;
-  GstD3D11Window *window;
-  gint video_width;
-  gint video_height;
-
-  GstVideoInfo info;
-
-  guintptr window_id;
-
-  /* properties */
-  gint adapter;
-  gboolean force_aspect_ratio;
-  gboolean enable_navigation_events;
-  GstD3D11WindowFullscreenToggleMode fullscreen_toggle_mode;
-  gboolean fullscreen;
-
-  /* saved render rectangle until we have a window */
-  GstVideoRectangle render_rect;
-  gboolean pending_render_rect;
-
-  GstBufferPool *fallback_pool;
-  gboolean can_convert;
-  gboolean have_video_processor;
-};
-
 struct _GstD3D11VideoSinkClass
 {
   GstVideoSinkClass parent_class;
+
+  /* signals */
+  void      (*begin_draw) (GstD3D11VideoSink * videosink);
+
+  /* actions */
+  gboolean  (*draw)       (GstD3D11VideoSink * videosink,
+                           gpointer shared_handle,
+                           guint texture_misc_flags,
+                           guint64 acquire_key,
+                           guint64 release_key);
 };
 
-GType    gst_d3d11_video_sink_get_type (void);
+GType gst_d3d11_video_sink_get_type (void);
 
 G_END_DECLS
-
 
 #endif /* __GST_D3D11_VIDEO_SINK_H__ */

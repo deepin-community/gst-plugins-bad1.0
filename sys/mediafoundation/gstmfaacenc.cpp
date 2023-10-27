@@ -36,14 +36,16 @@
 
 #include <gst/gst.h>
 #include <gst/pbutils/pbutils.h>
-#include "gstmfaudioenc.h"
+#include "gstmfaudioencoder.h"
 #include "gstmfaacenc.h"
 #include <wrl.h>
 #include <set>
 #include <vector>
 #include <string>
 
+/* *INDENT-OFF* */
 using namespace Microsoft::WRL;
+/* *INDENT-ON* */
 
 GST_DEBUG_CATEGORY (gst_mf_aac_enc_debug);
 #define GST_CAT_DEFAULT gst_mf_aac_enc_debug
@@ -58,18 +60,19 @@ enum
 
 typedef struct _GstMFAacEnc
 {
-  GstMFAudioEnc parent;
+  GstMFAudioEncoder parent;
 
-  /* properteies */
+  /* properties */
   guint bitrate;
 } GstMFAacEnc;
 
 typedef struct _GstMFAacEncClass
 {
-  GstMFAudioEncClass parent_class;
+  GstMFAudioEncoderClass parent_class;
 
 } GstMFAacEncClass;
 
+/* *INDENT-OFF* */
 typedef struct
 {
   GstCaps *sink_caps;
@@ -79,18 +82,19 @@ typedef struct
   guint device_index;
   std::set<UINT32> bitrate_list;
 } GstMFAacEncClassData;
+/* *INDENT-ON* */
 
-static GstElementClass *parent_class = NULL;
+static GstElementClass *parent_class = nullptr;
 
 static void gst_mf_aac_enc_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec);
 static void gst_mf_aac_enc_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);
-static gboolean gst_mf_aac_enc_get_output_type (GstMFAudioEnc * mfenc,
+static gboolean gst_mf_aac_enc_get_output_type (GstMFAudioEncoder * encoder,
     GstAudioInfo * info, IMFMediaType ** output_type);
-static gboolean gst_mf_aac_enc_get_input_type (GstMFAudioEnc * mfenc,
+static gboolean gst_mf_aac_enc_get_input_type (GstMFAudioEncoder * encoder,
     GstAudioInfo * info, IMFMediaType ** input_type);
-static gboolean gst_mf_aac_enc_set_src_caps (GstMFAudioEnc * mfenc,
+static gboolean gst_mf_aac_enc_set_src_caps (GstMFAudioEncoder * encoder,
     GstAudioInfo * info);
 
 static void
@@ -98,7 +102,7 @@ gst_mf_aac_enc_class_init (GstMFAacEncClass * klass, gpointer data)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GstElementClass *element_class = GST_ELEMENT_CLASS (klass);
-  GstMFAudioEncClass *mfenc_class = GST_MF_AUDIO_ENC_CLASS (klass);
+  GstMFAudioEncoderClass *encoder_class = GST_MF_AUDIO_ENCODER_CLASS (klass);
   GstMFAacEncClassData *cdata = (GstMFAacEncClassData *) data;
   gchar *long_name;
   gchar *classification;
@@ -110,25 +114,27 @@ gst_mf_aac_enc_class_init (GstMFAacEncClass * klass, gpointer data)
   gobject_class->get_property = gst_mf_aac_enc_get_property;
   gobject_class->set_property = gst_mf_aac_enc_set_property;
 
-  bitrate_blurb =
-      "Bitrate in bit/sec, (0 = auto), valid values are { 0";
+  bitrate_blurb = "Bitrate in bit/sec, (0 = auto), valid values are { 0";
+
+  /* *INDENT-OFF* */
   for (auto iter: cdata->bitrate_list) {
     bitrate_blurb += ", " + std::to_string (iter);
     /* std::set<> stores values in a sorted fashion */
     max_bitrate = iter;
   }
   bitrate_blurb += " }";
+  /* *INDENT-ON* */
 
   g_object_class_install_property (gobject_class, PROP_BITRATE,
-      g_param_spec_uint ("bitrate", "Bitrate", bitrate_blurb.c_str(), 0,
+      g_param_spec_uint ("bitrate", "Bitrate", bitrate_blurb.c_str (), 0,
           max_bitrate, DEFAULT_BITRATE,
           (GParamFlags) (GST_PARAM_MUTABLE_READY | G_PARAM_READWRITE |
-          G_PARAM_STATIC_NAME | G_PARAM_STATIC_NICK)));
+              G_PARAM_STATIC_NAME | G_PARAM_STATIC_NICK)));
 
   long_name = g_strdup_printf ("Media Foundation %s", cdata->device_name);
   classification = g_strdup_printf ("Codec/Encoder/Audio%s",
       (cdata->enum_flags & MFT_ENUM_FLAG_HARDWARE) == MFT_ENUM_FLAG_HARDWARE ?
-          "/Hardware" : "");
+      "/Hardware" : "");
   gst_element_class_set_metadata (element_class, long_name,
       classification,
       "Microsoft Media Foundation AAC Encoder",
@@ -143,17 +149,16 @@ gst_mf_aac_enc_class_init (GstMFAacEncClass * klass, gpointer data)
       gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
           cdata->src_caps));
 
-  mfenc_class->get_output_type =
+  encoder_class->get_output_type =
       GST_DEBUG_FUNCPTR (gst_mf_aac_enc_get_output_type);
-  mfenc_class->get_input_type =
+  encoder_class->get_input_type =
       GST_DEBUG_FUNCPTR (gst_mf_aac_enc_get_input_type);
-  mfenc_class->set_src_caps =
-      GST_DEBUG_FUNCPTR (gst_mf_aac_enc_set_src_caps);
+  encoder_class->set_src_caps = GST_DEBUG_FUNCPTR (gst_mf_aac_enc_set_src_caps);
 
-  mfenc_class->codec_id = MFAudioFormat_AAC;
-  mfenc_class->enum_flags = cdata->enum_flags;
-  mfenc_class->device_index = cdata->device_index;
-  mfenc_class->frame_samples = 1024;
+  encoder_class->codec_id = MFAudioFormat_AAC;
+  encoder_class->enum_flags = cdata->enum_flags;
+  encoder_class->device_index = cdata->device_index;
+  encoder_class->frame_samples = 1024;
 
   g_free (cdata->device_name);
   gst_caps_unref (cdata->sink_caps);
@@ -200,16 +205,16 @@ gst_mf_aac_enc_set_property (GObject * object, guint prop_id,
 }
 
 static gboolean
-gst_mf_aac_enc_get_output_type (GstMFAudioEnc * mfenc, GstAudioInfo * info,
-    IMFMediaType ** output_type)
+gst_mf_aac_enc_get_output_type (GstMFAudioEncoder * encoder,
+    GstAudioInfo * info, IMFMediaType ** output_type)
 {
-  GstMFAacEnc *self = (GstMFAacEnc *) mfenc;
-  GstMFTransform *transform = mfenc->transform;
-  GList *output_list = NULL;
+  GstMFAacEnc *self = (GstMFAacEnc *) encoder;
+  GstMFTransform *transform = encoder->transform;
+  GList *output_list = nullptr;
   GList *iter;
-  ComPtr<IMFMediaType> target_output;
-  std::vector<ComPtr<IMFMediaType>> filtered_types;
-  std::set<UINT32> bitrate_list;
+  ComPtr < IMFMediaType > target_output;
+  std::vector < ComPtr < IMFMediaType >> filtered_types;
+  std::set < UINT32 > bitrate_list;
   UINT32 bitrate;
   UINT32 target_bitrate = 0;
   HRESULT hr;
@@ -268,12 +273,12 @@ gst_mf_aac_enc_get_output_type (GstMFAudioEnc * mfenc, GstAudioInfo * info,
 
   g_list_free_full (output_list, (GDestroyNotify) gst_mf_media_type_release);
 
-  if (filtered_types.empty()) {
+  if (filtered_types.empty ()) {
     GST_ERROR_OBJECT (self, "Couldn't find target output type");
     return FALSE;
   }
 
-  GST_DEBUG_OBJECT (self, "have %d candidate output", filtered_types.size());
+  GST_DEBUG_OBJECT (self, "have %d candidate output", filtered_types.size ());
 
   /* 2. Find the best matching bitrate */
   bitrate = self->bitrate;
@@ -310,6 +315,8 @@ gst_mf_aac_enc_get_output_type (GstMFAudioEnc * mfenc, GstAudioInfo * info,
   }
 
   GST_DEBUG_OBJECT (self, "Available bitrates");
+
+  /* *INDENT-OFF* */
   for (auto it: bitrate_list)
     GST_DEBUG_OBJECT (self, "\t%d", it);
 
@@ -335,28 +342,29 @@ gst_mf_aac_enc_get_output_type (GstMFAudioEnc * mfenc, GstAudioInfo * info,
       break;
     }
   }
+  /* *INDENT-ON* */
 
   if (!target_output) {
     GST_ERROR_OBJECT (self, "Failed to decide final output type");
     return FALSE;
   }
 
-  *output_type = target_output.Detach();
+  *output_type = target_output.Detach ();
 
   return TRUE;
 }
 
 static gboolean
-gst_mf_aac_enc_get_input_type (GstMFAudioEnc * mfenc, GstAudioInfo * info,
+gst_mf_aac_enc_get_input_type (GstMFAudioEncoder * encoder, GstAudioInfo * info,
     IMFMediaType ** input_type)
 {
-  GstMFAacEnc *self = (GstMFAacEnc *) mfenc;
-  GstMFTransform *transform = mfenc->transform;
-  GList *input_list = NULL;
+  GstMFAacEnc *self = (GstMFAacEnc *) encoder;
+  GstMFTransform *transform = encoder->transform;
+  GList *input_list = nullptr;
   GList *iter;
-  ComPtr<IMFMediaType> target_input;
-  std::vector<ComPtr<IMFMediaType>> filtered_types;
-  std::set<UINT32> bitrate_list;
+  ComPtr < IMFMediaType > target_input;
+  std::vector < ComPtr < IMFMediaType >> filtered_types;
+  std::set < UINT32 > bitrate_list;
   HRESULT hr;
 
   if (!gst_mf_transform_get_input_available_types (transform, &input_list)) {
@@ -407,37 +415,37 @@ gst_mf_aac_enc_get_input_type (GstMFAudioEnc * mfenc, GstAudioInfo * info,
 
   g_list_free_full (input_list, (GDestroyNotify) gst_mf_media_type_release);
 
-  if (filtered_types.empty()) {
+  if (filtered_types.empty ()) {
     GST_ERROR_OBJECT (self, "Couldn't find target input type");
     return FALSE;
   }
 
   GST_DEBUG_OBJECT (self, "Total %d input types are available",
-      filtered_types.size());
+      filtered_types.size ());
 
   /* Just select the first one */
-  target_input = *filtered_types.begin();
+  target_input = *filtered_types.begin ();
 
-  *input_type = target_input.Detach();
+  *input_type = target_input.Detach ();
 
   return TRUE;
 }
 
 static gboolean
-gst_mf_aac_enc_set_src_caps (GstMFAudioEnc * mfenc,
-    GstAudioInfo * info)
+gst_mf_aac_enc_set_src_caps (GstMFAudioEncoder * encoder, GstAudioInfo * info)
 {
-  GstMFAacEnc *self = (GstMFAacEnc *) mfenc;
+  GstMFAacEnc *self = (GstMFAacEnc *) encoder;
   HRESULT hr;
   GstCaps *src_caps;
   GstBuffer *codec_data;
-  UINT8 *blob = NULL;
+  UINT8 *blob = nullptr;
   UINT32 blob_size = 0;
   gboolean ret;
-  ComPtr<IMFMediaType> output_type;
+  ComPtr < IMFMediaType > output_type;
   static const guint config_data_offset = 12;
 
-  if (!gst_mf_transform_get_output_current_type (mfenc->transform, &output_type)) {
+  if (!gst_mf_transform_get_output_current_type (encoder->transform,
+          &output_type)) {
     GST_ERROR_OBJECT (self, "Couldn't get current output type");
     return FALSE;
   }
@@ -473,14 +481,15 @@ gst_mf_aac_enc_set_src_caps (GstMFAudioEnc * mfenc,
       "channels", G_TYPE_INT, GST_AUDIO_INFO_CHANNELS (info),
       "rate", G_TYPE_INT, GST_AUDIO_INFO_RATE (info),
       "framed", G_TYPE_BOOLEAN, TRUE,
-      "codec_data", GST_TYPE_BUFFER, codec_data, NULL);
+      "codec_data", GST_TYPE_BUFFER, codec_data, nullptr);
   gst_buffer_unref (codec_data);
 
   gst_codec_utils_aac_caps_set_level_and_profile (src_caps,
       blob + config_data_offset, blob_size - config_data_offset);
   CoTaskMemFree (blob);
 
-  ret = gst_audio_encoder_set_output_format (GST_AUDIO_ENCODER (self), src_caps);
+  ret =
+      gst_audio_encoder_set_output_format (GST_AUDIO_ENCODER (self), src_caps);
   if (!ret) {
     GST_WARNING_OBJECT (self,
         "Couldn't set output format %" GST_PTR_FORMAT, src_caps);
@@ -494,7 +503,7 @@ static void
 gst_mf_aac_enc_register (GstPlugin * plugin, guint rank,
     const gchar * device_name, guint32 enum_flags, guint device_index,
     GstCaps * sink_caps, GstCaps * src_caps,
-    const std::set<UINT32> &bitrate_list)
+    const std::set < UINT32 > &bitrate_list)
 {
   GType type;
   gchar *type_name;
@@ -504,11 +513,11 @@ gst_mf_aac_enc_register (GstPlugin * plugin, guint rank,
   gboolean is_default = TRUE;
   GTypeInfo type_info = {
     sizeof (GstMFAacEncClass),
-    NULL,
-    NULL,
+    nullptr,
+    nullptr,
     (GClassInitFunc) gst_mf_aac_enc_class_init,
-    NULL,
-    NULL,
+    nullptr,
+    nullptr,
     sizeof (GstMFAacEnc),
     0,
     (GInstanceInitFunc) gst_mf_aac_enc_init,
@@ -537,7 +546,7 @@ gst_mf_aac_enc_register (GstPlugin * plugin, guint rank,
   }
 
   type =
-      g_type_register_static (GST_TYPE_MF_AUDIO_ENC, type_name, &type_info,
+      g_type_register_static (GST_TYPE_MF_AUDIO_ENCODER, type_name, &type_info,
       (GTypeFlags) 0);
 
   /* make lower rank than default device */
@@ -557,14 +566,14 @@ gst_mf_aac_enc_plugin_init_internal (GstPlugin * plugin, guint rank,
 {
   HRESULT hr;
   gint i;
-  GstCaps *src_caps = NULL;
-  GstCaps *sink_caps = NULL;
-  gchar *device_name = NULL;
-  GList *output_list = NULL;
+  GstCaps *src_caps = nullptr;
+  GstCaps *sink_caps = nullptr;
+  gchar *device_name = nullptr;
+  GList *output_list = nullptr;
   GList *iter;
-  std::set<UINT32> channels_list;
-  std::set<UINT32> rate_list;
-  std::set<UINT32> bitrate_list;
+  std::set < UINT32 > channels_list;
+  std::set < UINT32 > rate_list;
+  std::set < UINT32 > bitrate_list;
   gboolean config_found = FALSE;
   GValue channles_value = G_VALUE_INIT;
   GValue rate_value = G_VALUE_INIT;
@@ -572,7 +581,7 @@ gst_mf_aac_enc_plugin_init_internal (GstPlugin * plugin, guint rank,
   if (!gst_mf_transform_open (transform))
     return;
 
-  g_object_get (transform, "device-name", &device_name, NULL);
+  g_object_get (transform, "device-name", &device_name, nullptr);
   if (!device_name) {
     GST_WARNING_OBJECT (transform, "Unknown device name");
     return;
@@ -583,7 +592,8 @@ gst_mf_aac_enc_plugin_init_internal (GstPlugin * plugin, guint rank,
     goto done;
   }
 
-  GST_INFO_OBJECT (transform, "Have %d output type", g_list_length (output_list));
+  GST_INFO_OBJECT (transform, "Have %d output type",
+      g_list_length (output_list));
 
   for (iter = output_list, i = 0; iter; iter = g_list_next (iter), i++) {
     UINT32 channels, rate, bitrate;
@@ -652,6 +662,7 @@ gst_mf_aac_enc_plugin_init_internal (GstPlugin * plugin, guint rank,
   g_value_init (&channles_value, GST_TYPE_LIST);
   g_value_init (&rate_value, GST_TYPE_LIST);
 
+  /* *INDENT-OFF* */
   for (auto it: channels_list) {
     GValue channles = G_VALUE_INIT;
 
@@ -667,6 +678,7 @@ gst_mf_aac_enc_plugin_init_internal (GstPlugin * plugin, guint rank,
     g_value_set_int (&rate, (gint) it);
     gst_value_list_append_and_take_value (&rate_value, &rate);
   }
+  /* *INDENT-ON* */
 
   gst_caps_set_value (src_caps, "channels", &channles_value);
   gst_caps_set_value (sink_caps, "channels", &channles_value);
@@ -680,7 +692,7 @@ gst_mf_aac_enc_plugin_init_internal (GstPlugin * plugin, guint rank,
   gst_mf_aac_enc_register (plugin, rank, device_name, enum_flags, device_index,
       sink_caps, src_caps, bitrate_list);
 
- done:
+done:
   if (output_list)
     g_list_free_full (output_list, (GDestroyNotify) gst_mf_media_type_release);
   g_free (device_name);
@@ -703,29 +715,10 @@ gst_mf_aac_enc_plugin_init (GstPlugin * plugin, guint rank)
   output_type.guidSubtype = MFAudioFormat_AAC;
 
   enum_params.category = MFT_CATEGORY_AUDIO_ENCODER;
-  enum_params.enum_flags = (MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT |
-      MFT_ENUM_FLAG_SORTANDFILTER  | MFT_ENUM_FLAG_SORTANDFILTER_APPROVED_ONLY);
-  enum_params.output_typeinfo = &output_type;
-
-  /* register hardware encoders first (likey no hardware audio encoder) */
-  i = 0;
-  do {
-    enum_params.device_index = i++;
-    transform = gst_mf_transform_new (&enum_params);
-    do_next = TRUE;
-
-    if (!transform) {
-      do_next = FALSE;
-    } else {
-      gst_mf_aac_enc_plugin_init_internal (plugin, rank, transform,
-          enum_params.device_index, enum_params.enum_flags);
-      gst_clear_object (&transform);
-    }
-  } while (do_next);
-
-  /* register software encoders */
   enum_params.enum_flags = (MFT_ENUM_FLAG_SYNCMFT |
       MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_SORTANDFILTER_APPROVED_ONLY);
+  enum_params.output_typeinfo = &output_type;
+
   i = 0;
   do {
     enum_params.device_index = i++;

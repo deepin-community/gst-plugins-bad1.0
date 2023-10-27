@@ -17,13 +17,16 @@ subdir('shaders')
 
 vulkan_sources = [
   'gstvulkan.c',
+  'gstvulkanelement.c',
   'vkcolorconvert.c',
   'vkdownload.c',
   'vkdeviceprovider.c',
   'vkimageidentity.c',
+  'vkshaderspv.c',
   'vksink.c',
   'vkupload.c',
   'vkviewconvert.c',
+  'vkoverlaycompositor.c',
 ]
 
 vulkan_plugin_enum_headers = [
@@ -44,9 +47,8 @@ gstvulkan_plugin = library('gstvulkan',
   objc_args : gst_plugins_bad_args,
   link_args : noseh_link_args,
   include_directories : [configinc],
-  dependencies : [gstvideo_dep, gstbase_dep, gstvulkan_dep, vulkan_dep],
+  dependencies : [gstvideo_dep, gstbase_dep, gstvulkan_dep, vulkan_dep, gio_dep],
   install : true,
   install_dir : plugins_install_dir,
 )
-pkgconfig.generate(gstvulkan_plugin, install_dir : plugins_pkgconfig_install_dir)
 plugins += [gstvulkan_plugin]

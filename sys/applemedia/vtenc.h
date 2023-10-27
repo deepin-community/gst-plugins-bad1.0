@@ -21,6 +21,7 @@
 #define __GST_VTENC_H__
 
 #include <gst/gst.h>
+#include <gst/codecparsers/gsth264parser.h>
 #include <gst/video/video.h>
 #include <VideoToolbox/VideoToolbox.h>
 
@@ -58,7 +59,9 @@ struct _GstVTEnc
 
   const GstVTEncoderDetails * details;
 
+  CMVideoCodecType specific_format_id;
   CFStringRef profile_level;
+  GstH264Profile h264_profile;
   guint bitrate;
   gboolean allow_frame_reordering;
   gboolean realtime;
@@ -66,18 +69,19 @@ struct _GstVTEnc
   gint max_keyframe_interval;
   GstClockTime max_keyframe_interval_duration;
   gint latency_frames;
+  gboolean preserve_alpha;
 
   gboolean dump_properties;
   gboolean dump_attributes;
 
-  gint negotiated_width, negotiated_height;
-  gint negotiated_fps_n, negotiated_fps_d;
   gint caps_width, caps_height;
   gint caps_fps_n, caps_fps_d;
+  gboolean have_field_order;
   GstVideoCodecState *input_state;
   GstVideoInfo video_info;
   VTCompressionSessionRef session;
   CFDictionaryRef keyframe_props;
+  GstClockTime dts_offset;
 
   GAsyncQueue * cur_outframes;
 };

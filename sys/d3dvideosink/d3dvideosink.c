@@ -70,7 +70,7 @@ static void gst_d3dvideosink_expose (GstVideoOverlay * overlay);
 static void gst_d3dvideosink_navigation_interface_init (GstNavigationInterface *
     iface);
 static void gst_d3dvideosink_navigation_send_event (GstNavigation * navigation,
-    GstStructure * structure);
+    GstEvent * event);
 /* GObject */
 static void gst_d3dvideosink_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);
@@ -157,8 +157,8 @@ gst_d3dvideosink_class_init (GstD3DVideoSinkClass * klass)
           (GParamFlags) G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_static_metadata (gstelement_class,
-      "Direct3D video sink", "Sink/Video",
-      "Display data using a Direct3D video renderer",
+      "Direct3D9 video sink", "Sink/Video",
+      "Display data using a Direct3D9 video renderer",
       "David Hoyt <dhoyt@hoytsoft.org>, Roland Krikava <info@bluedigits.com>");
 
   gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
@@ -580,7 +580,7 @@ gst_d3dvideosink_video_overlay_interface_init (GstVideoOverlayInterface * iface)
 static void
 gst_d3dvideosink_navigation_interface_init (GstNavigationInterface * iface)
 {
-  iface->send_event = gst_d3dvideosink_navigation_send_event;
+  iface->send_event_simple = gst_d3dvideosink_navigation_send_event;
 }
 
 /* Video Render Code */
@@ -622,23 +622,20 @@ gst_d3dvideosink_show_frame (GstVideoSink * vsink, GstBuffer * buffer)
 
 static void
 gst_d3dvideosink_navigation_send_event (GstNavigation * navigation,
-    GstStructure * structure)
+    GstEvent * event)
 {
   GstD3DVideoSink *sink = GST_D3DVIDEOSINK (navigation);
-  GstEvent *e;
 
-  if ((e = gst_event_new_navigation (structure))) {
-    GstPad *pad;
-    if ((pad = gst_pad_get_peer (GST_VIDEO_SINK_PAD (sink)))) {
-      if (!gst_pad_send_event (pad, gst_event_ref (e))) {
-        /* If upstream didn't handle the event we'll post a message with it
-         * for the application in case it wants to do something with it */
-        gst_element_post_message (GST_ELEMENT_CAST (sink),
-            gst_navigation_message_new_event (GST_OBJECT_CAST (sink), e));
-      }
-      gst_event_unref (e);
-      gst_object_unref (pad);
+  GstPad *pad;
+  if ((pad = gst_pad_get_peer (GST_VIDEO_SINK_PAD (sink)))) {
+    if (!gst_pad_send_event (pad, gst_event_ref (event))) {
+      /* If upstream didn't handle the event we'll post a message with it
+       * for the application in case it wants to do something with it */
+      gst_element_post_message (GST_ELEMENT_CAST (sink),
+          gst_navigation_message_new_event (GST_OBJECT_CAST (sink), event));
     }
+    gst_event_unref (event);
+    gst_object_unref (pad);
   }
 }
 
@@ -649,7 +646,6 @@ gst_d3dvideosink_navigation_send_event (GstNavigation * navigation,
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  /* PRIMARY: this is the best videosink to use on windows */
   if (!gst_element_register (plugin, ELEMENT_NAME,
           GST_RANK_SECONDARY, GST_TYPE_D3DVIDEOSINK))
     return FALSE;

@@ -21,6 +21,7 @@
 #define __TRANSPORT_STREAM_H__
 
 #include "fwd.h"
+#include <gst/rtp/rtp.h>
 #include <gst/webrtc/rtptransceiver.h>
 
 G_BEGIN_DECLS
@@ -34,13 +35,18 @@ GType transport_stream_get_type(void);
 typedef struct
 {
   guint8 pt;
+  guint media_idx;
   GstCaps *caps;
 } PtMapItem;
 
 typedef struct
 {
+  GstWebRTCRTPTransceiverDirection direction;
   guint32 ssrc;
   guint media_idx;
+  char *mid;
+  char *rid;
+  GWeakRef rtpjitterbuffer; /* for stats */
 } SsrcMapItem;
 
 struct _TransportStream
@@ -48,9 +54,6 @@ struct _TransportStream
   GstObject                 parent;
 
   guint                     session_id;             /* session_id */
-  gboolean                  rtcp;
-  gboolean                  rtcp_mux;
-  gboolean                  rtcp_rsize;
   gboolean                  dtls_client;
   gboolean                  active;                 /* TRUE if any mline in the bundle/transport is active */
   TransportSendBin         *send_bin;               /* bin containing all the sending transport elements */
@@ -58,14 +61,22 @@ struct _TransportStream
   GstWebRTCICEStream       *stream;
 
   GstWebRTCDTLSTransport   *transport;
-  GstWebRTCDTLSTransport   *rtcp_transport;
 
   GArray                   *ptmap;                  /* array of PtMapItem's */
-  GArray                   *remote_ssrcmap;         /* array of SsrcMapItem's */
+  GPtrArray                *ssrcmap;                /* array of SsrcMapItem's */
   gboolean                  output_connected;       /* whether receive bin is connected to rtpbin */
 
+  guint                     rtphdrext_id_stream_id;
+  guint                     rtphdrext_id_repaired_stream_id;
   GstElement               *rtxsend;
+  GstRTPHeaderExtension    *rtxsend_stream_id;
+  GstRTPHeaderExtension    *rtxsend_repaired_stream_id;
   GstElement               *rtxreceive;
+  GstRTPHeaderExtension    *rtxreceive_stream_id;
+  GstRTPHeaderExtension    *rtxreceive_repaired_stream_id;
+
+  GstElement               *reddec;
+  GList                    *fecdecs;
 };
 
 struct _TransportStreamClass
@@ -76,12 +87,28 @@ struct _TransportStreamClass
 TransportStream *       transport_stream_new        (GstWebRTCBin * webrtc,
                                                      guint session_id);
 int                     transport_stream_get_pt     (TransportStream * stream,
-                                                     const gchar * encoding_name);
+                                                     const gchar * encoding_name,
+                                                     guint media_idx);
 int *                   transport_stream_get_all_pt (TransportStream * stream,
                                                      const gchar * encoding_name,
                                                      gsize * pt_len);
 GstCaps *               transport_stream_get_caps_for_pt    (TransportStream * stream,
                                                              guint pt);
+
+typedef gboolean (*FindSsrcMapFunc) (SsrcMapItem * e1, gconstpointer data);
+
+SsrcMapItem *           transport_stream_find_ssrc_map_item (TransportStream * stream,
+                                                      gconstpointer data,
+                                                      FindSsrcMapFunc func);
+
+void                    transport_stream_filter_ssrc_map_item (TransportStream * stream,
+                                                      gconstpointer data,
+                                                      FindSsrcMapFunc func);
+
+SsrcMapItem *           transport_stream_add_ssrc_map_item (TransportStream * stream,
+                                                      GstWebRTCRTPTransceiverDirection direction,
+                                                      guint32 ssrc,
+                                                      guint media_idx);
 
 G_END_DECLS
 

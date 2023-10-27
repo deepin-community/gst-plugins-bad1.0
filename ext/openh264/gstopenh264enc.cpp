@@ -27,8 +27,10 @@
 #include "config.h"
 #endif
 
+#include "gstopenh264elements.h"
 #include "gstopenh264enc.h"
 
+#include <gst/pbutils/pbutils.h>
 #include <gst/gst.h>
 #include <gst/base/base.h>
 #include <gst/video/video.h>
@@ -162,6 +164,7 @@ static void gst_openh264enc_set_usage_type (GstOpenh264Enc * openh264enc,
     gint usage_type);
 static void gst_openh264enc_set_rate_control (GstOpenh264Enc * openh264enc,
     gint rc_mode);
+static gboolean openh264enc_element_init (GstPlugin * plugin);
 
 
 #define DEFAULT_BITRATE            (128000)
@@ -222,16 +225,17 @@ GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS
-    ("video/x-h264, stream-format=(string)\"byte-stream\", alignment=(string)\"au\", profile=(string)\"baseline\"")
-    );
+    ("video/x-h264, "
+      "stream-format=(string)\"byte-stream\", alignment=(string)\"au\","
+      "profile = (string) { constrained-baseline, baseline, main, constrained-high, high }"
+    )
+);
 
 /* class initialization */
 
 G_DEFINE_TYPE_WITH_CODE (GstOpenh264Enc, gst_openh264enc,
-    GST_TYPE_VIDEO_ENCODER,
-    G_IMPLEMENT_INTERFACE (GST_TYPE_PRESET, NULL);
-    GST_DEBUG_CATEGORY_INIT (gst_openh264enc_debug_category, "openh264enc", 0,
-        "debug category for openh264enc element"));
+    GST_TYPE_VIDEO_ENCODER, G_IMPLEMENT_INTERFACE (GST_TYPE_PRESET, NULL));
+GST_ELEMENT_REGISTER_DEFINE_CUSTOM (openh264enc, openh264enc_element_init);
 
 static void
 gst_openh264enc_class_init (GstOpenh264EncClass * klass)
@@ -678,6 +682,43 @@ gst_openh264enc_stop (GstVideoEncoder * encoder)
   return TRUE;
 }
 
+static guint8
+gst_openh264enc_get_level_from_caps (GstCaps *outcaps, GstCaps *allowed_caps)
+{
+  GstStructure *s = gst_caps_get_structure (outcaps, 0);
+  const gchar * level = gst_structure_get_string (gst_caps_get_structure (allowed_caps, 0), "level");
+
+  if (!level)
+    return LEVEL_UNKNOWN;
+
+  gst_structure_set (s, "level", G_TYPE_STRING, level, NULL);
+  return gst_codec_utils_h264_get_level_idc (level);
+}
+
+static EProfileIdc
+gst_openh264enc_get_profile_from_caps (GstCaps *outcaps, GstCaps *allowed_caps)
+{
+  EProfileIdc oh264_profile = PRO_BASELINE;
+  GstStructure *allowed_s = gst_caps_get_structure (allowed_caps, 0);
+  GstStructure *s = gst_caps_get_structure (outcaps, 0);
+  const gchar *profile = gst_structure_get_string (allowed_s, "profile");
+
+  if (!profile)
+    return oh264_profile;
+
+  gst_structure_set (s, "profile", G_TYPE_STRING, profile, NULL);
+  if (!g_strcmp0 (profile, "constrained-baseline") ||
+      !g_strcmp0 (profile, "baseline"))
+    return PRO_BASELINE;
+  else if (!g_strcmp0 (profile, "main"))
+    return PRO_MAIN;
+  else if (!g_strcmp0 (profile, "high") ||
+      !g_strcmp0 (profile, "constrained-high"))
+    return PRO_HIGH;
+
+  g_assert_not_reached ();
+  return PRO_BASELINE;
+}
 
 static gboolean
 gst_openh264enc_set_format (GstVideoEncoder * encoder,
@@ -694,6 +735,7 @@ gst_openh264enc_set_format (GstVideoEncoder * encoder,
   GstVideoCodecState *output_state;
   openh264enc->frame_count = 0;
   int video_format = videoFormatI420;
+  GstCaps *allowed_caps = NULL;
 
   debug_caps = gst_caps_to_string (state->caps);
   GST_DEBUG_OBJECT (openh264enc, "gst_e26d4_enc_set_format called, caps: %s",
@@ -720,6 +762,12 @@ gst_openh264enc_set_format (GstVideoEncoder * encoder,
   WelsCreateSVCEncoder (&openh264enc->encoder);
   unsigned int uiTraceLevel = WELS_LOG_ERROR;
   openh264enc->encoder->SetOption (ENCODER_OPTION_TRACE_LEVEL, &uiTraceLevel);
+
+  outcaps = gst_static_pad_template_get_caps (&gst_openh264enc_src_template);
+  outcaps = gst_caps_make_writable (outcaps);
+  allowed_caps = gst_pad_get_allowed_caps (GST_VIDEO_ENCODER_SRC_PAD (encoder));
+  allowed_caps = gst_caps_make_writable (allowed_caps);
+  allowed_caps = gst_caps_fixate (allowed_caps);
 
   GST_OBJECT_LOCK (openh264enc);
 
@@ -753,12 +801,15 @@ gst_openh264enc_set_format (GstVideoEncoder * encoder,
   enc_params.bPrefixNalAddingCtrl = 0;
   enc_params.fMaxFrameRate = fps_n * 1.0 / fps_d;
   enc_params.iLoopFilterDisableIdc = openh264enc->deblocking_mode;
-  enc_params.sSpatialLayers[0].uiProfileIdc = PRO_BASELINE;
+  enc_params.sSpatialLayers[0].uiProfileIdc = gst_openh264enc_get_profile_from_caps (outcaps, allowed_caps);
+  enc_params.sSpatialLayers[0].uiLevelIdc = (ELevelIdc) gst_openh264enc_get_level_from_caps (outcaps, allowed_caps);
   enc_params.sSpatialLayers[0].iVideoWidth = enc_params.iPicWidth;
   enc_params.sSpatialLayers[0].iVideoHeight = enc_params.iPicHeight;
   enc_params.sSpatialLayers[0].fFrameRate = fps_n * 1.0 / fps_d;
   enc_params.sSpatialLayers[0].iSpatialBitrate = enc_params.iTargetBitrate;
   enc_params.sSpatialLayers[0].iMaxSpatialBitrate = enc_params.iMaxBitrate;
+
+  gst_clear_caps (&allowed_caps);
 
   if (openh264enc->slice_mode == GST_OPENH264_SLICE_MODE_N_SLICES) {
     if (openh264enc->num_slices == 1)
@@ -802,10 +853,6 @@ gst_openh264enc_set_format (GstVideoEncoder * encoder,
   }
 
   openh264enc->encoder->SetOption (ENCODER_OPTION_DATAFORMAT, &video_format);
-
-  outcaps =
-      gst_caps_copy (gst_static_pad_template_get_caps
-      (&gst_openh264enc_src_template));
 
   output_state = gst_video_encoder_set_output_state (encoder, outcaps, state);
   gst_video_codec_state_unref (output_state);
@@ -1006,4 +1053,17 @@ gst_openh264enc_finish (GstVideoEncoder * encoder)
   while ((gst_openh264enc_handle_frame (encoder, NULL)) == GST_FLOW_OK);
 
   return GST_FLOW_OK;
+}
+
+static gboolean
+openh264enc_element_init (GstPlugin * plugin)
+{
+  GST_DEBUG_CATEGORY_INIT (gst_openh264enc_debug_category, "openh264enc", 0,
+      "debug category for openh264enc element");
+  if (openh264_element_init (plugin))
+    return gst_element_register (plugin, "openh264enc", GST_RANK_MARGINAL,
+        GST_TYPE_OPENH264ENC);
+
+  GST_ERROR ("Incorrect library version loaded, expecting %s", g_strCodecVer);
+  return FALSE;
 }

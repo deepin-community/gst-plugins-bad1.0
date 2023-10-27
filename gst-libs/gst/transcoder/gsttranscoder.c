@@ -28,6 +28,9 @@
  */
 
 #include "gsttranscoder.h"
+#include "gsttranscoder-private.h"
+
+static GOnce once = G_ONCE_INIT;
 
 GST_DEBUG_CATEGORY_STATIC (gst_transcoder_debug);
 #define GST_CAT_DEFAULT gst_transcoder_debug
@@ -52,7 +55,6 @@ gst_transcoder_error_quark (void)
 enum
 {
   PROP_0,
-  PROP_SIGNAL_DISPATCHER,
   PROP_SRC_URI,
   PROP_DEST_URI,
   PROP_PROFILE,
@@ -64,21 +66,9 @@ enum
   PROP_LAST
 };
 
-enum
-{
-  SIGNAL_POSITION_UPDATED,
-  SIGNAL_DURATION_CHANGED,
-  SIGNAL_DONE,
-  SIGNAL_ERROR,
-  SIGNAL_WARNING,
-  SIGNAL_LAST
-};
-
 struct _GstTranscoder
 {
   GstObject parent;
-
-  GstTranscoderSignalDispatcher *signal_dispatcher;
 
   GstEncodingProfile *profile;
   gchar *source_uri;
@@ -99,6 +89,12 @@ struct _GstTranscoder
   gint wanted_cpu_usage;
 
   GstClockTime last_duration;
+
+  GstTranscoderState app_state;
+
+  GstBus *api_bus;
+  GstTranscoderSignalAdapter *signal_adapter;
+  GstTranscoderSignalAdapter *sync_signal_adapter;
 };
 
 struct _GstTranscoderClass
@@ -106,15 +102,9 @@ struct _GstTranscoderClass
   GstObjectClass parent_class;
 };
 
-static void
-gst_transcoder_signal_dispatcher_dispatch (GstTranscoderSignalDispatcher * self,
-    GstTranscoder * transcoder, void (*emitter) (gpointer data), gpointer data,
-    GDestroyNotify destroy);
-
 #define parent_class gst_transcoder_parent_class
 G_DEFINE_TYPE (GstTranscoder, gst_transcoder, GST_TYPE_OBJECT);
 
-static guint signals[SIGNAL_LAST] = { 0, };
 static GParamSpec *param_specs[PROP_LAST] = { NULL, };
 
 static void gst_transcoder_dispose (GObject * object);
@@ -162,6 +152,7 @@ gst_transcoder_init (GstTranscoder * self)
 
   self->context = g_main_context_new ();
   self->loop = g_main_loop_new (self->context, FALSE);
+  self->api_bus = gst_bus_new ();
   self->wanted_cpu_usage = 100;
 
   self->position_update_interval_ms = DEFAULT_POSITION_UPDATE_INTERVAL_MS;
@@ -179,12 +170,6 @@ gst_transcoder_class_init (GstTranscoderClass * klass)
   gobject_class->dispose = gst_transcoder_dispose;
   gobject_class->finalize = gst_transcoder_finalize;
   gobject_class->constructed = gst_transcoder_constructed;
-
-  param_specs[PROP_SIGNAL_DISPATCHER] =
-      g_param_spec_object ("signal-dispatcher",
-      "Signal Dispatcher", "Dispatcher for the signals to e.g. event loops",
-      GST_TYPE_TRANSCODER_SIGNAL_DISPATCHER,
-      G_PARAM_WRITABLE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
 
   param_specs[PROP_SRC_URI] =
       g_param_spec_string ("src-uri", "URI", "Source URI", DEFAULT_URI,
@@ -232,31 +217,6 @@ gst_transcoder_class_init (GstTranscoderClass * klass)
       DEFAULT_AVOID_REENCODING, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (gobject_class, PROP_LAST, param_specs);
-
-  signals[SIGNAL_POSITION_UPDATED] =
-      g_signal_new ("position-updated", G_TYPE_FROM_CLASS (klass),
-      G_SIGNAL_RUN_LAST | G_SIGNAL_NO_RECURSE | G_SIGNAL_NO_HOOKS, 0, NULL,
-      NULL, NULL, G_TYPE_NONE, 1, GST_TYPE_CLOCK_TIME);
-
-  signals[SIGNAL_DURATION_CHANGED] =
-      g_signal_new ("duration-changed", G_TYPE_FROM_CLASS (klass),
-      G_SIGNAL_RUN_LAST | G_SIGNAL_NO_RECURSE | G_SIGNAL_NO_HOOKS, 0, NULL,
-      NULL, NULL, G_TYPE_NONE, 1, GST_TYPE_CLOCK_TIME);
-
-  signals[SIGNAL_DONE] =
-      g_signal_new ("done", G_TYPE_FROM_CLASS (klass),
-      G_SIGNAL_RUN_LAST | G_SIGNAL_NO_RECURSE | G_SIGNAL_NO_HOOKS, 0, NULL,
-      NULL, NULL, G_TYPE_NONE, 0, G_TYPE_INVALID);
-
-  signals[SIGNAL_ERROR] =
-      g_signal_new ("error", G_TYPE_FROM_CLASS (klass),
-      G_SIGNAL_RUN_LAST | G_SIGNAL_NO_RECURSE | G_SIGNAL_NO_HOOKS, 0, NULL,
-      NULL, NULL, G_TYPE_NONE, 2, G_TYPE_ERROR, GST_TYPE_STRUCTURE);
-
-  signals[SIGNAL_WARNING] =
-      g_signal_new ("warning", G_TYPE_FROM_CLASS (klass),
-      G_SIGNAL_RUN_LAST | G_SIGNAL_NO_RECURSE | G_SIGNAL_NO_HOOKS, 0, NULL,
-      NULL, NULL, G_TYPE_NONE, 2, G_TYPE_ERROR, GST_TYPE_STRUCTURE);
 }
 
 static void
@@ -266,10 +226,14 @@ gst_transcoder_dispose (GObject * object)
 
   GST_TRACE_OBJECT (self, "Stopping main thread");
 
+  GST_OBJECT_LOCK (self);
   if (self->loop) {
     g_main_loop_quit (self->loop);
+    GST_OBJECT_UNLOCK (self);
 
     g_thread_join (self->thread);
+
+    GST_OBJECT_LOCK (self);
     self->thread = NULL;
 
     g_main_loop_unref (self->loop);
@@ -278,6 +242,11 @@ gst_transcoder_dispose (GObject * object)
     g_main_context_unref (self->context);
     self->context = NULL;
 
+    gst_clear_object (&self->signal_adapter);
+    gst_clear_object (&self->sync_signal_adapter);
+    GST_OBJECT_UNLOCK (self);
+  } else {
+    GST_OBJECT_UNLOCK (self);
   }
 
   G_OBJECT_CLASS (parent_class)->dispose (object);
@@ -292,9 +261,8 @@ gst_transcoder_finalize (GObject * object)
 
   g_free (self->source_uri);
   g_free (self->dest_uri);
-  if (self->signal_dispatcher)
-    g_object_unref (self->signal_dispatcher);
   g_cond_clear (&self->cond);
+  gst_object_unref (self->api_bus);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -329,9 +297,6 @@ gst_transcoder_set_property (GObject * object, guint prop_id,
   GstTranscoder *self = GST_TRANSCODER (object);
 
   switch (prop_id) {
-    case PROP_SIGNAL_DISPATCHER:
-      self->signal_dispatcher = g_value_dup_object (value);
-      break;
     case PROP_SRC_URI:{
       GST_OBJECT_LOCK (self);
       g_free (self->source_uri);
@@ -441,6 +406,34 @@ gst_transcoder_get_property (GObject * object, guint prop_id,
   }
 }
 
+/*
+ * Works same as gst_structure_set to set field/type/value triplets on message data
+ */
+static void
+api_bus_post_message (GstTranscoder * self, GstTranscoderMessage message_type,
+    const gchar * firstfield, ...)
+{
+  GstStructure *message_data = NULL;
+  GstMessage *msg = NULL;
+  va_list varargs;
+
+  GST_INFO ("Posting API-bus message-type: %s",
+      gst_transcoder_message_get_name (message_type));
+  message_data = gst_structure_new (GST_TRANSCODER_MESSAGE_DATA,
+      GST_TRANSCODER_MESSAGE_DATA_TYPE, GST_TYPE_TRANSCODER_MESSAGE,
+      message_type, NULL);
+
+  va_start (varargs, firstfield);
+  gst_structure_set_valist (message_data, firstfield, varargs);
+  va_end (varargs);
+
+  msg = gst_message_new_custom (GST_MESSAGE_APPLICATION,
+      GST_OBJECT (self), message_data);
+  GST_DEBUG ("Created message with payload: [ %" GST_PTR_FORMAT " ]",
+      message_data);
+  gst_bus_post (self->api_bus, msg);
+}
+
 static gboolean
 main_loop_running_cb (gpointer user_data)
 {
@@ -455,55 +448,26 @@ main_loop_running_cb (gpointer user_data)
   return G_SOURCE_REMOVE;
 }
 
-typedef struct
-{
-  GstTranscoder *transcoder;
-  GstClockTime position;
-} PositionUpdatedSignalData;
-
-static void
-position_updated_dispatch (gpointer user_data)
-{
-  PositionUpdatedSignalData *data = user_data;
-
-  if (data->transcoder->target_state >= GST_STATE_PAUSED) {
-    g_signal_emit (data->transcoder, signals[SIGNAL_POSITION_UPDATED], 0,
-        data->position);
-    g_object_notify_by_pspec (G_OBJECT (data->transcoder),
-        param_specs[PROP_POSITION]);
-  }
-}
-
-static void
-position_updated_signal_data_free (PositionUpdatedSignalData * data)
-{
-  g_object_unref (data->transcoder);
-  g_free (data);
-}
-
 static gboolean
 tick_cb (gpointer user_data)
 {
   GstTranscoder *self = GST_TRANSCODER (user_data);
   gint64 position;
 
-  if (self->target_state >= GST_STATE_PAUSED
-      && gst_element_query_position (self->transcodebin, GST_FORMAT_TIME,
+  if (self->target_state < GST_STATE_PAUSED)
+    return G_SOURCE_CONTINUE;
+
+  if (!gst_element_query_position (self->transcodebin, GST_FORMAT_TIME,
           &position)) {
-    GST_LOG_OBJECT (self, "Position %" GST_TIME_FORMAT,
-        GST_TIME_ARGS (position));
-
-    if (g_signal_handler_find (self, G_SIGNAL_MATCH_ID,
-            signals[SIGNAL_POSITION_UPDATED], 0, NULL, NULL, NULL) != 0) {
-      PositionUpdatedSignalData *data = g_new0 (PositionUpdatedSignalData, 1);
-
-      data->transcoder = g_object_ref (self);
-      data->position = position;
-      gst_transcoder_signal_dispatcher_dispatch (self->signal_dispatcher, self,
-          position_updated_dispatch, data,
-          (GDestroyNotify) position_updated_signal_data_free);
-    }
+    GST_LOG_OBJECT (self, "Could not query position");
+    return G_SOURCE_CONTINUE;
   }
+
+  GST_LOG_OBJECT (self, "Position %" GST_TIME_FORMAT, GST_TIME_ARGS (position));
+
+  api_bus_post_message (self, GST_TRANSCODER_MESSAGE_POSITION_UPDATED,
+      GST_TRANSCODER_MESSAGE_DATA_POSITION, GST_TYPE_CLOCK_TIME, position,
+      NULL);
 
   return G_SOURCE_CONTINUE;
 }
@@ -533,58 +497,6 @@ remove_tick_source (GstTranscoder * self)
   self->tick_source = NULL;
 }
 
-typedef struct
-{
-  GstTranscoder *transcoder;
-  GError *err;
-  GstStructure *details;
-} IssueSignalData;
-
-static void
-error_dispatch (gpointer user_data)
-{
-  IssueSignalData *data = user_data;
-
-  g_signal_emit (data->transcoder, signals[SIGNAL_ERROR], 0, data->err,
-      data->details);
-}
-
-static void
-free_issue_signal_data (IssueSignalData * data)
-{
-  g_object_unref (data->transcoder);
-  if (data->details)
-    gst_structure_free (data->details);
-  g_clear_error (&data->err);
-  g_free (data);
-}
-
-static void
-emit_error (GstTranscoder * self, GError * err, const GstStructure * details)
-{
-  if (g_signal_handler_find (self, G_SIGNAL_MATCH_ID,
-          signals[SIGNAL_ERROR], 0, NULL, NULL, NULL) != 0) {
-    IssueSignalData *data = g_new0 (IssueSignalData, 1);
-
-    data->transcoder = g_object_ref (self);
-    data->err = g_error_copy (err);
-    if (details)
-      data->details = gst_structure_copy (details);
-    gst_transcoder_signal_dispatcher_dispatch (self->signal_dispatcher, self,
-        error_dispatch, data, (GDestroyNotify) free_issue_signal_data);
-  }
-
-  g_error_free (err);
-
-  remove_tick_source (self);
-
-  self->target_state = GST_STATE_NULL;
-  self->current_state = GST_STATE_NULL;
-  self->is_live = FALSE;
-  self->is_eos = FALSE;
-  gst_element_set_state (self->transcodebin, GST_STATE_NULL);
-}
-
 static void
 dump_dot_file (GstTranscoder * self, const gchar * name)
 {
@@ -593,36 +505,9 @@ dump_dot_file (GstTranscoder * self, const gchar * name)
   full_name = g_strdup_printf ("gst-transcoder.%p.%s", self, name);
 
   GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS (GST_BIN (self->transcodebin),
-      GST_DEBUG_GRAPH_SHOW_VERBOSE, full_name);
+      GST_DEBUG_GRAPH_SHOW_ALL, full_name);
 
   g_free (full_name);
-}
-
-static void
-warning_dispatch (gpointer user_data)
-{
-  IssueSignalData *data = user_data;
-
-  g_signal_emit (data->transcoder, signals[SIGNAL_WARNING], 0, data->err,
-      data->details);
-}
-
-static void
-emit_warning (GstTranscoder * self, GError * err, const GstStructure * details)
-{
-  if (g_signal_handler_find (self, G_SIGNAL_MATCH_ID,
-          signals[SIGNAL_WARNING], 0, NULL, NULL, NULL) != 0) {
-    IssueSignalData *data = g_new0 (IssueSignalData, 1);
-
-    data->transcoder = g_object_ref (self);
-    data->err = g_error_copy (err);
-    if (details)
-      data->details = gst_structure_copy (details);
-    gst_transcoder_signal_dispatcher_dispatch (self->signal_dispatcher, self,
-        warning_dispatch, data, (GDestroyNotify) free_issue_signal_data);
-  }
-
-  g_error_free (err);
 }
 
 static void
@@ -650,7 +535,11 @@ error_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
       "msg-source-element-name", G_TYPE_STRING, "name",
       "msg-source-type", G_TYPE_GTYPE, G_OBJECT_TYPE (msg->src),
       "msg-error", G_TYPE_STRING, message, NULL);
-  emit_error (self, g_error_copy (err), details);
+
+  api_bus_post_message (self, GST_TRANSCODER_MESSAGE_ERROR,
+      GST_TRANSCODER_MESSAGE_DATA_ERROR, G_TYPE_ERROR, err,
+      GST_TRANSCODER_MESSAGE_DATA_ISSUE_DETAILS, GST_TYPE_STRUCTURE, details,
+      NULL);
 
   gst_structure_free (details);
   g_clear_error (&err);
@@ -691,8 +580,13 @@ warning_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
   transcoder_err =
       g_error_new_literal (GST_TRANSCODER_ERROR, GST_TRANSCODER_ERROR_FAILED,
       full_message);
-  emit_warning (self, transcoder_err, details);
 
+  api_bus_post_message (self, GST_TRANSCODER_MESSAGE_WARNING,
+      GST_TRANSCODER_MESSAGE_DATA_WARNING, G_TYPE_ERROR, transcoder_err,
+      GST_TRANSCODER_MESSAGE_DATA_ISSUE_DETAILS, GST_TYPE_STRUCTURE, details,
+      NULL);
+
+  g_clear_error (&transcoder_err);
   g_clear_error (&err);
   g_free (debug);
   g_free (name);
@@ -701,9 +595,17 @@ warning_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
 }
 
 static void
-eos_dispatch (gpointer user_data)
+notify_state_changed (GstTranscoder * self, GstTranscoderState new_state)
 {
-  g_signal_emit (user_data, signals[SIGNAL_DONE], 0);
+  if (new_state == self->app_state)
+    return;
+
+  GST_DEBUG_OBJECT (self, "Notifying new state: %s",
+      gst_transcoder_state_get_name (new_state));
+  self->app_state = new_state;
+  api_bus_post_message (self, GST_TRANSCODER_MESSAGE_STATE_CHANGED,
+      GST_TRANSCODER_MESSAGE_DATA_STATE, GST_TYPE_TRANSCODER_STATE, new_state,
+      NULL);
 }
 
 static void
@@ -719,11 +621,8 @@ eos_cb (G_GNUC_UNUSED GstBus * bus, G_GNUC_UNUSED GstMessage * msg,
   tick_cb (self);
   remove_tick_source (self);
 
-  if (g_signal_handler_find (self, G_SIGNAL_MATCH_ID,
-          signals[SIGNAL_DONE], 0, NULL, NULL, NULL) != 0) {
-    gst_transcoder_signal_dispatcher_dispatch (self->signal_dispatcher, self,
-        eos_dispatch, g_object_ref (self), (GDestroyNotify) g_object_unref);
-  }
+  notify_state_changed (self, GST_TRANSCODER_STATE_STOPPED);
+  api_bus_post_message (self, GST_TRANSCODER_MESSAGE_DONE, NULL, NULL);
   self->is_eos = TRUE;
 }
 
@@ -740,54 +639,13 @@ clock_lost_cb (G_GNUC_UNUSED GstBus * bus, G_GNUC_UNUSED GstMessage * msg,
     if (state_ret != GST_STATE_CHANGE_FAILURE)
       state_ret = gst_element_set_state (self->transcodebin, GST_STATE_PLAYING);
 
-    if (state_ret == GST_STATE_CHANGE_FAILURE)
-      emit_error (self, g_error_new (GST_TRANSCODER_ERROR,
-              GST_TRANSCODER_ERROR_FAILED, "Failed to handle clock loss"),
-          NULL);
-  }
-}
-
-typedef struct
-{
-  GstTranscoder *transcoder;
-  GstClockTime duration;
-} DurationChangedSignalData;
-
-static void
-duration_changed_dispatch (gpointer user_data)
-{
-  DurationChangedSignalData *data = user_data;
-
-  if (data->transcoder->target_state >= GST_STATE_PAUSED) {
-    g_signal_emit (data->transcoder, signals[SIGNAL_DURATION_CHANGED], 0,
-        data->duration);
-    g_object_notify_by_pspec (G_OBJECT (data->transcoder),
-        param_specs[PROP_DURATION]);
-  }
-}
-
-static void
-duration_changed_signal_data_free (DurationChangedSignalData * data)
-{
-  g_object_unref (data->transcoder);
-  g_free (data);
-}
-
-static void
-emit_duration_changed (GstTranscoder * self, GstClockTime duration)
-{
-  GST_DEBUG_OBJECT (self, "Duration changed %" GST_TIME_FORMAT,
-      GST_TIME_ARGS (duration));
-
-  if (g_signal_handler_find (self, G_SIGNAL_MATCH_ID,
-          signals[SIGNAL_DURATION_CHANGED], 0, NULL, NULL, NULL) != 0) {
-    DurationChangedSignalData *data = g_new0 (DurationChangedSignalData, 1);
-
-    data->transcoder = g_object_ref (self);
-    data->duration = duration;
-    gst_transcoder_signal_dispatcher_dispatch (self->signal_dispatcher, self,
-        duration_changed_dispatch, data,
-        (GDestroyNotify) duration_changed_signal_data_free);
+    if (state_ret == GST_STATE_CHANGE_FAILURE) {
+      GError *err = g_error_new (GST_TRANSCODER_ERROR,
+          GST_TRANSCODER_ERROR_FAILED, "Failed to handle clock loss");
+      api_bus_post_message (self, GST_TRANSCODER_MESSAGE_ERROR,
+          GST_TRANSCODER_MESSAGE_DATA_ERROR, G_TYPE_ERROR, err, NULL);
+      g_error_free (err);
+    }
   }
 }
 
@@ -816,9 +674,16 @@ state_changed_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg,
 
     self->current_state = new_state;
 
+    if (new_state == GST_STATE_PAUSED
+        && pending_state == GST_STATE_VOID_PENDING) {
+      remove_tick_source (self);
+      notify_state_changed (self, GST_TRANSCODER_STATE_PAUSED);
+    }
+
     if (new_state == GST_STATE_PLAYING
         && pending_state == GST_STATE_VOID_PENDING) {
       add_tick_source (self);
+      notify_state_changed (self, GST_TRANSCODER_STATE_PLAYING);
     }
   }
 }
@@ -832,7 +697,9 @@ duration_changed_cb (G_GNUC_UNUSED GstBus * bus, G_GNUC_UNUSED GstMessage * msg,
 
   if (gst_element_query_duration (self->transcodebin, GST_FORMAT_TIME,
           &duration)) {
-    emit_duration_changed (self, duration);
+    api_bus_post_message (self, GST_TRANSCODER_MESSAGE_DURATION_CHANGED,
+        GST_TRANSCODER_MESSAGE_DATA_DURATION, GST_TYPE_CLOCK_TIME,
+        duration, NULL);
   }
 }
 
@@ -862,11 +729,16 @@ request_state_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg,
 
   self->target_state = state;
   state_ret = gst_element_set_state (self->transcodebin, state);
-  if (state_ret == GST_STATE_CHANGE_FAILURE)
-    emit_error (self, g_error_new (GST_TRANSCODER_ERROR,
-            GST_TRANSCODER_ERROR_FAILED,
-            "Failed to change to requested state %s",
-            gst_element_state_get_name (state)), NULL);
+  if (state_ret == GST_STATE_CHANGE_FAILURE) {
+    GError *err = g_error_new (GST_TRANSCODER_ERROR,
+        GST_TRANSCODER_ERROR_FAILED,
+        "Failed to change to requested state %s",
+        gst_element_state_get_name (state));
+
+    api_bus_post_message (self, GST_TRANSCODER_MESSAGE_ERROR,
+        GST_TRANSCODER_MESSAGE_DATA_ERROR, G_TYPE_ERROR, err, NULL);
+    g_error_free (err);
+  }
 }
 
 static void
@@ -916,7 +788,6 @@ gst_transcoder_main (gpointer data)
   GstTranscoder *self = GST_TRANSCODER (data);
   GstBus *bus;
   GSource *source;
-  GSource *bus_source;
 
   GST_TRACE_OBJECT (self, "Starting main thread");
 
@@ -929,10 +800,7 @@ gst_transcoder_main (gpointer data)
   g_source_unref (source);
 
   self->bus = bus = gst_element_get_bus (self->transcodebin);
-  bus_source = gst_bus_create_watch (bus);
-  g_source_set_callback (bus_source, (GSourceFunc) gst_bus_async_signal_func,
-      NULL, NULL);
-  g_source_attach (bus_source, self->context);
+  gst_bus_add_signal_watch (bus);
 
   g_signal_connect (G_OBJECT (bus), "message::error", G_CALLBACK (error_cb),
       self);
@@ -956,13 +824,13 @@ gst_transcoder_main (gpointer data)
   self->current_state = GST_STATE_NULL;
   self->is_eos = FALSE;
   self->is_live = FALSE;
+  self->app_state = GST_TRANSCODER_STATE_STOPPED;
 
   GST_TRACE_OBJECT (self, "Starting main loop");
   g_main_loop_run (self->loop);
   GST_TRACE_OBJECT (self, "Stopped main loop");
 
-  g_source_destroy (bus_source);
-  g_source_unref (bus_source);
+  gst_bus_remove_signal_watch (bus);
   gst_object_unref (bus);
 
   remove_tick_source (self);
@@ -984,8 +852,6 @@ gst_transcoder_main (gpointer data)
 static gpointer
 gst_transcoder_init_once (G_GNUC_UNUSED gpointer user_data)
 {
-  gst_init (NULL, NULL);
-
   GST_DEBUG_CATEGORY_INIT (gst_transcoder_debug, "gst-transcoder", 0,
       "GstTranscoder");
   gst_transcoder_error_quark ();
@@ -1029,9 +895,15 @@ gst_transcoder_new (const gchar * source_uri,
 {
   GstEncodingProfile *profile;
 
+  g_once (&once, gst_transcoder_init_once, NULL);
+
+  g_return_val_if_fail (source_uri, NULL);
+  g_return_val_if_fail (dest_uri, NULL);
+  g_return_val_if_fail (encoding_profile, NULL);
+
   profile = create_encoding_profile (encoding_profile);
 
-  return gst_transcoder_new_full (source_uri, dest_uri, profile, NULL);
+  return gst_transcoder_new_full (source_uri, dest_uri, profile);
 }
 
 /**
@@ -1041,57 +913,49 @@ gst_transcoder_new (const gchar * source_uri,
  * @profile: The #GstEncodingProfile defining the output format
  * have a look at the #GstEncodingProfile documentation to find more
  * about the serialization format.
- * @signal_dispatcher: The #GstTranscoderSignalDispatcher to be used
- * to dispatch the various signals.
  *
  * Returns: a new #GstTranscoder instance
  */
 GstTranscoder *
 gst_transcoder_new_full (const gchar * source_uri,
-    const gchar * dest_uri, GstEncodingProfile * profile,
-    GstTranscoderSignalDispatcher * signal_dispatcher)
+    const gchar * dest_uri, GstEncodingProfile * profile)
 {
-  static GOnce once = G_ONCE_INIT;
-
   g_once (&once, gst_transcoder_init_once, NULL);
 
   g_return_val_if_fail (source_uri, NULL);
   g_return_val_if_fail (dest_uri, NULL);
 
   return g_object_new (GST_TYPE_TRANSCODER, "src-uri", source_uri,
-      "dest-uri", dest_uri, "profile", profile,
-      "signal-dispatcher", signal_dispatcher, NULL);
+      "dest-uri", dest_uri, "profile", profile, NULL);
 }
 
 typedef struct
 {
-  GError **user_error;
-  GMutex m;
-  GCond cond;
-
-  gboolean done;
-
+  GError *error;
+  GMainLoop *loop;
 } RunSyncData;
 
 static void
-_error_cb (GstTranscoder * self, GError * error, GstStructure * details,
-    RunSyncData * data)
+_error_cb (RunSyncData * data, GError * error, GstStructure * details)
 {
-  g_mutex_lock (&data->m);
-  data->done = TRUE;
-  if (data->user_error && (*data->user_error) == NULL)
-    g_propagate_error (data->user_error, error);
-  g_cond_broadcast (&data->cond);
-  g_mutex_unlock (&data->m);
+  if (data->error == NULL)
+    data->error = g_error_copy (error);
+
+  if (data->loop) {
+    g_main_loop_quit (data->loop);
+    g_main_loop_unref (data->loop);
+    data->loop = NULL;
+  }
 }
 
 static void
-_done_cb (GstTranscoder * self, RunSyncData * data)
+_done_cb (RunSyncData * data)
 {
-  g_mutex_lock (&data->m);
-  data->done = TRUE;
-  g_cond_broadcast (&data->cond);
-  g_mutex_unlock (&data->m);
+  if (data->loop) {
+    g_main_loop_quit (data->loop);
+    g_main_loop_unref (data->loop);
+    data->loop = NULL;
+  }
 }
 
 /**
@@ -1107,22 +971,28 @@ gboolean
 gst_transcoder_run (GstTranscoder * self, GError ** error)
 {
   RunSyncData data = { 0, };
+  GstTranscoderSignalAdapter *signal_adapter;
 
-  g_mutex_init (&data.m);
-  g_cond_init (&data.cond);
+  g_return_val_if_fail (GST_IS_TRANSCODER (self), FALSE);
 
-  g_signal_connect (self, "error", G_CALLBACK (_error_cb), &data);
-  g_signal_connect (self, "done", G_CALLBACK (_done_cb), &data);
+  signal_adapter = gst_transcoder_get_signal_adapter (self, NULL);
+
+  data.loop = g_main_loop_new (NULL, FALSE);
+  g_signal_connect_swapped (signal_adapter, "error", G_CALLBACK (_error_cb),
+      &data);
+  g_signal_connect_swapped (signal_adapter, "done", G_CALLBACK (_done_cb),
+      &data);
   gst_transcoder_run_async (self);
 
-  g_mutex_lock (&data.m);
-  while (!data.done) {
-    g_cond_wait (&data.cond, &data.m);
-  }
-  g_mutex_unlock (&data.m);
+  if (!data.error)
+    g_main_loop_run (data.loop);
 
-  if (data.user_error) {
-    g_propagate_error (error, *data.user_error);
+  gst_element_set_state (self->transcodebin, GST_STATE_NULL);
+  g_object_unref (signal_adapter);
+
+  if (data.error) {
+    if (error)
+      g_propagate_error (error, data.error);
 
     return FALSE;
   }
@@ -1144,11 +1014,17 @@ gst_transcoder_run_async (GstTranscoder * self)
 {
   GstStateChangeReturn state_ret;
 
+  g_return_if_fail (GST_IS_TRANSCODER (self));
+
   GST_DEBUG_OBJECT (self, "Play");
 
   if (!self->profile) {
-    emit_error (self, g_error_new (GST_TRANSCODER_ERROR,
-            GST_TRANSCODER_ERROR_FAILED, "No \"profile\" provided"), NULL);
+    GError *err = g_error_new (GST_TRANSCODER_ERROR,
+        GST_TRANSCODER_ERROR_FAILED, "No \"profile\" provided");
+
+    api_bus_post_message (self, GST_TRANSCODER_MESSAGE_ERROR,
+        GST_TRANSCODER_MESSAGE_DATA_ERROR, G_TYPE_ERROR, err, NULL);
+    g_error_free (err);
 
     return;
   }
@@ -1157,8 +1033,12 @@ gst_transcoder_run_async (GstTranscoder * self)
   state_ret = gst_element_set_state (self->transcodebin, GST_STATE_PLAYING);
 
   if (state_ret == GST_STATE_CHANGE_FAILURE) {
-    emit_error (self, g_error_new (GST_TRANSCODER_ERROR,
-            GST_TRANSCODER_ERROR_FAILED, "Could not start transcoding"), NULL);
+    GError *err = g_error_new (GST_TRANSCODER_ERROR,
+        GST_TRANSCODER_ERROR_FAILED, "Could not start transcoding");
+    api_bus_post_message (self, GST_TRANSCODER_MESSAGE_ERROR,
+        GST_TRANSCODER_MESSAGE_DATA_ERROR, G_TYPE_ERROR, err, NULL);
+    g_error_free (err);
+
     return;
   } else if (state_ret == GST_STATE_CHANGE_NO_PREROLL) {
     self->is_live = TRUE;
@@ -1356,27 +1236,6 @@ gst_transcoder_set_avoid_reencoding (GstTranscoder * self,
   g_object_set (self->transcodebin, "avoid-reencoding", avoid_reencoding, NULL);
 }
 
-#define C_ENUM(v) ((gint) v)
-#define C_FLAGS(v) ((guint) v)
-
-GType
-gst_transcoder_error_get_type (void)
-{
-  static gsize id = 0;
-  static const GEnumValue values[] = {
-    {C_ENUM (GST_TRANSCODER_ERROR_FAILED), "GST_TRANSCODER_ERROR_FAILED",
-        "failed"},
-    {0, NULL, NULL}
-  };
-
-  if (g_once_init_enter (&id)) {
-    GType tmp = g_enum_register_static ("GstTranscoderError", values);
-    g_once_init_leave (&id, tmp);
-  }
-
-  return (GType) id;
-}
-
 /**
  * gst_transcoder_error_get_name:
  * @error: a #GstTranscoderError
@@ -1397,212 +1256,269 @@ gst_transcoder_error_get_name (GstTranscoderError error)
   return NULL;
 }
 
-G_DEFINE_INTERFACE (GstTranscoderSignalDispatcher,
-    gst_transcoder_signal_dispatcher, G_TYPE_OBJECT);
-
-static void
-gst_transcoder_signal_dispatcher_default_init (G_GNUC_UNUSED
-    GstTranscoderSignalDispatcherInterface * iface)
+/**
+ * gst_transcoder_get_message_bus:
+ * @transcoder: #GstTranscoder instance
+ *
+ * GstTranscoder API exposes a #GstBus instance which purpose is to provide data
+ * structures representing transcoder-internal events in form of #GstMessage-s of
+ * type GST_MESSAGE_APPLICATION.
+ *
+ * Each message carries a "transcoder-message" field of type #GstTranscoderMessage.
+ * Further fields of the message data are specific to each possible value of
+ * that enumeration.
+ *
+ * Applications can consume the messages asynchronously within their own
+ * event-loop / UI-thread etc. Note that in case the application does not
+ * consume the messages, the bus will accumulate these internally and eventually
+ * fill memory. To avoid that, the bus has to be set "flushing".
+ *
+ * Returns: (transfer full): The transcoder message bus instance
+ *
+ * Since: 1.20
+ */
+GstBus *
+gst_transcoder_get_message_bus (GstTranscoder * self)
 {
+  g_return_val_if_fail (GST_IS_TRANSCODER (self), NULL);
 
+  return g_object_ref (self->api_bus);
 }
-
-static void
-gst_transcoder_signal_dispatcher_dispatch (GstTranscoderSignalDispatcher * self,
-    GstTranscoder * transcoder, void (*emitter) (gpointer data), gpointer data,
-    GDestroyNotify destroy)
-{
-  GstTranscoderSignalDispatcherInterface *iface;
-
-  if (!self) {
-    emitter (data);
-    if (destroy)
-      destroy (data);
-    return;
-  }
-
-  g_return_if_fail (GST_IS_TRANSCODER_SIGNAL_DISPATCHER (self));
-  iface = GST_TRANSCODER_SIGNAL_DISPATCHER_GET_INTERFACE (self);
-  g_return_if_fail (iface->dispatch != NULL);
-
-  iface->dispatch (self, transcoder, emitter, data, destroy);
-}
-
-struct _GstTranscoderGMainContextSignalDispatcher
-{
-  GObject parent;
-  GMainContext *application_context;
-};
-
-struct _GstTranscoderGMainContextSignalDispatcherClass
-{
-  GObjectClass parent_class;
-};
-
-static void
-    gst_transcoder_g_main_context_signal_dispatcher_interface_init
-    (GstTranscoderSignalDispatcherInterface * iface);
-
-enum
-{
-  G_MAIN_CONTEXT_SIGNAL_DISPATCHER_PROP_0,
-  G_MAIN_CONTEXT_SIGNAL_DISPATCHER_PROP_APPLICATION_CONTEXT,
-  G_MAIN_CONTEXT_SIGNAL_DISPATCHER_PROP_LAST
-};
-
-G_DEFINE_TYPE_WITH_CODE (GstTranscoderGMainContextSignalDispatcher,
-    gst_transcoder_g_main_context_signal_dispatcher, G_TYPE_OBJECT,
-    G_IMPLEMENT_INTERFACE (GST_TYPE_TRANSCODER_SIGNAL_DISPATCHER,
-        gst_transcoder_g_main_context_signal_dispatcher_interface_init));
-
-static GParamSpec
-    * g_main_context_signal_dispatcher_param_specs
-    [G_MAIN_CONTEXT_SIGNAL_DISPATCHER_PROP_LAST] = { NULL, };
-
-static void
-gst_transcoder_g_main_context_signal_dispatcher_finalize (GObject * object)
-{
-  GstTranscoderGMainContextSignalDispatcher *self =
-      GST_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER (object);
-
-  if (self->application_context)
-    g_main_context_unref (self->application_context);
-
-  G_OBJECT_CLASS
-      (gst_transcoder_g_main_context_signal_dispatcher_parent_class)->finalize
-      (object);
-}
-
-static void
-gst_transcoder_g_main_context_signal_dispatcher_set_property (GObject * object,
-    guint prop_id, const GValue * value, GParamSpec * pspec)
-{
-  GstTranscoderGMainContextSignalDispatcher *self =
-      GST_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER (object);
-
-  switch (prop_id) {
-    case G_MAIN_CONTEXT_SIGNAL_DISPATCHER_PROP_APPLICATION_CONTEXT:
-      self->application_context = g_value_dup_boxed (value);
-      if (!self->application_context)
-        self->application_context = g_main_context_ref_thread_default ();
-      break;
-    default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      break;
-  }
-}
-
-static void
-gst_transcoder_g_main_context_signal_dispatcher_get_property (GObject * object,
-    guint prop_id, GValue * value, GParamSpec * pspec)
-{
-  GstTranscoderGMainContextSignalDispatcher *self =
-      GST_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER (object);
-
-  switch (prop_id) {
-    case G_MAIN_CONTEXT_SIGNAL_DISPATCHER_PROP_APPLICATION_CONTEXT:
-      g_value_set_boxed (value, self->application_context);
-      break;
-    default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-      break;
-  }
-}
-
-static void
-    gst_transcoder_g_main_context_signal_dispatcher_class_init
-    (GstTranscoderGMainContextSignalDispatcherClass * klass)
-{
-  GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
-
-  gobject_class->finalize =
-      gst_transcoder_g_main_context_signal_dispatcher_finalize;
-  gobject_class->set_property =
-      gst_transcoder_g_main_context_signal_dispatcher_set_property;
-  gobject_class->get_property =
-      gst_transcoder_g_main_context_signal_dispatcher_get_property;
-
-  g_main_context_signal_dispatcher_param_specs
-      [G_MAIN_CONTEXT_SIGNAL_DISPATCHER_PROP_APPLICATION_CONTEXT] =
-      g_param_spec_boxed ("application-context", "Application Context",
-      "Application GMainContext to dispatch signals to", G_TYPE_MAIN_CONTEXT,
-      G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS);
-
-  g_object_class_install_properties (gobject_class,
-      G_MAIN_CONTEXT_SIGNAL_DISPATCHER_PROP_LAST,
-      g_main_context_signal_dispatcher_param_specs);
-}
-
-static void
-    gst_transcoder_g_main_context_signal_dispatcher_init
-    (G_GNUC_UNUSED GstTranscoderGMainContextSignalDispatcher * self)
-{
-}
-
-typedef struct
-{
-  void (*emitter) (gpointer data);
-  gpointer data;
-  GDestroyNotify destroy;
-} GMainContextSignalDispatcherData;
-
-static gboolean
-g_main_context_signal_dispatcher_dispatch_gsourcefunc (gpointer user_data)
-{
-  GMainContextSignalDispatcherData *data = user_data;
-
-  data->emitter (data->data);
-
-  return G_SOURCE_REMOVE;
-}
-
-static void
-g_main_context_signal_dispatcher_dispatch_destroy (gpointer user_data)
-{
-  GMainContextSignalDispatcherData *data = user_data;
-
-  if (data->destroy)
-    data->destroy (data->data);
-  g_free (data);
-}
-
-/* *INDENT-OFF* */
-static void
-gst_transcoder_g_main_context_signal_dispatcher_dispatch (GstTranscoderSignalDispatcher * iface,
-    G_GNUC_UNUSED GstTranscoder * transcoder, void (*emitter) (gpointer data),
-    gpointer data, GDestroyNotify destroy)
-{
-  GstTranscoderGMainContextSignalDispatcher *self =
-      GST_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER (iface);
-  GMainContextSignalDispatcherData *gsourcefunc_data =
-      g_new0 (GMainContextSignalDispatcherData, 1);
-
-  gsourcefunc_data->emitter = emitter;
-  gsourcefunc_data->data = data;
-  gsourcefunc_data->destroy = destroy;
-
-  g_main_context_invoke_full (self->application_context,
-      G_PRIORITY_DEFAULT, g_main_context_signal_dispatcher_dispatch_gsourcefunc,
-      gsourcefunc_data, g_main_context_signal_dispatcher_dispatch_destroy);
-}
-
-static void
-gst_transcoder_g_main_context_signal_dispatcher_interface_init (GstTranscoderSignalDispatcherInterface * iface)
-{
-  iface->dispatch = gst_transcoder_g_main_context_signal_dispatcher_dispatch;
-}
-/* *INDENT-ON* */
 
 /**
- * gst_transcoder_g_main_context_signal_dispatcher_new:
- * @application_context: (allow-none): GMainContext to use or %NULL
+ * gst_transcoder_get_sync_signal_adapter:
+ * @self: (transfer none): #GstTranscoder instance to emit signals synchronously
+ * for.
  *
- * Returns: (transfer full):
+ * Gets the #GstTranscoderSignalAdapter attached to @self to emit signals from
+ * its thread of emission.
+ *
+ * Returns: (transfer full): The #GstTranscoderSignalAdapter to connect signal
+ * handlers to.
+ *
+ * Since: 1.20
  */
-GstTranscoderSignalDispatcher *
-gst_transcoder_g_main_context_signal_dispatcher_new (GMainContext *
-    application_context)
+GstTranscoderSignalAdapter *
+gst_transcoder_get_sync_signal_adapter (GstTranscoder * self)
 {
-  return g_object_new (GST_TYPE_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER,
-      "application-context", application_context, NULL);
+  g_return_val_if_fail (GST_IS_TRANSCODER (self), NULL);
+
+  GST_OBJECT_LOCK (self);
+  if (!self->sync_signal_adapter)
+    self->sync_signal_adapter =
+        gst_transcoder_signal_adapter_new_sync_emit (self);
+  GST_OBJECT_UNLOCK (self);
+
+  return g_object_ref (self->sync_signal_adapter);
+}
+
+/**
+ * gst_transcoder_get_signal_adapter:
+ * @self: (transfer none): #GstTranscoder instance to emit signals for.
+ * @context: (nullable): A #GMainContext on which the main-loop will process
+ *                       transcoder bus messages on. Can be NULL (thread-default
+ *                       context will be used then).
+ *
+ * Gets the #GstTranscoderSignalAdapter attached to @self if it is attached to
+ * the right #GMainContext. If no #GstTranscoderSignalAdapter has been created
+ * yet, it will be created and returned, other calls will return that same
+ * adapter until it is destroyed, at which point, a new one can be attached the
+ * same way.
+ *
+ * Returns: (transfer full)(nullable): The #GstTranscoderSignalAdapter to
+ * connect signal handlers to.
+ *
+ * Since: 1.20
+ */
+GstTranscoderSignalAdapter *
+gst_transcoder_get_signal_adapter (GstTranscoder * self, GMainContext * context)
+{
+  g_return_val_if_fail (GST_IS_TRANSCODER (self), NULL);
+
+  if (!context)
+    context = g_main_context_get_thread_default ();
+  if (!context)
+    context = g_main_context_default ();
+
+  GST_OBJECT_LOCK (self);
+  if (!self->signal_adapter) {
+    self->signal_adapter = gst_transcoder_signal_adapter_new (self, context);
+  } else if (g_source_get_context (self->signal_adapter->source) != context) {
+    GST_WARNING_OBJECT (self, "Trying to get an adapter for a different "
+        "GMainContext than the one attached, this is not possible");
+    GST_OBJECT_UNLOCK (self);
+
+    return NULL;
+  }
+  GST_OBJECT_UNLOCK (self);
+
+  return g_object_ref (self->signal_adapter);
+}
+
+/**
+ * gst_transcoder_message_get_name:
+ * @message: a #GstTranscoderMessage
+ *
+ * Returns (transfer none): The message name
+ *
+ * Since: 1.20
+ */
+const gchar *
+gst_transcoder_message_get_name (GstTranscoderMessage message)
+{
+  GEnumClass *enum_class;
+  GEnumValue *enum_value;
+  enum_class = g_type_class_ref (GST_TYPE_TRANSCODER_MESSAGE);
+  enum_value = g_enum_get_value (enum_class, message);
+  g_assert (enum_value != NULL);
+  g_type_class_unref (enum_class);
+  return enum_value->value_name;
+}
+
+
+#define PARSE_MESSAGE_FIELD(msg, field, value_type, value) G_STMT_START { \
+    const GstStructure *data = NULL;                                      \
+    g_return_if_fail (gst_transcoder_is_transcoder_message (msg));                \
+    data = gst_message_get_structure (msg);                               \
+    if (!gst_structure_get (data, field, value_type, value, NULL)) {      \
+      g_error ("Could not parse field from structure: %s", field);        \
+    }                                                                     \
+} G_STMT_END
+
+/**
+ * gst_transcoder_is_transcoder_message:
+ * @msg: A #GstMessage
+ *
+ * Returns: A #gboolean indicating whether the passes message represents a #GstTranscoder message or not.
+ *
+ * Since: 1.20
+ */
+gboolean
+gst_transcoder_is_transcoder_message (GstMessage * msg)
+{
+  const GstStructure *data = NULL;
+  g_return_val_if_fail (GST_IS_MESSAGE (msg), FALSE);
+
+  data = gst_message_get_structure (msg);
+  g_return_val_if_fail (data, FALSE);
+
+  return g_str_equal (gst_structure_get_name (data),
+      GST_TRANSCODER_MESSAGE_DATA);
+}
+
+/**
+ * gst_transcoder_message_parse_duration:
+ * @msg: A #GstMessage
+ * @duration: (out): the resulting duration
+ *
+ * Parse the given duration @msg and extract the corresponding #GstClockTime
+ *
+ * Since: 1.20
+ */
+void
+gst_transcoder_message_parse_duration (GstMessage * msg,
+    GstClockTime * duration)
+{
+  PARSE_MESSAGE_FIELD (msg, GST_TRANSCODER_MESSAGE_DATA_DURATION,
+      GST_TYPE_CLOCK_TIME, duration);
+}
+
+/**
+ * gst_transcoder_message_parse_position:
+ * @msg: A #GstMessage
+ * @position: (out): the resulting position
+ *
+ * Parse the given position @msg and extract the corresponding #GstClockTime
+ *
+ * Since: 1.20
+ */
+void
+gst_transcoder_message_parse_position (GstMessage * msg,
+    GstClockTime * position)
+{
+  PARSE_MESSAGE_FIELD (msg, GST_TRANSCODER_MESSAGE_DATA_POSITION,
+      GST_TYPE_CLOCK_TIME, position);
+}
+
+/**
+ * gst_transcoder_message_parse_state:
+ * @msg: A #GstMessage
+ * @state: (out): the resulting state
+ *
+ * Parse the given state @msg and extract the corresponding #GstTranscoderState
+ *
+ * Since: 1.20
+ */
+void
+gst_transcoder_message_parse_state (GstMessage * msg,
+    GstTranscoderState * state)
+{
+  PARSE_MESSAGE_FIELD (msg, GST_TRANSCODER_MESSAGE_DATA_STATE,
+      GST_TYPE_TRANSCODER_STATE, state);
+}
+
+/**
+ * gst_transcoder_message_parse_error:
+ * @msg: A #GstMessage
+ * @error: (out) (optional) (transfer full): the resulting error
+ * @details: (out): (transfer full): A GstStructure containing extra details about the error
+ *
+ * Parse the given error @msg and extract the corresponding #GError
+ *
+ * Since: 1.20
+ */
+void
+gst_transcoder_message_parse_error (GstMessage * msg, GError * error,
+    GstStructure ** details)
+{
+  PARSE_MESSAGE_FIELD (msg, GST_TRANSCODER_MESSAGE_DATA_ERROR, G_TYPE_ERROR,
+      error);
+  PARSE_MESSAGE_FIELD (msg, GST_TRANSCODER_MESSAGE_DATA_ISSUE_DETAILS,
+      GST_TYPE_STRUCTURE, details);
+}
+
+/**
+ * gst_transcoder_message_parse_warning:
+ * @msg: A #GstMessage
+ * @error: (out) (optional) (transfer full): the resulting warning
+ * @details: (out): (transfer full): A GstStructure containing extra details about the warning
+ *
+ * Parse the given error @msg and extract the corresponding #GError warning
+ *
+ * Since: 1.20
+ */
+void
+gst_transcoder_message_parse_warning (GstMessage * msg, GError * error,
+    GstStructure ** details)
+{
+  PARSE_MESSAGE_FIELD (msg, GST_TRANSCODER_MESSAGE_DATA_WARNING, G_TYPE_ERROR,
+      error);
+  PARSE_MESSAGE_FIELD (msg, GST_TRANSCODER_MESSAGE_DATA_ISSUE_DETAILS,
+      GST_TYPE_STRUCTURE, details);
+}
+
+/**
+ * gst_transcoder_state_get_name:
+ * @state: a #GstTranscoderState
+ *
+ * Gets a string representing the given state.
+ *
+ * Returns: (transfer none): a string with the name of the state.
+ *
+ * Since: 1.20
+ */
+const gchar *
+gst_transcoder_state_get_name (GstTranscoderState state)
+{
+  switch (state) {
+    case GST_TRANSCODER_STATE_STOPPED:
+      return "stopped";
+    case GST_TRANSCODER_STATE_PAUSED:
+      return "paused";
+    case GST_TRANSCODER_STATE_PLAYING:
+      return "playing";
+  }
+
+  g_assert_not_reached ();
+  return NULL;
 }

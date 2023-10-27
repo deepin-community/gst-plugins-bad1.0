@@ -67,6 +67,9 @@ static gboolean gst_vulkan_window_win32_open (GstVulkanWindow * window,
 static void gst_vulkan_window_win32_close (GstVulkanWindow * window);
 static void release_parent_win_id (GstVulkanWindowWin32 * window_win32);
 static void gst_vulkan_window_win32_show (GstVulkanWindowWin32 * window);
+static gboolean
+gst_vulkan_window_win32_create_window (GstVulkanWindowWin32 * window_win32,
+    GError ** error);
 
 static void
 gst_vulkan_window_win32_class_init (GstVulkanWindowWin32Class * klass)
@@ -393,7 +396,7 @@ gst_vulkan_window_win32_get_surface (GstVulkanWindow * window, GError ** error)
   if (!window_win32->CreateWin32Surface) {
     g_set_error_literal (error, GST_VULKAN_ERROR, VK_ERROR_FEATURE_NOT_PRESENT,
         "Could not retrieve \"vkCreateWin32SurfaceKHR\" function pointer");
-    return NULL;
+    return VK_NULL_HANDLE;
   }
 
   err =
@@ -401,7 +404,7 @@ gst_vulkan_window_win32_get_surface (GstVulkanWindow * window, GError ** error)
       &info, NULL, &ret);
 
   if (gst_vulkan_error_to_g_error (err, error, "vkCreateWin32SurfaceKHR") < 0)
-    return NULL;
+    return VK_NULL_HANDLE;
 
   return ret;
 }

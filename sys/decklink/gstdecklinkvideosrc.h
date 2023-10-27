@@ -58,9 +58,11 @@ struct _GstDecklinkVideoSrc
 
   GstDecklinkModeEnum mode;
   GstDecklinkModeEnum caps_mode;
+  gint aspect_ratio_flag; /* -1 when unknown, 0 not set, 1 set */
   BMDPixelFormat caps_format;
   GstDecklinkConnectionEnum connection;
   gint device_number;
+  gint64 persistent_id;
   gboolean output_stream_time;
   GstClockTime skip_first_time;
   gboolean drop_no_signal_frames;
@@ -68,10 +70,11 @@ struct _GstDecklinkVideoSrc
   guint64 processed;
   guint64 dropped;
   guint64 first_stream_time;
+  guint64 no_signal_count;
 
   GstVideoInfo info;
   GstDecklinkVideoFormat video_format;
-  BMDDuplexMode duplex_mode;
+  GstDecklinkProfileId profile_id;
   BMDTimecodeFormat timecode_format;
 
   GstDecklinkInput *input;
@@ -111,6 +114,10 @@ struct _GstDecklinkVideoSrc
   gboolean output_afd_bar;
   gint last_afd_bar_vbi_line;
   gint last_afd_bar_vbi_line_field2;
+
+  guint skipped_last;
+  GstClockTime skip_from_timestamp;
+  GstClockTime skip_to_timestamp;
 };
 
 struct _GstDecklinkVideoSrcClass
@@ -119,6 +126,8 @@ struct _GstDecklinkVideoSrcClass
 };
 
 GType gst_decklink_video_src_get_type (void);
+
+GST_ELEMENT_REGISTER_DECLARE (decklinkvideosrc);
 
 G_END_DECLS
 

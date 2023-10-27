@@ -34,7 +34,7 @@ G_BEGIN_DECLS
 #define GST_VP8_DECODER_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS((obj),GST_TYPE_VP8_DECODER,GstVp8DecoderClass))
 #define GST_IS_VP8_DECODER(obj)         (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_VP8_DECODER))
 #define GST_IS_VP8_DECODER_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_VP8_DECODER))
-#define GST_VP8_DECODER_CAST(obj)       ((GstVP8Decoder*)obj)
+#define GST_VP8_DECODER_CAST(obj)       ((GstVp8Decoder*)obj)
 
 typedef struct _GstVp8Decoder GstVp8Decoder;
 typedef struct _GstVp8DecoderClass GstVp8DecoderClass;
@@ -88,31 +88,32 @@ struct _GstVp8DecoderClass
 {
   GstVideoDecoderClass parent_class;
 
-  gboolean        (*new_sequence)      (GstVp8Decoder * decoder,
-                                        const GstVp8FrameHdr * frame_hdr);
+  GstFlowReturn   (*new_sequence)      (GstVp8Decoder * decoder,
+                                        const GstVp8FrameHdr * frame_hdr,
+                                        gint max_dpb_size);
 
   /**
-   * GstVp8Decoder:new_picture:
+   * GstVp8DecoderClass:new_picture:
    * @decoder: a #GstVp8Decoder
    * @frame: (transfer none): a #GstVideoCodecFrame
    * @picture: (transfer none): a #GstVp8Picture
    */
-  gboolean        (*new_picture)       (GstVp8Decoder * decoder,
+  GstFlowReturn   (*new_picture)       (GstVp8Decoder * decoder,
                                         GstVideoCodecFrame * frame,
                                         GstVp8Picture * picture);
 
-  gboolean        (*start_picture)     (GstVp8Decoder * decoder,
+  GstFlowReturn   (*start_picture)     (GstVp8Decoder * decoder,
                                         GstVp8Picture * picture);
 
-  gboolean        (*decode_picture)    (GstVp8Decoder * decoder,
+  GstFlowReturn   (*decode_picture)    (GstVp8Decoder * decoder,
                                         GstVp8Picture * picture,
                                         GstVp8Parser * parser);
 
-  gboolean        (*end_picture)       (GstVp8Decoder * decoder,
+  GstFlowReturn   (*end_picture)       (GstVp8Decoder * decoder,
                                         GstVp8Picture * picture);
 
   /**
-   * GstVp8Decoder:output_picture:
+   * GstVp8DecoderClass:output_picture:
    * @decoder: a #GstVp8Decoder
    * @frame: (transfer full): a #GstVideoCodecFrame
    * @picture: (transfer full): a #GstVp8Picture
@@ -120,6 +121,21 @@ struct _GstVp8DecoderClass
   GstFlowReturn   (*output_picture)    (GstVp8Decoder * decoder,
                                         GstVideoCodecFrame * frame,
                                         GstVp8Picture * picture);
+
+  /**
+   * GstVp8DecoderClass::get_preferred_output_delay:
+   * @decoder: a #GstVp8Decoder
+   * @is_live: whether upstream is live or not
+   *
+   * Optional. Called by baseclass to query whether delaying output is
+   * preferred by subclass or not.
+   *
+   * Returns: the number of perferred delayed output frame
+   *
+   * Since: 1.20
+   */
+  guint           (*get_preferred_output_delay)   (GstVp8Decoder * decoder,
+                                                   gboolean is_live);
 
   /*< private >*/
   gpointer padding[GST_PADDING_LARGE];

@@ -10,7 +10,10 @@ gstfreeverb = library('gstfreeverb',
   install : true,
   install_dir : plugins_install_dir,
 )
-pkgconfig.generate(gstfreeverb, install_dir : plugins_pkgconfig_install_dir)
 plugins += [gstfreeverb]
 
 install_data('GstFreeverb.prs', install_dir: presetdir)
+
+env = environment()
+env.prepend('GST_PRESET_PATH', meson.current_source_dir())
+meson.add_devenv(env)

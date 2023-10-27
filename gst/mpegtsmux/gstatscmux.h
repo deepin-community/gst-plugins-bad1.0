@@ -17,6 +17,8 @@
  * License along with this library; if not, write to the
  * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
  * Boston, MA 02110-1301, USA.
+ *
+ * SPDX-License-Identifier: LGPL-2.0-or-later
  */
 
 #ifndef __ATSCMUX_H__
@@ -40,6 +42,7 @@ struct GstATSCMuxClass {
 };
 
 GType gst_atsc_mux_get_type (void);
+GST_ELEMENT_REGISTER_DECLARE (atscmux);
 
 G_END_DECLS
 

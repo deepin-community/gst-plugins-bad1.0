@@ -6,11 +6,10 @@ jpegf_sources = [
 
 gstjpegformat = library('gstjpegformat',
   jpegf_sources,
-  c_args : gst_plugins_bad_args,
+  c_args : gst_plugins_bad_args + [ '-DGST_USE_UNSTABLE_API' ],
   include_directories : [configinc],
-  dependencies : [gstbase_dep, gsttag_dep],
+  dependencies : [gstbase_dep, gstcodecparsers_dep, gstvideo_dep, gsttag_dep],
   install : true,
   install_dir : plugins_install_dir,
 )
-pkgconfig.generate(gstjpegformat, install_dir : plugins_pkgconfig_install_dir)
 plugins += [gstjpegformat]

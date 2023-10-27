@@ -1,5 +1,6 @@
 rfbsrc_sources = [
   'gstrfbsrc.c',
+  'gstrfb-utils.c',
   'rfbdecoder.c',
   'd3des.c',
 ]
@@ -14,5 +15,4 @@ gstrfbsrc = library('gstrfbsrc',
   install : true,
   install_dir : plugins_install_dir,
 )
-pkgconfig.generate(gstrfbsrc, install_dir : plugins_pkgconfig_install_dir)
 plugins += [gstrfbsrc]

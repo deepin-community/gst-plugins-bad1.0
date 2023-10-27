@@ -45,6 +45,8 @@
 #include <config.h>
 #endif
 
+#include <stdio.h>
+
 #include <gst/net/net.h>
 #include <gst/rtp/gstrtppayloads.h>
 
@@ -57,6 +59,7 @@ GST_DEBUG_CATEGORY_STATIC (gst_rtp_src_debug);
 #define DEFAULT_PROP_TTL              64
 #define DEFAULT_PROP_TTL_MC           1
 #define DEFAULT_PROP_ENCODING_NAME    NULL
+#define DEFAULT_PROP_CAPS             NULL
 #define DEFAULT_PROP_LATENCY          200
 
 #define DEFAULT_PROP_ADDRESS          "0.0.0.0"
@@ -76,6 +79,7 @@ enum
   PROP_ENCODING_NAME,
   PROP_LATENCY,
   PROP_MULTICAST_IFACE,
+  PROP_CAPS,
 
   PROP_LAST
 };
@@ -87,6 +91,8 @@ static void gst_rtp_src_uri_handler_init (gpointer g_iface,
 G_DEFINE_TYPE_WITH_CODE (GstRtpSrc, gst_rtp_src, GST_TYPE_BIN,
     G_IMPLEMENT_INTERFACE (GST_TYPE_URI_HANDLER, gst_rtp_src_uri_handler_init);
     GST_DEBUG_CATEGORY_INIT (gst_rtp_src_debug, "rtpsrc", 0, "RTP Source"));
+GST_ELEMENT_REGISTER_DEFINE (rtpsrc, "rtpsrc", GST_RANK_PRIMARY + 1,
+    GST_TYPE_RTP_SRC);
 
 #define GST_RTP_SRC_GET_LOCK(obj) (&((GstRtpSrc*)(obj))->lock)
 #define GST_RTP_SRC_LOCK(obj) (g_mutex_lock (GST_RTP_SRC_GET_LOCK(obj)))
@@ -118,6 +124,12 @@ gst_rtp_src_rtpbin_request_pt_map_cb (GstElement * rtpbin, guint session_id,
 
   GST_DEBUG_OBJECT (self,
       "Requesting caps for session-id 0x%x and pt %u.", session_id, pt);
+
+  if (G_UNLIKELY (self->caps)) {
+    GST_DEBUG_OBJECT (self,
+        "Full caps were set, no need for lookup %" GST_PTR_FORMAT, self->caps);
+    return gst_caps_copy (self->caps);
+  }
 
   /* the encoding-name has more relevant information */
   if (self->encoding_name != NULL) {
@@ -242,6 +254,22 @@ gst_rtp_src_set_property (GObject * object, guint prop_id,
       else
         self->multi_iface = g_value_dup_string (value);
       break;
+    case PROP_CAPS:
+    {
+      const GstCaps *new_caps_val = gst_value_get_caps (value);
+      GstCaps *new_caps = NULL;
+      GstCaps *old_caps = self->caps;
+
+      if (new_caps_val != NULL) {
+        new_caps = gst_caps_copy (new_caps_val);
+      }
+
+      self->caps = new_caps;
+
+      if (old_caps)
+        gst_caps_unref (old_caps);
+      break;
+    }
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -284,6 +312,9 @@ gst_rtp_src_get_property (GObject * object, guint prop_id,
     case PROP_MULTICAST_IFACE:
       g_value_set_string (value, self->multi_iface);
       break;
+    case PROP_CAPS:
+      gst_value_set_caps (value, self->caps);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -300,6 +331,9 @@ gst_rtp_src_finalize (GObject * gobject)
   g_free (self->encoding_name);
 
   g_free (self->multi_iface);
+
+  if (self->caps)
+    gst_caps_unref (self->caps);
 
   g_clear_object (&self->rtcp_send_addr);
 
@@ -426,6 +460,18 @@ gst_rtp_src_class_init (GstRtpSrcClass * klass)
           DEFAULT_PROP_MULTICAST_IFACE,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+  * GstRtpSrc:caps:
+  *
+  * The RTP caps of the incoming stream.
+  *
+  * Since: 1.20
+  */
+  g_object_class_install_property (gobject_class, PROP_CAPS,
+      g_param_spec_boxed ("caps", "Caps",
+          "The caps of the incoming stream", GST_TYPE_CAPS,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   gst_element_class_add_pad_template (gstelement_class,
       gst_static_pad_template_get (&src_template));
 
@@ -436,12 +482,34 @@ gst_rtp_src_class_init (GstRtpSrcClass * klass)
 }
 
 static void
+clear_ssrc (GstElement * rtpbin, GstPad * gpad)
+{
+  GstPad *pad;
+  gint pt;
+  guint ssrc;
+
+  pad = gst_ghost_pad_get_target (GST_GHOST_PAD (gpad));
+  if (!pad)
+    return;
+
+  if (sscanf (GST_PAD_NAME (pad), "recv_rtp_src_0_%u_%d", &ssrc, &pt) != 2) {
+    gst_object_unref (pad);
+    return;
+  }
+  gst_object_unref (pad);
+
+  g_signal_emit_by_name (rtpbin, "clear-ssrc", 0, ssrc);
+}
+
+static void
 gst_rtp_src_rtpbin_pad_added_cb (GstElement * element, GstPad * pad,
     gpointer data)
 {
   GstRtpSrc *self = GST_RTP_SRC (data);
   GstCaps *caps = gst_pad_query_caps (pad, NULL);
-  GstPad *upad;
+  const GstStructure *s;
+  GstPad *upad = NULL;
+  gint pt = -1;
   gchar name[48];
 
   /* Expose RTP data pad only */
@@ -473,15 +541,27 @@ gst_rtp_src_rtpbin_pad_added_cb (GstElement * element, GstPad * pad,
 
     return;
   }
+
+  s = gst_caps_get_structure (caps, 0);
+  gst_structure_get_int (s, "payload", &pt);
   gst_caps_unref (caps);
 
   GST_RTP_SRC_LOCK (self);
-  g_snprintf (name, 48, "src_%u", GST_ELEMENT (self)->numpads);
-  upad = gst_ghost_pad_new (name, pad);
+  g_snprintf (name, 48, "src_%u", pt);
+  upad = gst_element_get_static_pad (GST_ELEMENT (self), name);
 
-  gst_pad_set_active (upad, TRUE);
-  gst_element_add_pad (GST_ELEMENT (self), upad);
+  if (!upad) {
+    GST_DEBUG_OBJECT (self, "Adding new pad: %s", name);
 
+    upad = gst_ghost_pad_new (name, pad);
+    gst_pad_set_active (upad, TRUE);
+    gst_element_add_pad (GST_ELEMENT (self), upad);
+  } else {
+    GST_DEBUG_OBJECT (self, "Re-using existing pad: %s", GST_PAD_NAME (upad));
+    clear_ssrc (element, upad);
+    gst_ghost_pad_set_target (GST_GHOST_PAD (upad), pad);
+    gst_object_unref (upad);
+  }
   GST_RTP_SRC_UNLOCK (self);
 }
 
@@ -623,7 +703,6 @@ gst_rtp_src_start (GstRtpSrc * self)
 
     /* set multicast-iface on the udpsrc and udpsink elements */
     g_object_set (self->rtcp_src, "multicast-iface", self->multi_iface, NULL);
-    g_object_set (self->rtcp_sink, "multicast-iface", self->multi_iface, NULL);
     g_object_set (self->rtp_src, "multicast-iface", self->multi_iface, NULL);
   } else {
     /* In unicast, send RTCP to the detected sender address */
@@ -732,6 +811,7 @@ gst_rtp_src_init (GstRtpSrc * self)
   self->ttl = DEFAULT_PROP_TTL;
   self->ttl_mc = DEFAULT_PROP_TTL_MC;
   self->encoding_name = DEFAULT_PROP_ENCODING_NAME;
+  self->caps = DEFAULT_PROP_CAPS;
 
   GST_OBJECT_FLAG_SET (GST_OBJECT (self), GST_ELEMENT_FLAG_SOURCE);
   gst_bin_set_suppressed_flags (GST_BIN (self),
@@ -754,6 +834,7 @@ gst_rtp_src_init (GstRtpSrc * self)
     missing_plugin = "rtpmanager";
     goto missing_plugin;
   }
+  g_object_set (self->rtpbin, "autoremove", TRUE, NULL);
 
   gst_bin_add (GST_BIN (self), self->rtpbin);
 

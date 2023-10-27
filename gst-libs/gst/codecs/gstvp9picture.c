@@ -36,6 +36,9 @@ _gst_vp9_picture_free (GstVp9Picture * picture)
   if (picture->notify)
     picture->notify (picture->user_data);
 
+  if (picture->discont_state)
+    gst_video_codec_state_unref (picture->discont_state);
+
   g_free (picture);
 }
 
@@ -52,7 +55,6 @@ gst_vp9_picture_new (void)
   GstVp9Picture *pic;
 
   pic = g_new0 (GstVp9Picture, 1);
-  pic->pts = GST_CLOCK_TIME_NONE;
 
   gst_mini_object_init (GST_MINI_OBJECT_CAST (pic), 0,
       GST_TYPE_VP9_PICTURE, NULL, NULL,
@@ -149,7 +151,7 @@ gst_vp9_dpb_clear (GstVp9Dpb * dpb)
   g_return_if_fail (dpb != NULL);
 
   for (i = 0; i < GST_VP9_REF_FRAMES; i++)
-    gst_vp9_picture_clear (&dpb->pic_list[i]);
+    gst_clear_vp9_picture (&dpb->pic_list[i]);
 }
 
 /**

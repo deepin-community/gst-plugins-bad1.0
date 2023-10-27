@@ -1,1 +1,2 @@
 02_opencv-data-path.patch
+Skip-failing-tests.patch

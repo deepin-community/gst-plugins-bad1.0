@@ -31,11 +31,21 @@
  * This plugin reads data from a local or remote location specified
  * by an URI. This location can be specified using any protocol supported by
  * the RTMP library, i.e. rtmp, rtmpt, rtmps, rtmpe, rtmfp, rtmpte and rtmpts.
+ * The URL/location can contain extra connection or session parameters
+ * for librtmp, such as 'flashver=version'. See the librtmp documentation
+ * for more detail. Of particular interest can be setting `live=1` to certain
+ * RTMP streams that don't seem to be playing otherwise.
+
  *
  * ## Example launch lines
  * |[
  * gst-launch-1.0 -v rtmpsrc location=rtmp://somehost/someurl ! fakesink
  * ]| Open an RTMP location and pass its content to fakesink.
+ * 
+ * |[
+ * gst-launch-1.0 rtmpsrc location="rtmp://somehost/someurl live=1" ! fakesink
+ * ]| Open an RTMP location and pass its content to fakesink while passing the
+ * live=1 flag to librtmp
  *
  */
 
@@ -43,8 +53,9 @@
 #include "config.h"
 #endif
 
-#include <gst/gst-i18n-plugin.h>
+#include <glib/gi18n-lib.h>
 
+#include "gstrtmpelements.h"
 #include "gstrtmpsrc.h"
 
 #include <stdio.h>
@@ -104,6 +115,8 @@ static gboolean gst_rtmp_src_query (GstBaseSrc * src, GstQuery * query);
 G_DEFINE_TYPE_WITH_CODE (GstRTMPSrc, gst_rtmp_src, GST_TYPE_PUSH_SRC,
     G_IMPLEMENT_INTERFACE (GST_TYPE_URI_HANDLER,
         gst_rtmp_src_uri_handler_init));
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (rtmpsrc, "rtmpsrc", GST_RANK_PRIMARY,
+    GST_TYPE_RTMP_SRC, rtmp_element_init (plugin));
 
 static void
 gst_rtmp_src_class_init (GstRTMPSrcClass * klass)

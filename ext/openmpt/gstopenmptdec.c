@@ -95,7 +95,8 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
 
 G_DEFINE_TYPE (GstOpenMptDec, gst_openmpt_dec,
     GST_TYPE_NONSTREAM_AUDIO_DECODER);
-
+GST_ELEMENT_REGISTER_DEFINE (openmptdec, "openmptdec", GST_RANK_PRIMARY + 2,
+    gst_openmpt_dec_get_type ());
 
 
 static void gst_openmpt_dec_finalize (GObject * object);
@@ -561,8 +562,14 @@ gst_openmpt_dec_load_from_buffer (GstNonstreamAudioDecoder * dec,
    * need to query it here, *before* any openmpt_module_select_subsong()
    * calls are done */
   {
+
+#if OPENMPT_API_VERSION_AT_LEAST(0,5,0)
+    gchar const *subsong_cstr =
+        openmpt_module_ctl_get_text (openmpt_dec->mod, "subsong");
+#else
     gchar const *subsong_cstr =
         openmpt_module_ctl_get (openmpt_dec->mod, "subsong");
+#endif
     gchar *endptr;
 
     if (subsong_cstr != NULL) {

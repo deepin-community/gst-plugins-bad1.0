@@ -15,47 +15,67 @@ exif_dep = dependency('libexif', version : '>= 0.6.16', required : false)
 # Since nalutils API is internal, need to build it again
 nalutils_dep = gstcodecparsers_dep.partial_dependency (compile_args: true, includes: true)
 
-enable_gst_player_tests = get_option('gst_player_tests')
+enable_gst_play_tests = get_option('gst_play_tests')
+libsoup_dep = dependency('libsoup-2.4', version : '>=2.48', required : enable_gst_play_tests,
+  fallback : ['libsoup', 'libsoup_dep'])
 
 # name, condition when to skip the test and extra dependencies
 base_tests = [
-  [['elements/aiffparse.c']],
-  [['elements/asfmux.c']],
-  [['elements/autoconvert.c']],
-  [['elements/autovideoconvert.c']],
-  [['elements/avwait.c']],
-  [['elements/camerabin.c']],
+  [['elements/aesenc.c'], not aes_dep.found(), [aes_dep]],
+  [['elements/aesdec.c'], not aes_dep.found(), [aes_dep]],
+  [['elements/aiffparse.c'], get_option('aiff').disabled()],
+  [['elements/asfmux.c'], get_option('asfmux').disabled()],
+  [['elements/autoconvert.c'], get_option('autoconvert').disabled()],
+  [['elements/autovideoconvert.c'], get_option('autoconvert').disabled()],
+  [['elements/avwait.c'], get_option('timecode').disabled()],
+  [['elements/camerabin.c'], get_option('camerabin2').disabled()],
+  [['elements/ccconverter.c'], not closedcaption_dep.found(), [gstvideo_dep]],
+  [['elements/cccombiner.c'], not closedcaption_dep.found(), ],
+  [['elements/ccextractor.c'], not closedcaption_dep.found(), ],
+  [['elements/cudaconvert.c'], false, [gstgl_dep, gmodule_dep]],
+  [['elements/cudafilter.c'], false, [gstgl_dep, gmodule_dep]],
   [['elements/d3d11colorconvert.c'], host_machine.system() != 'windows', ],
-  [['elements/gdpdepay.c']],
-  [['elements/gdppay.c']],
+  [['elements/d3d11videosink.c'], host_machine.system() != 'windows', ],
+  [['elements/fdkaac.c'], not fdkaac_dep.found(), ],
+  [['elements/gdpdepay.c'], get_option('gdp').disabled()],
+  [['elements/gdppay.c'], get_option('gdp').disabled()],
   [['elements/h263parse.c'], false, [libparser_dep, gstcodecparsers_dep]],
   [['elements/h264parse.c'], false, [libparser_dep, gstcodecparsers_dep]],
+  [['elements/h264timestamper.c'], false, [libparser_dep, gstcodecparsers_dep]],
   [['elements/h265parse.c'], false, [libparser_dep, gstcodecparsers_dep]],
   [['elements/hlsdemux_m3u8.c'], not hls_dep.found(), [hls_dep]],
-  [['elements/id3mux.c']],
-  [['elements/interlace.c']],
+  [['elements/id3mux.c'], get_option('id3tag').disabled()],
+  [['elements/interlace.c'], get_option('interlace').disabled()],
   [['elements/jpeg2000parse.c'], false, [libparser_dep, gstcodecparsers_dep]],
+  [['elements/line21.c'], not closedcaption_dep.found(), ],
   [['elements/mfvideosrc.c'], host_machine.system() != 'windows', ],
-  [['elements/mpegtsdemux.c'], false, [gstmpegts_dep]],
-  [['elements/mpegtsmux.c'], false, [gstmpegts_dep]],
+  [['elements/mpegtsdemux.c'], get_option('mpegtsdemux').disabled(), [gstmpegts_dep]],
+  [['elements/mpegtsmux.c'], get_option('mpegtsmux').disabled(), [gstmpegts_dep]],
   [['elements/mpeg4videoparse.c'], false, [libparser_dep, gstcodecparsers_dep]],
   [['elements/mpegvideoparse.c'], false, [libparser_dep, gstcodecparsers_dep]],
   [['elements/msdkh264enc.c'], not have_msdk, [msdk_dep]],
-  [['elements/mxfdemux.c']],
-  [['elements/mxfmux.c']],
-  [['elements/nvenc.c'], false, [gmodule_dep, gstgl_dep]],
-  [['elements/nvdec.c'], not gstgl_dep.found(), [gmodule_dep, gstgl_dep]],
+  [['elements/mxfdemux.c'], get_option('mxf').disabled()],
+  [['elements/mxfmux.c'], get_option('mxf').disabled()],
+  [['elements/nvenc.c'], false, [gstgl_dep, gmodule_dep]],
+  [['elements/nvdec.c'], not gstgl_dep.found(), [gstgl_dep, gmodule_dep]],
   [['elements/svthevcenc.c'], not svthevcenc_dep.found(), [svthevcenc_dep]],
+   [['elements/openjpeg.c'], not openjpeg_dep.found(), [openjpeg_dep]],
   [['elements/pcapparse.c'], false, [libparser_dep]],
-  [['elements/pnm.c']],
+  [['elements/pnm.c'], get_option('pnm').disabled()],
+  [['elements/proxysink.c'], get_option('proxy').disabled()],
   [['elements/ristrtpext.c']],
-  [['elements/rtponvifparse.c']],
-  [['elements/rtponviftimestamp.c']],
-  [['elements/rtpsrc.c']],
-  [['elements/rtpsink.c']],
-  [['elements/switchbin.c']],
-  [['elements/videoframe-audiolevel.c']],
+  [['elements/rtponvifparse.c'], get_option('onvif').disabled()],
+  [['elements/rtponviftimestamp.c'], get_option('onvif').disabled()],
+  [['elements/rtpsrc.c'], get_option('rtp').disabled()],
+  [['elements/rtpsink.c'], get_option('rtp').disabled()],
+  [['elements/srtp.c'], not srtp_dep.found(), [srtp_dep]],
+  [['elements/switchbin.c'], get_option('switchbin').disabled()],
+  [['elements/videoframe-audiolevel.c'], get_option('videoframe_audiolevel').disabled()],
   [['elements/viewfinderbin.c']],
+  [['elements/voamrwbenc.c'], not voamrwbenc_dep.found(), [voamrwbenc_dep]],
+  [['elements/vp9parse.c'], false, [gstcodecparsers_dep]],
+  [['elements/av1parse.c'], false, [gstcodecparsers_dep]],
+  [['elements/wasapi.c'], host_machine.system() != 'windows', ],
   [['elements/wasapi2.c'], host_machine.system() != 'windows', ],
   [['libs/h264parser.c'], false, [gstcodecparsers_dep]],
   [['libs/h265parser.c'], false, [gstcodecparsers_dep]],
@@ -65,11 +85,13 @@ base_tests = [
   [['libs/mpegts.c'], false, [gstmpegts_dep]],
   [['libs/mpegvideoparser.c'], false, [gstcodecparsers_dep]],
   [['libs/planaraudioadapter.c'], false, [gstbadaudio_dep]],
-  [['libs/player.c'], not enable_gst_player_tests, [gstplayer_dep]],
+  [['libs/play.c'], not enable_gst_play_tests, [gstplay_dep, libsoup_dep]],
   [['libs/vc1parser.c'], false, [gstcodecparsers_dep]],
   [['libs/vp8parser.c'], false, [gstcodecparsers_dep]],
   [['libs/vp9parser.c'], false, [gstcodecparsers_dep]],
   [['libs/av1parser.c'], false, [gstcodecparsers_dep]],
+  [['libs/h264bitwriter.c'], false, [gstcodecparsers_dep]],
+  [['libs/h265bitwriter.c'], false, [gstcodecparsers_dep]],
   [['libs/vkmemory.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['elements/vkcolorconvert.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkwindow.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
@@ -78,6 +100,7 @@ base_tests = [
   [['libs/vkcommandpool.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkimage.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkinstance.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
+  [['libs/d3d11device.cpp'], not gstd3d11_dep.found(), [gstd3d11_dep]],
 ]
 
 # FIXME: unistd dependency, unstable or not tested yet on windows
@@ -94,11 +117,7 @@ if host_machine.system() != 'windows'
     [['elements/avtpcvfdepay.c'], not avtp_dep.found(), [avtp_dep]],
     [['elements/avtpsink.c'], not avtp_dep.found(), [avtp_dep]],
     [['elements/avtpsrc.c'], not avtp_dep.found(), [avtp_dep]],
-    [['elements/ccconverter.c'], not gstvideo_dep.found(), [gstvideo_dep]],
-    [['elements/cccombiner.c']],
-    [['elements/ccextractor.c']],
-    [['elements/clockselect.c']],
-    [['elements/line21.c']],
+    [['elements/clockselect.c'], get_option('debugutils').disabled()],
     [['elements/curlhttpsink.c'], not curl_dep.found(), [curl_dep]],
     [['elements/curlhttpsrc.c'], not curl_dep.found(), [curl_dep, gio_dep]],
     [['elements/curlfilesink.c'],
@@ -106,7 +125,7 @@ if host_machine.system() != 'windows'
     [['elements/curlftpsink.c'], not curl_dep.found(), [curl_dep]],
     [['elements/curlsmtpsink.c'], not curl_dep.found(), [curl_dep]],
     [['elements/dash_mpd.c'], not xml2_dep.found(), [xml2_dep]],
-    [['elements/dtls.c'], not libcrypto_dep.found(), [libcrypto_dep]],
+    [['elements/dtls.c'], not libcrypto_dep.found() or not openssl_dep.found (), [libcrypto_dep]],
     [['elements/faac.c'],
         not faac_dep.found() or not cc.has_header_symbol('faac.h', 'faacEncOpen') or not cdata.has('HAVE_UNISTD_H'),
         [faac_dep]],
@@ -129,6 +148,14 @@ if host_machine.system() != 'windows'
   ]
 endif
 
+# linux only tests
+if host_machine.system() == 'linux'
+  base_tests += [
+    [['elements/vapostproc.c'], not gstva_dep.found(), [gstva_dep]],
+    [['elements/vacompositor.c'], not gstva_dep.found(), [gstva_dep]],
+  ]
+endif
+
 test_defines = [
   '-UG_DISABLE_ASSERT',
   '-UG_DISABLE_CAST_CHECKS',
@@ -143,20 +170,30 @@ test_deps = [gst_dep, gstapp_dep, gstbase_dep,
              gstbasecamerabin_dep, gstphotography_dep,
              gstpbutils_dep, gstcontroller_dep, gstaudio_dep,
              gstvideo_dep, gstrtp_dep, gsturidownloader_dep,
-             gstcheck_dep, gio_dep, glib_dep, gsttag_dep]
+             gstcheck_dep, gio_dep, gsttag_dep]
 
 pluginsdirs = [  ]
 
 if gst_dep.type_name() == 'pkgconfig'
   pbase = dependency('gstreamer-plugins-base-' + api_version)
 
-  pluginsdirs = [gst_dep.get_pkgconfig_variable('pluginsdir'),
-                 pbase.get_pkgconfig_variable('pluginsdir')]
-  gst_plugin_scanner_dir = gst_dep.get_pkgconfig_variable('pluginscannerdir')
+  pluginsdirs = [gst_dep.get_variable('pluginsdir'),
+                 pbase.get_variable('pluginsdir')]
+  gst_plugin_scanner_dir = gst_dep.get_variable('pluginscannerdir')
 else
   gst_plugin_scanner_dir = subproject('gstreamer').get_variable('gst_scanner_dir')
 endif
 gst_plugin_scanner_path = join_paths(gst_plugin_scanner_dir, 'gst-plugin-scanner')
+
+extra_args = []
+# XXX: our MinGW 32bits toolchain complians when ComPtr is in use
+if host_system == 'windows' and cc.get_id() != 'msvc'
+  mingw_args = cc.get_supported_arguments([
+    '-Wno-redundant-decls',
+  ])
+
+  extra_args += mingw_args
+endif
 
 foreach t : base_tests
   fnames = t.get(0)
@@ -177,8 +214,8 @@ foreach t : base_tests
   if not skip_test
     exe = executable(test_name, fnames, extra_sources,
       include_directories : [configinc],
-      c_args : gst_plugins_bad_args + test_defines,
-      cpp_args : gst_plugins_bad_args + test_defines,
+      c_args : gst_plugins_bad_args + test_defines + extra_args,
+      cpp_args : gst_plugins_bad_args + test_defines + extra_args,
       dependencies : [libm] + test_deps + extra_deps,
     )
 
@@ -186,11 +223,11 @@ foreach t : base_tests
     env.set('GST_PLUGIN_SYSTEM_PATH_1_0', '')
     env.set('CK_DEFAULT_TIMEOUT', '20')
     env.set('GST_STATE_IGNORE_ELEMENTS', '')
-    env.set('GST_PLUGIN_PATH_1_0', [meson.build_root()] + pluginsdirs)
+    env.set('GST_PLUGIN_PATH_1_0', [meson.global_build_root()] + pluginsdirs)
     env.set('GST_REGISTRY', join_paths(meson.current_build_dir(), '@0@.registry'.format(test_name)))
     env.set('GST_PLUGIN_LOADING_WHITELIST', 'gstreamer', 'gst-plugins-base',
       'gst-plugins-good', 'gst-plugins-ugly','gst-libav', 'libnice',
-      'gst-plugins-bad@' + meson.build_root())
+      'gst-plugins-bad@' + meson.project_build_root())
     env.set('GST_PLUGIN_SCANNER_1_0', gst_plugin_scanner_path)
     test(test_name, exe, env: env, timeout: 3 * 60)
   endif
@@ -199,6 +236,9 @@ endforeach
 # orc tests
 orc_tests = [
   ['orc_bayer', files('../../gst/bayer/gstbayerorc.orc')],
+  ['orc_fieldanalysis', files('../../gst/fieldanalysis/gstfieldanalysisorc.orc')],
+  ['orc_gaudieffects', files('../../gst/gaudieffects/gstgaudieffectsorc.orc')],
+  ['orc_scenechange', files('../../gst/videofilters/gstscenechangeorc.orc')],
 ]
 
 orc_test_dep = dependency('', required : false)
@@ -225,6 +265,6 @@ if have_orcc and orc_test_dep.found()
   endforeach
 endif
 
-if enable_gst_player_tests
+if enable_gst_play_tests
   subdir ('media')
 endif

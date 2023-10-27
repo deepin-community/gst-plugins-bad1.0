@@ -460,32 +460,6 @@ gst_xml_helper_get_prop_unsigned_integer (xmlNode * a_node,
   return exists;
 }
 
-/* g_ascii_string_to_unsigned is available since 2.54. Get rid of this wrapper
- * when we bump the version in 1.18 */
-#if !GLIB_CHECK_VERSION(2,54,0)
-#define g_ascii_string_to_unsigned gst_xml_helper_ascii_string_to_unsigned
-static gboolean
-gst_xml_helper_ascii_string_to_unsigned (const gchar * str, guint base,
-    guint64 min, guint64 max, guint64 * out_num, GError ** error)
-{
-  guint64 number;
-  gchar *endptr = NULL;
-
-  number = g_ascii_strtoull (str, &endptr, base);
-
-  /* Be as strict as the implementation of g_ascii_string_to_unsigned in glib */
-  if (errno)
-    return FALSE;
-  if (g_ascii_isspace (str[0]) || str[0] == '-' || str[0] == '+')
-    return FALSE;
-  if (*endptr != '\0' || endptr == NULL)
-    return FALSE;
-
-  *out_num = number;
-  return TRUE;
-}
-#endif
-
 gboolean
 gst_xml_helper_get_prop_unsigned_integer_64 (xmlNode * a_node,
     const gchar * property_name, guint64 default_val, guint64 * property_value)
@@ -1001,11 +975,24 @@ gst_xml_helper_get_node_as_string (xmlNode * a_node, gchar ** content)
   gboolean exists = FALSE;
   const char *txt_encoding;
   xmlOutputBufferPtr out_buf;
+  xmlNode *ncopy = NULL;
 
   txt_encoding = (const char *) a_node->doc->encoding;
   out_buf = xmlAllocOutputBuffer (NULL);
   g_assert (out_buf != NULL);
-  xmlNodeDumpOutput (out_buf, a_node->doc, a_node, 0, 0, txt_encoding);
+
+  /* Need to make a copy of XML element so that it includes namespaces
+     in the output, so that the resulting string can be parsed by an XML parser
+     that is namespace aware.
+     Use extended=1 for recursive copy (properties, namespaces and children) */
+  ncopy = xmlDocCopyNode (a_node, a_node->doc, 1);
+
+  if (!ncopy) {
+    GST_WARNING ("Failed to clone XML node");
+    goto done;
+  }
+  xmlNodeDumpOutput (out_buf, ncopy->doc, ncopy, 0, 0, txt_encoding);
+
   (void) xmlOutputBufferFlush (out_buf);
 #ifdef LIBXML2_NEW_BUFFER
   if (xmlOutputBufferGetSize (out_buf) > 0) {
@@ -1025,6 +1012,8 @@ gst_xml_helper_get_node_as_string (xmlNode * a_node, gchar ** content)
     exists = TRUE;
   }
 #endif // LIBXML2_NEW_BUFFER
+  xmlFreeNode (ncopy);
+done:
   (void) xmlOutputBufferClose (out_buf);
 
   if (exists) {

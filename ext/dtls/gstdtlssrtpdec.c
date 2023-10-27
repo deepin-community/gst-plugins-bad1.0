@@ -27,6 +27,7 @@
 #include "config.h"
 #endif
 
+#include "gstdtlselements.h"
 #include "gstdtlssrtpdec.h"
 #include "gstdtlsconnection.h"
 
@@ -61,7 +62,9 @@ GST_DEBUG_CATEGORY_STATIC (gst_dtls_srtp_dec_debug);
 #define gst_dtls_srtp_dec_parent_class parent_class
 G_DEFINE_TYPE_WITH_CODE (GstDtlsSrtpDec, gst_dtls_srtp_dec,
     GST_TYPE_DTLS_SRTP_BIN, GST_DEBUG_CATEGORY_INIT (gst_dtls_srtp_dec_debug,
-        "dtlssrtpdec", 0, "DTLS Decoder"));
+        "dtlssrtpdec", 0, "DTLS-SRTP Decoder"));
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (dtlssrtpdec, "dtlssrtpdec",
+    GST_RANK_NONE, GST_TYPE_DTLS_SRTP_DEC, dtls_element_init (plugin));
 
 enum
 {
@@ -288,8 +291,13 @@ gst_dtls_srtp_dec_get_property (GObject * object,
       }
       break;
     case PROP_CONNECTION_STATE:
-      g_object_get_property (G_OBJECT (self->bin.dtls_element),
-          "connection-state", value);
+      if (self->bin.dtls_element) {
+        g_object_get_property (G_OBJECT (self->bin.dtls_element),
+            "connection-state", value);
+      } else {
+        GST_WARNING_OBJECT (self,
+            "tried to get connection-state after disabling DTLS");
+      }
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (self, prop_id, pspec);
@@ -313,7 +321,7 @@ gst_dtls_srtp_dec_request_new_pad (GstElement * element,
   if (templ == gst_element_class_get_pad_template (klass, "data_src")) {
     GstPad *target_pad;
 
-    target_pad = gst_element_get_request_pad (self->bin.dtls_element, "src");
+    target_pad = gst_element_request_pad_simple (self->bin.dtls_element, "src");
 
     ghost_pad = gst_ghost_pad_new_from_template (name, target_pad, templ);
     gst_object_unref (target_pad);

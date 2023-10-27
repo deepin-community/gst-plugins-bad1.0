@@ -43,8 +43,6 @@ struct _GstRtpSink
 {
   GstBin parent;
 
-  GstBin parent_instance;
-
   /* Properties */
   GstUri *uri;
   gint ttl;
@@ -68,6 +66,7 @@ struct _GstRtpSinkClass
 };
 
 GType gst_rtp_sink_get_type (void);
+GST_ELEMENT_REGISTER_DECLARE (rtpsink);
 
 G_END_DECLS
 #endif /* __GST_RTP_SINK_H__ */

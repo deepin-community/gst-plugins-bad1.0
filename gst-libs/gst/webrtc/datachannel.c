@@ -22,6 +22,8 @@
  * SECTION:gstwebrtc-datachannel
  * @short_description: RTCDataChannel object
  * @title: GstWebRTCDataChannel
+ * @symbols:
+ * - GstWebRTCDataChannel
  *
  * <https://www.w3.org/TR/webrtc/#rtcdatachannel>
  *
@@ -33,6 +35,7 @@
 #endif
 
 #include "datachannel.h"
+#include "webrtc-priv.h"
 
 #define GST_CAT_DEFAULT gst_webrtc_data_channel_debug
 GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
@@ -178,6 +181,8 @@ gst_webrtc_data_channel_finalize (GObject * object)
   g_free (channel->protocol);
   channel->protocol = NULL;
 
+  g_mutex_clear (&channel->lock);
+
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
@@ -258,7 +263,7 @@ gst_webrtc_data_channel_class_init (GstWebRTCDataChannelClass * klass)
           "Ready State",
           "The Ready state of this data channel",
           GST_TYPE_WEBRTC_DATA_CHANNEL_STATE,
-          GST_WEBRTC_DATA_CHANNEL_STATE_NEW,
+          GST_WEBRTC_DATA_CHANNEL_STATE_CONNECTING,
           G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class,
@@ -334,7 +339,7 @@ gst_webrtc_data_channel_class_init (GstWebRTCDataChannelClass * klass)
    */
   gst_webrtc_data_channel_signals[SIGNAL_SEND_DATA] =
       g_signal_new_class_handler ("send-data", G_TYPE_FROM_CLASS (klass),
-      G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION,
+      G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION | G_SIGNAL_DEPRECATED,
       G_CALLBACK (gst_webrtc_data_channel_send_data), NULL, NULL, NULL,
       G_TYPE_NONE, 1, G_TYPE_BYTES);
 
@@ -519,7 +524,31 @@ gst_webrtc_data_channel_send_data (GstWebRTCDataChannel * channel,
   g_return_if_fail (GST_IS_WEBRTC_DATA_CHANNEL (channel));
 
   klass = GST_WEBRTC_DATA_CHANNEL_GET_CLASS (channel);
-  klass->send_data (channel, data);
+  (void) klass->send_data (channel, data, NULL);
+}
+
+/**
+ * gst_webrtc_data_channel_send_data_full:
+ * @channel: a #GstWebRTCDataChannel
+ * @data: (nullable): a #GBytes or %NULL
+ * @error: (nullable): location to a #GError or %NULL
+ *
+ * Send @data as a data message over @channel.
+ *
+ * Returns: TRUE if @channel is open and data could be queued
+ *
+ * Since: 1.22
+ */
+gboolean
+gst_webrtc_data_channel_send_data_full (GstWebRTCDataChannel * channel,
+    GBytes * data, GError ** error)
+{
+  GstWebRTCDataChannelClass *klass;
+
+  g_return_val_if_fail (GST_IS_WEBRTC_DATA_CHANNEL (channel), FALSE);
+
+  klass = GST_WEBRTC_DATA_CHANNEL_GET_CLASS (channel);
+  return klass->send_data (channel, data, error);
 }
 
 /**
@@ -538,7 +567,30 @@ gst_webrtc_data_channel_send_string (GstWebRTCDataChannel * channel,
   g_return_if_fail (GST_IS_WEBRTC_DATA_CHANNEL (channel));
 
   klass = GST_WEBRTC_DATA_CHANNEL_GET_CLASS (channel);
-  klass->send_string (channel, str);
+  (void) klass->send_string (channel, str, NULL);
+}
+
+/**
+ * gst_webrtc_data_channel_send_string_full:
+ * @channel: a #GstWebRTCDataChannel
+ * @str: (nullable): a string or %NULL
+ *
+ * Send @str as a string message over @channel.
+ *
+ * Returns: TRUE if @channel is open and data could be queued
+ *
+ * Since: 1.22
+ */
+gboolean
+gst_webrtc_data_channel_send_string_full (GstWebRTCDataChannel * channel,
+    const gchar * str, GError ** error)
+{
+  GstWebRTCDataChannelClass *klass;
+
+  g_return_val_if_fail (GST_IS_WEBRTC_DATA_CHANNEL (channel), FALSE);
+
+  klass = GST_WEBRTC_DATA_CHANNEL_GET_CLASS (channel);
+  return klass->send_string (channel, str, error);
 }
 
 /**

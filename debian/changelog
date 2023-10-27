@@ -1,3 +1,184 @@
+gst-plugins-bad1.0 (1.22.4-1) unstable; urgency=medium
+
+  * Team upload
+
+  [ Jeremy Bícha ]
+  * New upstream release
+
+  [ Dylan Aïssi ]
+  * Build the AVTP (Audio Video Transport Protocol) plugin
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Fri, 30 Jun 2023 13:12:02 -0400
+
+gst-plugins-bad1.0 (1.22.3-2) unstable; urgency=medium
+
+  * Team upload
+  * Release to unstable
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Mon, 12 Jun 2023 14:38:43 -0400
+
+gst-plugins-bad1.0 (1.22.3-1) experimental; urgency=medium
+
+  * Team upload
+
+  [ Jeremy Bícha ]
+  * New upstream release
+  * debian/rules: Enable all hardening flags
+
+  [ Laurent Bigonville ]
+  * debian/rules: Disable dvb element on non-linux architectures
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Sun, 21 May 2023 08:31:50 -0400
+
+gst-plugins-bad1.0 (1.22.1-1) experimental; urgency=medium
+
+  * Team upload
+
+  [ Jeremy Bicha ]
+  * New upstream bugfix release
+
+  [ Laurent Bigonville ]
+  * debian/rules: Explicitly disable wayland on non-linux architectures
+
+ -- Laurent Bigonville <bigon@debian.org>  Tue, 28 Feb 2023 15:18:04 +0100
+
+gst-plugins-bad1.0 (1.22.0-4) unstable; urgency=medium
+
+  * Team upload
+  * debian/rules: Disable vulkan on non-linux architectures
+  * Disable zxing element on architectures where opencv doesn't build
+
+ -- Laurent Bigonville <bigon@debian.org>  Mon, 27 Feb 2023 23:59:59 +0100
+
+gst-plugins-bad1.0 (1.22.0-3) unstable; urgency=medium
+
+  * The new Intel Quick Sync Video plugin is amd64-only
+    so only enable it there
+  * Bump minimum libzxingcore-dev to 1.4.0
+  * Enable wpe on all non-Linux architectures
+  * Release to unstable
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Sat, 28 Jan 2023 14:23:11 -0500
+
+gst-plugins-bad1.0 (1.22.0-2) experimental; urgency=medium
+
+  * Disable Intel Quick Sync Video plugin (there is a build issue with it)
+  * Adjust some other configure & install rules
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Sat, 28 Jan 2023 11:51:52 -0500
+
+gst-plugins-bad1.0 (1.22.0-1) experimental; urgency=medium
+
+  * Team upload
+  * New upstream release
+  * debian/rules: Set -Dauto_features=enabled
+    and explicitly disable several things that aren't buildable in Debian
+  * Build-Depend on glslc, gstreamer1.0-tools, libdirectfb-dev, liblrdf0-dev,
+    libneon27-dev, libvulkan-dev, & libxkbcommon-x11-dev
+  * debian/control: Bump minimum gstreamer, glib, libnice, and meson
+  * Update debian/libgstreamer-plugins-bad1.0-0.install
+  * Set Rules-Requires-Root: no
+  * Bump Standards-Version to 4.6.2
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Fri, 27 Jan 2023 17:50:14 -0500
+
+gst-plugins-bad1.0 (1.20.5-1) unstable; urgency=medium
+
+  * Team upload
+  * New upstream release
+  * Add debian/upstream/signing-key.asc and update debian/watch to use it
+  * Update standards version to 4.6.1, no changes needed
+  * Remove fields on binary packages that duplicate source
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Thu, 05 Jan 2023 12:05:53 -0500
+
+gst-plugins-bad1.0 (1.20.4-1) unstable; urgency=medium
+
+  * Team upload
+  * New upstream release
+  * Refresh Skip-failing-tests.patch
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Mon, 05 Dec 2022 10:54:29 -0500
+
+gst-plugins-bad1.0 (1.20.3-2) unstable; urgency=medium
+
+  * Update patch to skip flaky camerabin test too (Closes: #1014264)
+
+ -- Jeremy Bicha <jbicha@ubuntu.com>  Wed, 17 Aug 2022 15:23:16 -0400
+
+gst-plugins-bad1.0 (1.20.3-1) unstable; urgency=medium
+
+  [ Sebastian Dröge ]
+  * New upstream bugfix release.
+
+  [ Jeremy Bicha ]
+  * Don't ignore dh_auto_test failures on amd64 & arm64.
+  * Add patch to skip a failing build test.
+
+ -- Sebastian Dröge <slomo@debian.org>  Thu, 16 Jun 2022 10:16:48 +0300
+
+gst-plugins-bad1.0 (1.20.2-1) unstable; urgency=medium
+
+  * New upstream bugfix release.
+
+ -- Sebastian Dröge <slomo@debian.org>  Tue, 03 May 2022 10:07:05 +0300
+
+gst-plugins-bad1.0 (1.20.1-2) unstable; urgency=medium
+
+  * debian/control:
+    + Switch to wpewebkit 1.1 (Closes: #1009721).
+
+ -- Sebastian Dröge <slomo@debian.org>  Wed, 27 Apr 2022 12:27:17 +0300
+
+gst-plugins-bad1.0 (1.20.1-1) unstable; urgency=medium
+
+  * debian/control,
+    debian/gstreamer1.0-plugins-bad.install:
+    + Ship openh264 plugin (Closes: #1005226).
+  * New upstream bugfix release.
+
+ -- Sebastian Dröge <slomo@debian.org>  Mon, 14 Mar 2022 17:03:33 +0200
+
+gst-plugins-bad1.0 (1.20.0-4) unstable; urgency=medium
+
+  [ Laurent Bigonville ]
+  * debian/control,
+    debian/patches/03-openaptx-Support-libfreeaptx.patch:
+    + Use libfreeaptx instead of libopenaptx.
+
+ -- Sebastian Dröge <slomo@debian.org>  Wed, 16 Feb 2022 09:13:55 +0200
+
+gst-plugins-bad1.0 (1.20.0-3) unstable; urgency=medium
+
+  [ Laurent Bigonville ]
+  * Do not build ldac plugin on big-endian architectures
+    libldac is not building on these, see #980372.
+
+  [ Sebastian Dröge ]
+  * Upload to unstable.
+
+ -- Sebastian Dröge <slomo@debian.org>  Thu, 10 Feb 2022 15:32:48 +0200
+
+gst-plugins-bad1.0 (1.20.0-2) unstable; urgency=medium
+
+  * debian/control:
+    + Let gstreamer1.0-plugins-bad depend on gstreamer1.0-plugins-good as some
+      plugins in the former require plugins from the latter.
+
+ -- Sebastian Dröge <slomo@debian.org>  Fri, 04 Feb 2022 10:27:30 +0200
+
+gst-plugins-bad1.0 (1.20.0-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Sebastian Dröge <slomo@debian.org>  Fri, 04 Feb 2022 08:58:33 +0200
+
+gst-plugins-bad1.0 (1.19.90-1) experimental; urgency=medium
+
+  * New upstream release candidate.
+
+ -- Sebastian Dröge <slomo@debian.org>  Fri, 28 Jan 2022 17:15:28 +0200
+
 gst-plugins-bad1.0 (1.18.5-1) unstable; urgency=medium
 
   * New upstream bugfix release.
@@ -2326,4 +2507,3 @@ gst-plugins-bad0.10 (0.10.0+cvs20060214-1) unstable; urgency=low
   * Initial release.
 
  -- Joe Wreschnig <piman@debian.org>  Tue, 14 Feb 2006 13:22:33 -0600
-

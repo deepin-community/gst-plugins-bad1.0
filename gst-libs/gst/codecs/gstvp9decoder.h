@@ -23,7 +23,6 @@
 #include <gst/codecs/codecs-prelude.h>
 
 #include <gst/video/video.h>
-#include <gst/codecparsers/gstvp9parser.h>
 #include <gst/codecs/gstvp9picture.h>
 
 G_BEGIN_DECLS
@@ -52,6 +51,7 @@ struct _GstVp9Decoder
 
   /*< protected >*/
   GstVideoCodecState * input_state;
+  gboolean parse_compressed_headers;
 
   /*< private >*/
   GstVp9DecoderPrivate *priv;
@@ -60,71 +60,138 @@ struct _GstVp9Decoder
 
 /**
  * GstVp9DecoderClass:
- * @new_sequence:      Notifies subclass of SPS update
- * @new_picture:       Optional.
- *                     Called whenever new #GstVp9Picture is created.
- *                     Subclass can set implementation specific user data
- *                     on the #GstVp9Picture via gst_vp9_picture_set_user_data()
- * @duplicate_picture: Duplicate the #GstVp9Picture
- * @start_picture:     Optional.
- *                     Called per one #GstVp9Picture to notify subclass to prepare
- *                     decoding process for the #GstVp9Picture
- * @decode_slice:      Provides per slice data with parsed slice header and
- *                     required raw bitstream for subclass to decode it
- * @end_picture:       Optional.
- *                     Called per one #GstVp9Picture to notify subclass to finish
- *                     decoding process for the #GstVp9Picture
- * @output_picture:    Called with a #GstVp9Picture which is required to be outputted.
- *                     Subclass can retrieve parent #GstVideoCodecFrame by using
- *                     gst_video_decoder_get_frame() with system_frame_number
- *                     and the #GstVideoCodecFrame must be consumed by subclass via
- *                     gst_video_decoder_{finish,drop,release}_frame().
  */
 struct _GstVp9DecoderClass
 {
   GstVideoDecoderClass parent_class;
 
-  gboolean        (*new_sequence)      (GstVp9Decoder * decoder,
-                                        const GstVp9FrameHdr * frame_hdr);
+  /**
+   * GstVp9DecoderClass::new_sequence:
+   * @decoder: a #GstVp9Decoder
+   * @frame_hdr: a #GstVp9FrameHeader
+   * @max_dpb_size: the size of dpb including preferred output delay
+   *   by subclass reported via get_preferred_output_delay method.
+   *
+   * Notifies subclass of video sequence update such as resolution, bitdepth,
+   * profile.
+   *
+   * Since: 1.18
+   */
+  GstFlowReturn   (*new_sequence)      (GstVp9Decoder * decoder,
+                                        const GstVp9FrameHeader *frame_hdr,
+                                        gint max_dpb_size);
 
   /**
-   * GstVp9Decoder:new_picture:
+   * GstVp9DecoderClass::new_picture:
    * @decoder: a #GstVp9Decoder
-   * @frame: (nullable): (transfer none): a #GstVideoCodecFrame
+   * @frame: (transfer none): a #GstVideoCodecFrame
    * @picture: (transfer none): a #GstVp9Picture
    *
-   * FIXME 1.20: vp9parse element can splitting super frames,
-   * and then we can ensure non-null @frame
+   * Optional. Called whenever new #GstVp9Picture is created.
+   * Subclass can set implementation specific user data on the #GstVp9Picture
+   * via gst_vp9_picture_set_user_data()
+   *
+   * Since: 1.18
    */
-  gboolean        (*new_picture)       (GstVp9Decoder * decoder,
+  GstFlowReturn   (*new_picture)       (GstVp9Decoder * decoder,
                                         GstVideoCodecFrame * frame,
                                         GstVp9Picture * picture);
 
+  /**
+   * GstVp9DecoderClass::duplicate_picture:
+   * @decoder: a #GstVp9Decoder
+   * @frame: (transfer none): a #GstVideoCodecFrame
+   * @picture: (transfer none): a #GstVp9Picture to be duplicated
+   *
+   * Optional. Called to duplicate @picture when show_existing_frame flag is set
+   * in the parsed vp9 frame header. Returned #GstVp9Picture from this method
+   * should hold already decoded picture data corresponding to the @picture,
+   * since the returned #GstVp9Picture from this method will be passed to
+   * the output_picture method immediately without additional decoding process.
+   *
+   * If this method is not implemented by subclass, baseclass will drop
+   * current #GstVideoCodecFrame without additional processing for the current
+   * frame.
+   *
+   * Returns: (transfer full) (nullable): a #GstVp9Picture or %NULL if failed to duplicate
+   * @picture.
+   *
+   * Since: 1.18
+   */
   GstVp9Picture * (*duplicate_picture) (GstVp9Decoder * decoder,
-                                        GstVp9Picture * picture);
-
-  gboolean        (*start_picture)     (GstVp9Decoder * decoder,
-                                        GstVp9Picture * picture);
-
-  gboolean        (*decode_picture)    (GstVp9Decoder * decoder,
-                                        GstVp9Picture * picture,
-                                        GstVp9Dpb * dpb);
-
-  gboolean        (*end_picture)       (GstVp9Decoder * decoder,
+                                        GstVideoCodecFrame * frame,
                                         GstVp9Picture * picture);
 
   /**
-   * GstVp9Decoder:output_picture:
+   * GstVp9DecoderClass::start_picture:
    * @decoder: a #GstVp9Decoder
-   * @frame: (nullable): (transfer full): a #GstVideoCodecFrame
+   * @picture: (transfer none): a #GstVp9Picture
+   *
+   * Optional. Called to notify subclass to prepare decoding process for
+   * @picture
+   *
+   * Since: 1.18
+   */
+  GstFlowReturn   (*start_picture)     (GstVp9Decoder * decoder,
+                                        GstVp9Picture * picture);
+
+  /**
+   * GstVp9DecoderClass::decode_picture:
+   * @decoder: a #GstVp9Decoder
+   * @picture: (transfer none): a #GstVp9Picture to decoder
+   * @dpb: (transfer none): a #GstVp9Dpb
+   *
+   * Called to notify decoding for subclass to decoder given @picture with
+   * given @dpb
+   *
+   * Since: 1.18
+   */
+  GstFlowReturn   (*decode_picture)    (GstVp9Decoder * decoder,
+                                        GstVp9Picture * picture,
+                                        GstVp9Dpb * dpb);
+
+  /**
+   * GstVp9DecoderClass::end_picture:
+   * @decoder: a #GstVp9Decoder
+   * @picture: (transfer none): a #GstVp9Picture
+   *
+   * Optional. Called per one #GstVp9Picture to notify subclass to finish
+   * decoding process for the #GstVp9Picture
+   *
+   * Since: 1.18
+   */
+  GstFlowReturn   (*end_picture)       (GstVp9Decoder * decoder,
+                                        GstVp9Picture * picture);
+
+  /**
+   * GstVp9DecoderClass::output_picture:
+   * @decoder: a #GstVp9Decoder
+   * @frame: (transfer full): a #GstVideoCodecFrame
    * @picture: (transfer full): a #GstVp9Picture
    *
-   * FIXME 1.20: vp9parse element can splitting super frames,
-   * and then we can ensure non-null @frame
+   * Called to notify @picture is ready to be outputted.
+   *
+   * Since: 1.18
    */
   GstFlowReturn   (*output_picture)    (GstVp9Decoder * decoder,
                                         GstVideoCodecFrame * frame,
                                         GstVp9Picture * picture);
+
+  /**
+   * GstVp9DecoderClass::get_preferred_output_delay:
+   * @decoder: a #GstVp9Decoder
+   * @is_live: whether upstream is live or not
+   *
+   * Optional. Retrieve the preferred output delay from child classes.
+   * controls how many frames to delay when calling
+   * GstVp9DecoderClass::output_picture
+   *
+   * Returns: the number of perferred delayed output frame
+   *
+   * Since: 1.20
+   */
+  guint           (*get_preferred_output_delay)   (GstVp9Decoder * decoder,
+                                                   gboolean is_live);
 
   /*< private >*/
   gpointer padding[GST_PADDING_LARGE];
@@ -134,6 +201,10 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC(GstVp9Decoder, gst_object_unref)
 
 GST_CODECS_API
 GType gst_vp9_decoder_get_type (void);
+
+GST_CODECS_API
+void gst_vp9_decoder_set_non_keyframe_format_change_support (GstVp9Decoder * decoder,
+                                                             gboolean support);
 
 G_END_DECLS
 

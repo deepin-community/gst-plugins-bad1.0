@@ -7,16 +7,13 @@
 
 #include <gst/gst.h>
 #include <gst/pbutils/pbutils.h>
-#include "transcoder-prelude.h"
+#include <gst/transcoder/transcoder-prelude.h>
+#include <gst/transcoder/transcoder-enumtypes.h>
 
 G_BEGIN_DECLS
 
-typedef struct _GstTranscoderSignalDispatcher GstTranscoderSignalDispatcher;
-typedef struct _GstTranscoderSignalDispatcherInterface GstTranscoderSignalDispatcherInterface;
-
 /*********** Error definitions ************/
 #define      GST_TRANSCODER_ERROR                         (gst_transcoder_error_quark ())
-#define      GST_TYPE_TRANSCODER_ERROR                    (gst_transcoder_error_get_type ())
 
 /**
  * GstTranscoderError:
@@ -29,24 +26,90 @@ typedef enum {
 GST_TRANSCODER_API
 GQuark        gst_transcoder_error_quark    (void);
 GST_TRANSCODER_API
-GType         gst_transcoder_error_get_type (void);
-GST_TRANSCODER_API
 const gchar * gst_transcoder_error_get_name (GstTranscoderError error);
+
+/*********** State definition ************/
+
+/**
+ * GstTranscoderState:
+ * @GST_TRANSCODER_STATE_STOPPED: the transcoder is stopped.
+ * @GST_TRANSCODER_STATE_PAUSED: the transcoder is paused.
+ * @GST_TRANSCODER_STATE_PLAYING: the transcoder is currently transcoding a
+ * stream.
+ *
+ * High level representation of the transcoder pipeline state.
+ *
+ * Since: 1.20
+ */
+typedef enum {
+    GST_TRANSCODER_STATE_STOPPED,
+    GST_TRANSCODER_STATE_PAUSED,
+    GST_TRANSCODER_STATE_PLAYING
+} GstTranscoderState;
+
+GST_TRANSCODER_API
+const gchar * gst_transcoder_state_get_name                (GstTranscoderState state);
+
+/*********** Messages types definitions ************/
+
+/**
+ * GstTranscoderMessage:
+ * @GST_TRANSCODER_MESSAGE_POSITION_UPDATED: Sink position changed
+ * @GST_TRANSCODER_MESSAGE_DURATION_CHANGED: Duration of stream changed
+ * @GST_TRANSCODER_MESSAGE_STATE_CHANGED: Pipeline state changed
+ * @GST_TRANSCODER_MESSAGE_DONE: Transcoding is done
+ * @GST_TRANSCODER_MESSAGE_ERROR: Message contains an error
+ * @GST_TRANSCODER_MESSAGE_WARNING: Message contains an error
+ *
+ * Types of messages that will be posted on the transcoder API bus.
+ *
+ * See also #gst_transcoder_get_message_bus()
+ *
+ * Since: 1.20
+ */
+typedef enum
+{
+  GST_TRANSCODER_MESSAGE_POSITION_UPDATED,
+  GST_TRANSCODER_MESSAGE_DURATION_CHANGED,
+  GST_TRANSCODER_MESSAGE_STATE_CHANGED,
+  GST_TRANSCODER_MESSAGE_DONE,
+  GST_TRANSCODER_MESSAGE_ERROR,
+  GST_TRANSCODER_MESSAGE_WARNING,
+} GstTranscoderMessage;
+
+GST_TRANSCODER_API
+gboolean gst_transcoder_is_transcoder_message                 (GstMessage * msg);
+
+GST_TRANSCODER_API
+const gchar * gst_transcoder_message_get_name                  (GstTranscoderMessage message);
+
+GST_TRANSCODER_API
+void           gst_transcoder_message_parse_position           (GstMessage * msg, GstClockTime * position);
+
+GST_TRANSCODER_API
+void           gst_transcoder_message_parse_duration           (GstMessage * msg, GstClockTime * duration);
+
+GST_TRANSCODER_API
+void           gst_transcoder_message_parse_state              (GstMessage * msg, GstTranscoderState * state);
+
+GST_TRANSCODER_API
+void           gst_transcoder_message_parse_error              (GstMessage * msg, GError * error, GstStructure ** details);
+
+GST_TRANSCODER_API
+void           gst_transcoder_message_parse_warning            (GstMessage * msg, GError * error, GstStructure ** details);
+
+
 
 /*********** GstTranscoder definition  ************/
 #define GST_TYPE_TRANSCODER (gst_transcoder_get_type ())
-#define GST_TRANSCODER(obj) (G_TYPE_CHECK_INSTANCE_CAST ((obj), GST_TYPE_TRANSCODER, GstTranscoder))
-#define GST_TRANSCODER_CLASS(klass) (G_TYPE_CHECK_CLASS_CAST ((klass), GST_TYPE_TRANSCODER, GstTranscoderClass))
-#define GST_IS_TRANSCODER(obj) (G_TYPE_CHECK_INSTANCE_TYPE ((obj), GST_TYPE_TRANSCODER))
-#define GST_IS_TRANSCODER_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE ((klass), GST_TYPE_TRANSCODER))
-#define GST_TRANSCODER_GET_CLASS(obj) (G_TYPE_INSTANCE_GET_CLASS ((obj), GST_TYPE_TRANSCODER, GstTranscoderClass))
 
-typedef struct _GstTranscoder  GstTranscoder;
-typedef struct _GstTranscoderClass  GstTranscoderClass;
-typedef struct _GstTranscoderPrivate GstTranscoderPrivate;
-
+/**
+ * GstTranscoderClass.parent_class:
+ *
+ * Since: 1.20
+ */
 GST_TRANSCODER_API
-GType           gst_transcoder_get_type                   (void);
+G_DECLARE_FINAL_TYPE (GstTranscoder, gst_transcoder, GST, TRANSCODER, GstObject)
 
 GST_TRANSCODER_API
 GstTranscoder * gst_transcoder_new                        (const gchar * source_uri,
@@ -56,22 +119,24 @@ GstTranscoder * gst_transcoder_new                        (const gchar * source_
 GST_TRANSCODER_API
 GstTranscoder * gst_transcoder_new_full                   (const gchar * source_uri,
                                                            const gchar * dest_uri,
-                                                           GstEncodingProfile *profile,
-                                                           GstTranscoderSignalDispatcher *signal_dispatcher);
+                                                           GstEncodingProfile * profile);
 
 GST_TRANSCODER_API
-gboolean gst_transcoder_run                               (GstTranscoder *self,
+gboolean gst_transcoder_run                               (GstTranscoder * self,
                                                            GError ** error);
 
 GST_TRANSCODER_API
-void gst_transcoder_set_cpu_usage                         (GstTranscoder *self,
+GstBus * gst_transcoder_get_message_bus                   (GstTranscoder * transcoder);
+
+GST_TRANSCODER_API
+void gst_transcoder_set_cpu_usage                         (GstTranscoder * self,
                                                            gint cpu_usage);
 
 GST_TRANSCODER_API
-void gst_transcoder_run_async                             (GstTranscoder *self);
+void gst_transcoder_run_async                             (GstTranscoder * self);
 
 GST_TRANSCODER_API
-void gst_transcoder_set_position_update_interval          (GstTranscoder *self,
+void gst_transcoder_set_position_update_interval          (GstTranscoder * self,
                                                            guint interval);
 
 GST_TRANSCODER_API
@@ -81,7 +146,7 @@ GST_TRANSCODER_API
 gchar * gst_transcoder_get_dest_uri                       (GstTranscoder * self);
 
 GST_TRANSCODER_API
-guint gst_transcoder_get_position_update_interval         (GstTranscoder *self);
+guint gst_transcoder_get_position_update_interval         (GstTranscoder * self);
 
 GST_TRANSCODER_API
 GstClockTime gst_transcoder_get_position                  (GstTranscoder * self);
@@ -98,43 +163,15 @@ GST_TRANSCODER_API
 void gst_transcoder_set_avoid_reencoding                  (GstTranscoder * self,
                                                            gboolean avoid_reencoding);
 
-
-/****************** Signal dispatcher *******************************/
-
-#define GST_TYPE_TRANSCODER_SIGNAL_DISPATCHER                (gst_transcoder_signal_dispatcher_get_type ())
-#define GST_TRANSCODER_SIGNAL_DISPATCHER(obj)                (G_TYPE_CHECK_INSTANCE_CAST ((obj), GST_TYPE_TRANSCODER_SIGNAL_DISPATCHER, GstTranscoderSignalDispatcher))
-#define GST_IS_TRANSCODER_SIGNAL_DISPATCHER(obj)             (G_TYPE_CHECK_INSTANCE_TYPE ((obj), GST_TYPE_TRANSCODER_SIGNAL_DISPATCHER))
-#define GST_TRANSCODER_SIGNAL_DISPATCHER_GET_INTERFACE(inst) (G_TYPE_INSTANCE_GET_INTERFACE ((inst), GST_TYPE_TRANSCODER_SIGNAL_DISPATCHER, GstTranscoderSignalDispatcherInterface))
-
-struct _GstTranscoderSignalDispatcherInterface {
-  GTypeInterface parent_iface;
-
-  void (*dispatch) (GstTranscoderSignalDispatcher * self,
-                    GstTranscoder * transcoder,
-                    void (*emitter) (gpointer data),
-                    gpointer data,
-                    GDestroyNotify destroy);
-};
-
-typedef struct _GstTranscoderGMainContextSignalDispatcher      GstTranscoderGMainContextSignalDispatcher;
-typedef struct _GstTranscoderGMainContextSignalDispatcherClass GstTranscoderGMainContextSignalDispatcherClass;
+#include "gsttranscoder-signal-adapter.h"
 
 GST_TRANSCODER_API
-GType        gst_transcoder_signal_dispatcher_get_type    (void);
-
-#define GST_TYPE_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER             (gst_transcoder_g_main_context_signal_dispatcher_get_type ())
-#define GST_IS_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER(obj)          (G_TYPE_CHECK_INSTANCE_TYPE ((obj), GST_TYPE_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER))
-#define GST_IS_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER_CLASS(klass)  (G_TYPE_CHECK_CLASS_TYPE ((klass), GST_TYPE_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER))
-#define GST_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER_GET_CLASS(obj)   (G_TYPE_INSTANCE_GET_CLASS ((obj), GST_TYPE_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER, GstTranscoderGMainContextSignalDispatcherClass))
-#define GST_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER(obj)             (G_TYPE_CHECK_INSTANCE_CAST ((obj), GST_TYPE_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER, GstTranscoderGMainContextSignalDispatcher))
-#define GST_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER_CLASS(klass)     (G_TYPE_CHECK_CLASS_CAST ((klass), GST_TYPE_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER, GstTranscoderGMainContextSignalDispatcherClass))
-#define GST_TRANSCODER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER_CAST(obj)        ((GstTranscoderGMainContextSignalDispatcher*)(obj))
-
+GstTranscoderSignalAdapter*
+gst_transcoder_get_signal_adapter                         (GstTranscoder * self,
+                                                           GMainContext *context);
 GST_TRANSCODER_API
-GType gst_transcoder_g_main_context_signal_dispatcher_get_type (void);
-
-GST_TRANSCODER_API
-GstTranscoderSignalDispatcher * gst_transcoder_g_main_context_signal_dispatcher_new (GMainContext * application_context);
+GstTranscoderSignalAdapter*
+gst_transcoder_get_sync_signal_adapter                    (GstTranscoder * self);
 
 G_END_DECLS
 

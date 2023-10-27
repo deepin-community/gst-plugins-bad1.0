@@ -5,8 +5,8 @@ magicleap_sources = [
 ]
 
 libmlaudio_dep = cc.find_library('ml_audio', required : get_option('magicleap'))
-liblumin_core_dep = cc.find_library('lumin_rt_core_1_5', required : get_option('magicleap'))
-liblumin_app_dep = cc.find_library('lumin_rt_app_1_5', required : get_option('magicleap'))
+liblumin_core_dep = cc.find_library('lumin_rt_core_1_7', required : get_option('magicleap'))
+liblumin_app_dep = cc.find_library('lumin_rt_app_1_7', required : get_option('magicleap'))
 
 if libmlaudio_dep.found()
   gstmagicleap = library('gstmagicleap',
@@ -22,6 +22,5 @@ if libmlaudio_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
-  pkgconfig.generate(gstmagicleap, install_dir : plugins_pkgconfig_install_dir)
   plugins += gstmagicleap
 endif

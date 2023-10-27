@@ -26,12 +26,6 @@
 #include "utils.h"
 #include "gstwebrtcbin.h"
 
-GQuark
-gst_webrtc_bin_error_quark (void)
-{
-  return g_quark_from_static_string ("gst-webrtc-bin-error-quark");
-}
-
 GstPadTemplate *
 _find_pad_template (GstElement * element, GstPadDirection direction,
     GstPadPresence presence, const gchar * name)
@@ -138,18 +132,18 @@ _free_pad_block (struct pad_block *block)
   g_free (block);
 }
 
-gchar *
+const gchar *
 _enum_value_to_string (GType type, guint value)
 {
   GEnumClass *enum_class;
   GEnumValue *enum_value;
-  gchar *str = NULL;
+  const gchar *str = NULL;
 
   enum_class = g_type_class_ref (type);
   enum_value = g_enum_get_value (enum_class, value);
 
   if (enum_value)
-    str = g_strdup (enum_value->value_nick);
+    str = enum_value->value_nick;
 
   g_type_class_unref (enum_class);
 
@@ -204,4 +198,53 @@ _rtp_caps_from_media (const GstSDPMedia * media)
   }
 
   return ret;
+}
+
+GstWebRTCKind
+webrtc_kind_from_caps (const GstCaps * caps)
+{
+  GstStructure *s;
+  const gchar *media;
+
+  if (!caps || gst_caps_get_size (caps) == 0)
+    return GST_WEBRTC_KIND_UNKNOWN;
+
+  s = gst_caps_get_structure (caps, 0);
+
+  media = gst_structure_get_string (s, "media");
+  if (media == NULL)
+    return GST_WEBRTC_KIND_UNKNOWN;
+
+  if (!g_strcmp0 (media, "audio"))
+    return GST_WEBRTC_KIND_AUDIO;
+
+  if (!g_strcmp0 (media, "video"))
+    return GST_WEBRTC_KIND_VIDEO;
+
+  return GST_WEBRTC_KIND_UNKNOWN;
+}
+
+char *
+_get_msid_from_media (const GstSDPMedia * media)
+{
+  int i;
+
+  for (i = 0; i < gst_sdp_media_attributes_len (media); i++) {
+    const GstSDPAttribute *attr = gst_sdp_media_get_attribute (media, i);
+    const char *start, *end;
+
+    if (!attr->value)
+      continue;
+
+    start = strstr (attr->value, "msid:");
+    if (!start)
+      continue;
+
+    start += strlen ("msid:");
+    end = strstr (start, " ");
+    if (end)
+      return g_strndup (start, end - start);
+  }
+
+  return NULL;
 }

@@ -11,6 +11,7 @@ dvb_sources = [
   'camutils.c',
   'dvbbasebin.c',
   'gstdvb.c',
+  'gstdvbelement.c',
   'gstdvbsrc.c',
   'parsechannels.c',
 ]
@@ -35,10 +36,9 @@ if have_dvb
     dvb_sources,
     c_args : gst_plugins_bad_args + [ '-DGST_USE_UNSTABLE_API' ],
     include_directories : [configinc, libsinc],
-    dependencies : [gstmpegts_dep, gstbase_dep, glib_dep],
+    dependencies : [gstmpegts_dep, gstbase_dep],
     install : true,
     install_dir : plugins_install_dir,
   )
-  pkgconfig.generate(gstdvb, install_dir : plugins_pkgconfig_install_dir)
   plugins += [gstdvb]
 endif

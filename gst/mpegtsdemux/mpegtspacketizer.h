@@ -287,6 +287,10 @@ struct _MpegTSPacketizer2 {
   /* PTS/DTS of last buffer */
   GstClockTime last_pts;
   GstClockTime last_dts;
+
+  /* Extra time offset to handle values before initial PCR.
+   * This will be added to all converted timestamps */
+  GstClockTime extra_shift;
 };
 
 struct _MpegTSPacketizer2Class {
@@ -367,6 +371,9 @@ mpegts_packetizer_ts_to_offset (MpegTSPacketizer2 * packetizer,
 				GstClockTime ts, guint16 pcr_pid);
 G_GNUC_INTERNAL GstClockTime
 mpegts_packetizer_pts_to_ts (MpegTSPacketizer2 * packetizer,
+			     GstClockTime pts, guint16 pcr_pid);
+G_GNUC_INTERNAL GstClockTime
+mpegts_packetizer_pts_to_ts_unchecked (MpegTSPacketizer2 * packetizer,
 			     GstClockTime pts, guint16 pcr_pid);
 G_GNUC_INTERNAL GstClockTime
 mpegts_packetizer_get_current_time (MpegTSPacketizer2 * packetizer,
