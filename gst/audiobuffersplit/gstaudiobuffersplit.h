@@ -45,6 +45,7 @@ struct _GstAudioBufferSplit {
   /* Properties */
   gint output_buffer_duration_n;
   gint output_buffer_duration_d;
+  guint output_buffer_size;
 
   /* State */
   GstSegment in_segment, out_segment;
@@ -73,6 +74,7 @@ struct _GstAudioBufferSplitClass {
 };
 
 GType gst_audio_buffer_split_get_type (void);
+GST_ELEMENT_REGISTER_DECLARE (audiobuffersplit);
 
 G_END_DECLS
 

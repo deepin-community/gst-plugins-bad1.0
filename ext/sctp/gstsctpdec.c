@@ -39,6 +39,8 @@ GST_DEBUG_CATEGORY_STATIC (gst_sctp_dec_debug_category);
 
 #define gst_sctp_dec_parent_class parent_class
 G_DEFINE_TYPE (GstSctpDec, gst_sctp_dec, GST_TYPE_ELEMENT);
+GST_ELEMENT_REGISTER_DEFINE (sctpdec, "sctpdec", GST_RANK_NONE,
+    GST_TYPE_SCTP_DEC);
 
 static GstStaticPadTemplate sink_template =
 GST_STATIC_PAD_TEMPLATE ("sink", GST_PAD_SINK,
@@ -604,8 +606,11 @@ static void
 remove_pad (GstSctpDec * self, GstPad * pad)
 {
   stop_srcpad_task (pad);
+  GST_PAD_STREAM_LOCK (pad);
   gst_pad_set_active (pad, FALSE);
-  gst_element_remove_pad (GST_ELEMENT (self), pad);
+  if (gst_object_has_as_parent (GST_OBJECT (pad), GST_OBJECT (self)))
+    gst_element_remove_pad (GST_ELEMENT (self), pad);
+  GST_PAD_STREAM_UNLOCK (pad);
   GST_OBJECT_LOCK (self);
   gst_flow_combiner_remove_pad (self->flow_combiner, pad);
   GST_OBJECT_UNLOCK (self);
@@ -624,8 +629,14 @@ on_gst_sctp_association_stream_reset (GstSctpAssociation * gst_sctp_association,
   srcpad = gst_element_get_static_pad (GST_ELEMENT (self), pad_name);
   g_free (pad_name);
   if (!srcpad) {
-    GST_WARNING_OBJECT (self, "Reset called on stream without a srcpad");
-    return;
+    /* This can happen if a stream is created but the peer never sends any data.
+     * We still need to signal the reset by removing the relevant pad.  To do
+     * that, we need to add the relevant pad first. */
+    srcpad = get_pad_for_stream_id (self, stream_id);
+    if (!srcpad) {
+      GST_WARNING_OBJECT (self, "Reset called on stream without a srcpad");
+      return;
+    }
   }
   remove_pad (self, srcpad);
   gst_object_unref (srcpad);

@@ -62,6 +62,11 @@
 GST_DEBUG_CATEGORY_STATIC (gst_fluid_dec_debug);
 #define GST_CAT_DEFAULT gst_fluid_dec_debug
 
+#if !GST_HAVE_FLUIDSYNTH_VERSION(2, 2, 0)
+#define fluid_synth_chorus_on(synth,fx_group,on) fluid_synth_set_chorus_on(synth,on)
+#define fluid_synth_reverb_on(synth,fx_group,on) fluid_synth_set_reverb_on(synth,on)
+#endif
+
 enum
 {
   /* FILL ME */
@@ -99,6 +104,7 @@ static void gst_fluid_dec_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);
 static void gst_fluid_dec_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec);
+static gboolean fluiddec_element_init (GstPlugin * plugin);
 
 static GstStaticPadTemplate sink_factory = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
@@ -116,6 +122,7 @@ static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
 
 #define parent_class gst_fluid_dec_parent_class
 G_DEFINE_TYPE (GstFluidDec, gst_fluid_dec, GST_TYPE_ELEMENT);
+GST_ELEMENT_REGISTER_DEFINE_CUSTOM (fluiddec, fluiddec_element_init);
 
 /* initialize the plugin's class */
 static void
@@ -198,8 +205,8 @@ gst_fluid_dec_init (GstFluidDec * filter)
   filter->synth = new_fluid_synth (filter->settings);
   filter->sf = -1;
 
-  fluid_synth_set_chorus_on (filter->synth, filter->synth_chorus);
-  fluid_synth_set_reverb_on (filter->synth, filter->synth_reverb);
+  fluid_synth_chorus_on (filter->synth, -1, filter->synth_chorus);
+  fluid_synth_reverb_on (filter->synth, -1, filter->synth_reverb);
   fluid_synth_set_gain (filter->synth, filter->synth_gain);
   fluid_synth_set_polyphony (filter->synth, filter->synth_polyphony);
 }
@@ -632,11 +639,11 @@ gst_fluid_dec_set_property (GObject * object, guint prop_id,
       break;
     case PROP_SYNTH_CHORUS:
       fluiddec->synth_chorus = g_value_get_boolean (value);
-      fluid_synth_set_chorus_on (fluiddec->synth, fluiddec->synth_chorus);
+      fluid_synth_chorus_on (fluiddec->synth, -1, fluiddec->synth_chorus);
       break;
     case PROP_SYNTH_REVERB:
       fluiddec->synth_reverb = g_value_get_boolean (value);
-      fluid_synth_set_reverb_on (fluiddec->synth, fluiddec->synth_reverb);
+      fluid_synth_reverb_on (fluiddec->synth, -1, fluiddec->synth_reverb);
       break;
     case PROP_SYNTH_GAIN:
       fluiddec->synth_gain = g_value_get_double (value);
@@ -707,7 +714,7 @@ gst_fluid_synth_debug_log_function (int level, const char *message, void *data)
 }
 
 static gboolean
-plugin_init (GstPlugin * plugin)
+fluiddec_element_init (GstPlugin * plugin)
 {
   GST_DEBUG_CATEGORY_INIT (gst_fluid_dec_debug, "fluiddec",
       0, "Fluidsynth MIDI decoder plugin");
@@ -734,19 +741,14 @@ plugin_init (GstPlugin * plugin)
   fluid_set_log_function (FLUID_DBG, NULL, NULL);
 #endif
 
-#if GST_HAVE_FLUIDSYNTH_VERSION(1, 1, 9)
-  {
-    /* Disable all audio drivers so new_fluid_settings() does not probe them.
-     * This can crash if FluidSynth is already in use. */
-    const char *empty[] = { NULL };
-    if (fluid_audio_driver_register (empty) != FLUID_OK) {
-      GST_WARNING ("Failed to clear audio drivers");
-    }
-  }
-#endif
-
   return gst_element_register (plugin, "fluiddec",
       GST_RANK_SECONDARY, GST_TYPE_FLUID_DEC);
+}
+
+static gboolean
+plugin_init (GstPlugin * plugin)
+{
+  return GST_ELEMENT_REGISTER (fluiddec, plugin);
 }
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,

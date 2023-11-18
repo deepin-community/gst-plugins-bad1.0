@@ -10,8 +10,10 @@ if voamrwbenc_dep.found()
     install: true,
     install_dir: plugins_install_dir,
   )
-  pkgconfig.generate(gstvoamrwbenc, install_dir: plugins_pkgconfig_install_dir)
   plugins += [gstvoamrwbenc]
 
   install_data('GstVoAmrwbEnc.prs', install_dir: presetdir)
+  env = environment()
+  env.prepend('GST_PRESET_PATH', meson.current_source_dir())
+  meson.add_devenv(env)
 endif

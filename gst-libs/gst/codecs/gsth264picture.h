@@ -21,8 +21,8 @@
 #define __GST_H264_PICTURE_H__
 
 #include <gst/codecs/codecs-prelude.h>
-
 #include <gst/codecparsers/gsth264parser.h>
+#include <gst/video/video.h>
 
 G_BEGIN_DECLS
 
@@ -36,6 +36,50 @@ typedef struct _GstH264Picture GstH264Picture;
 
 /* As specified in A.3.1 h) and A.3.2 f) */
 #define GST_H264_DPB_MAX_SIZE 16
+
+/**
+ * GST_H264_PICTURE_IS_REF:
+ * @picture: a #GstH264Picture
+ *
+ * Check whether @picture is used for short-term or long-term reference
+ *
+ * Since: 1.20
+ */
+#define GST_H264_PICTURE_IS_REF(picture) \
+    ((picture)->ref != GST_H264_PICTURE_REF_NONE)
+
+/**
+ * GST_H264_PICTURE_IS_SHORT_TERM_REF:
+ * @picture: a #GstH264Picture
+ *
+ * Check whether @picture is used for short-term reference
+ *
+ * Since: 1.20
+ */
+#define GST_H264_PICTURE_IS_SHORT_TERM_REF(picture) \
+    ((picture)->ref == GST_H264_PICTURE_REF_SHORT_TERM)
+
+/**
+ * GST_H264_PICTURE_IS_LONG_TERM_REF:
+ * @picture: a #GstH264Picture
+ *
+ * Check whether @picture is used for long-term reference
+ *
+ * Since: 1.20
+ */
+#define GST_H264_PICTURE_IS_LONG_TERM_REF(picture) \
+    ((picture)->ref == GST_H264_PICTURE_REF_LONG_TERM)
+
+/**
+ * GST_H264_PICTURE_IS_FRAME:
+ * @picture: a #GstH264Picture
+ *
+ * Check whether @picture is a frame (not a field picture)
+ *
+ * Since: 1.20
+ */
+#define GST_H264_PICTURE_IS_FRAME(picture) \
+    ((picture)->field == GST_H264_PICTURE_FIELD_FRAME)
 
 struct _GstH264Slice
 {
@@ -52,13 +96,28 @@ typedef enum
   GST_H264_PICTURE_FIELD_BOTTOM_FIELD,
 } GstH264PictureField;
 
+/**
+ * GstH264PictureReference:
+ * @GST_H264_PICTURE_REF_NONE: Not used for reference picture
+ * @GST_H264_PICTURE_REF_SHORT_TERM: Used for short-term reference picture
+ * @GST_H264_PICTURE_REF_LONG_TERM: Used for long-term reference picture
+ *
+ * Since: 1.20
+ */
+typedef enum
+{
+  GST_H264_PICTURE_REF_NONE = 0,
+  GST_H264_PICTURE_REF_SHORT_TERM,
+  GST_H264_PICTURE_REF_LONG_TERM,
+} GstH264PictureReference;
+
 struct _GstH264Picture
 {
+  /*< private >*/
   GstMiniObject parent;
 
   GstH264SliceType type;
 
-  GstClockTime pts;
   /* From GstVideoCodecFrame */
   guint32 system_frame_number;
 
@@ -83,9 +142,11 @@ struct _GstH264Picture
   gint nal_ref_idc;
   gboolean idr;
   gint idr_pic_id;
-  gboolean ref;
-  gboolean long_term;
-  gboolean outputted;
+  gboolean field_pic_flag;
+  GstH264PictureReference ref;
+  /* Whether a reference picture. */
+  gboolean ref_pic;
+  gboolean needed_for_output;
   gboolean mem_mgmt_5;
 
   gboolean nonexisting;
@@ -94,9 +155,33 @@ struct _GstH264Picture
 
   GstH264DecRefPicMarking dec_ref_pic_marking;
 
+  /* For interlaced decoding */
+  gboolean second_field;
+  GstH264Picture * other_field;
+
+  GstVideoBufferFlags buffer_flags;
+
+  /* decoder input state if this picture is discont point */
+  GstVideoCodecState *discont_state;
+
   gpointer user_data;
   GDestroyNotify notify;
 };
+
+/**
+ * GstH264DpbBumpMode:
+ * @GST_H264_DPB_BUMP_NORMAL_LATENCY: No latency requirement for DBP bumping.
+ * @GST_H264_DPB_BUMP_LOW_LATENCY: Low-latency requirement for DBP bumping.
+ * @GST_H264_DPB_BUMP_VERY_LOW_LATENCY: Very low-latency requirement for DBP bumping.
+ *
+ * Since: 1.20
+ */
+typedef enum
+{
+  GST_H264_DPB_BUMP_NORMAL_LATENCY,
+  GST_H264_DPB_BUMP_LOW_LATENCY,
+  GST_H264_DPB_BUMP_VERY_LOW_LATENCY
+} GstH264DpbBumpMode;
 
 GST_CODECS_API
 GType gst_h264_picture_get_type (void);
@@ -125,7 +210,7 @@ gst_h264_picture_replace (GstH264Picture ** old_picture,
 }
 
 static inline void
-gst_h264_picture_clear (GstH264Picture ** picture)
+gst_clear_h264_picture (GstH264Picture ** picture)
 {
   if (picture && *picture) {
     gst_h264_picture_unref (*picture);
@@ -150,11 +235,25 @@ GST_CODECS_API
 GstH264Dpb * gst_h264_dpb_new (void);
 
 GST_CODECS_API
-void  gst_h264_dpb_set_max_num_pics (GstH264Dpb * dpb,
-                                     gint max_num_pics);
+void  gst_h264_dpb_set_max_num_frames (GstH264Dpb * dpb,
+                                       gint max_num_frames);
 
 GST_CODECS_API
-gint gst_h264_dpb_get_max_num_pics  (GstH264Dpb * dpb);
+gint gst_h264_dpb_get_max_num_frames  (GstH264Dpb * dpb);
+
+GST_CODECS_API
+void gst_h264_dpb_set_interlaced      (GstH264Dpb * dpb,
+                                       gboolean interlaced);
+
+GST_CODECS_API
+void gst_h264_dpb_set_max_num_reorder_frames (GstH264Dpb * dpb,
+                                              guint32 max_num_reorder_frames);
+
+GST_CODECS_API
+guint32 gst_h264_dpb_get_max_num_reorder_frames (GstH264Dpb * dpb);
+
+GST_CODECS_API
+gboolean gst_h264_dpb_get_interlaced  (GstH264Dpb * dpb);
 
 GST_CODECS_API
 void  gst_h264_dpb_free             (GstH264Dpb * dpb);
@@ -170,14 +269,7 @@ GST_CODECS_API
 void  gst_h264_dpb_delete_unused    (GstH264Dpb * dpb);
 
 GST_CODECS_API
-void gst_h264_dpb_delete_outputed   (GstH264Dpb * dpb);
-
-GST_CODECS_API
-void  gst_h264_dpb_delete_by_poc    (GstH264Dpb * dpb,
-                                     gint poc);
-
-GST_CODECS_API
-gint  gst_h264_dpb_num_ref_pictures (GstH264Dpb * dpb);
+gint  gst_h264_dpb_num_ref_frames (GstH264Dpb * dpb);
 
 GST_CODECS_API
 void  gst_h264_dpb_mark_all_non_ref (GstH264Dpb * dpb);
@@ -187,22 +279,21 @@ GstH264Picture * gst_h264_dpb_get_short_ref_by_pic_num (GstH264Dpb * dpb,
                                                         gint pic_num);
 
 GST_CODECS_API
-GstH264Picture * gst_h264_dpb_get_long_ref_by_pic_num  (GstH264Dpb * dpb,
-                                                        gint pic_num);
+GstH264Picture * gst_h264_dpb_get_long_ref_by_long_term_pic_num (GstH264Dpb * dpb,
+                                                                 gint long_term_pic_num);
 
 GST_CODECS_API
 GstH264Picture * gst_h264_dpb_get_lowest_frame_num_short_ref (GstH264Dpb * dpb);
 
 GST_CODECS_API
-void  gst_h264_dpb_get_pictures_not_outputted  (GstH264Dpb * dpb,
-                                                GArray * out);
-
-GST_CODECS_API
 void  gst_h264_dpb_get_pictures_short_term_ref (GstH264Dpb * dpb,
+                                                gboolean include_non_existing,
+                                                gboolean include_second_field,
                                                 GArray * out);
 
 GST_CODECS_API
 void  gst_h264_dpb_get_pictures_long_term_ref  (GstH264Dpb * dpb,
+                                                gboolean include_second_field,
                                                 GArray * out);
 
 GST_CODECS_API
@@ -216,7 +307,30 @@ GST_CODECS_API
 gint  gst_h264_dpb_get_size   (GstH264Dpb * dpb);
 
 GST_CODECS_API
-gboolean gst_h264_dpb_is_full (GstH264Dpb * dpb);
+gboolean gst_h264_dpb_has_empty_frame_buffer   (GstH264Dpb * dpb);
+
+GST_CODECS_API
+gboolean gst_h264_dpb_needs_bump (GstH264Dpb * dpb,
+                                  GstH264Picture * to_insert,
+                                  GstH264DpbBumpMode latency_mode);
+
+GST_CODECS_API
+GstH264Picture * gst_h264_dpb_bump (GstH264Dpb * dpb,
+                                    gboolean drain);
+
+GST_CODECS_API
+void gst_h264_dpb_set_last_output (GstH264Dpb * dpb,
+                                   GstH264Picture * picture);
+
+GST_CODECS_API
+gboolean         gst_h264_dpb_perform_memory_management_control_operation (GstH264Dpb * dpb,
+                                                                           GstH264RefPicMarking *ref_pic_marking,
+                                                                           GstH264Picture * picture);
+
+/* Internal methods */
+void  gst_h264_picture_set_reference (GstH264Picture * picture,
+                                      GstH264PictureReference reference,
+                                      gboolean other_field);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(GstH264Picture, gst_h264_picture_unref)
 

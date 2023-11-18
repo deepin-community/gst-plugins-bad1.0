@@ -26,32 +26,17 @@
 #include "config.h"
 #endif
 
-#include "gstopenalsink.h"
-#include "gstopenalsrc.h"
+#include "gstopenalelements.h"
 
-#include <gst/gst-i18n-plugin.h>
+#include <glib/gi18n-lib.h>
 
-GST_DEBUG_CATEGORY (openal_debug);
 
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  if (!gst_element_register (plugin, "openalsink", GST_RANK_SECONDARY,
-          GST_TYPE_OPENAL_SINK))
-    return FALSE;
+  GST_ELEMENT_REGISTER (openalsink, plugin);
+  GST_ELEMENT_REGISTER (openalsrc, plugin);
 
-  if (!gst_element_register (plugin, "openalsrc", GST_RANK_SECONDARY,
-          GST_TYPE_OPENAL_SRC))
-    return FALSE;
-
-#ifdef ENABLE_NLS
-  GST_DEBUG ("binding text domain %s to locale dir %s", GETTEXT_PACKAGE,
-      LOCALEDIR);
-  bindtextdomain (GETTEXT_PACKAGE, LOCALEDIR);
-  bind_textdomain_codeset (GETTEXT_PACKAGE, "UTF-8");
-#endif
-
-  GST_DEBUG_CATEGORY_INIT (openal_debug, "openal", 0, "openal plugins");
   return TRUE;
 }
 

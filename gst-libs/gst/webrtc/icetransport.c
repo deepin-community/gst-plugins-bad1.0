@@ -22,8 +22,10 @@
  * @short_description: RTCIceTransport object
  * @title: GstWebRTCICETransport
  * @see_also: #GstWebRTCRTPSender, #GstWebRTCRTPReceiver, #GstWebRTCDTLSTransport
+ * @symbols:
+ * - GstWebRTCICETransport
  *
- * <https://www.w3.org/TR/webrtc/#rtcicetransport>
+ * See the [specification](https://www.w3.org/TR/webrtc/#rtcicetransport)
  */
 
 #ifdef HAVE_CONFIG_H
@@ -32,6 +34,8 @@
 
 #include "icetransport.h"
 #include "webrtc-enumtypes.h"
+
+#include "webrtc-priv.h"
 
 #define GST_CAT_DEFAULT gst_webrtc_ice_transport_debug
 GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
@@ -92,7 +96,7 @@ gst_webrtc_ice_transport_selected_pair_change (GstWebRTCICETransport * ice)
 
 void
 gst_webrtc_ice_transport_new_candidate (GstWebRTCICETransport * ice,
-    guint stream_id, GstWebRTCICEComponent component, gchar * attr)
+    guint stream_id, GstWebRTCICEComponent component, const gchar * attr)
 {
   g_signal_emit (ice, gst_webrtc_ice_transport_signals[ON_NEW_CANDIDATE_SIGNAL],
       stream_id, component, attr);

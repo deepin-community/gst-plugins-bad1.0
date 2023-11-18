@@ -33,53 +33,38 @@
 #include "vkupload.h"
 #include "vkimageidentity.h"
 #include "vkcolorconvert.h"
+#include "vkshaderspv.h"
 #include "vkdownload.h"
 #include "vkviewconvert.h"
 #include "vkdeviceprovider.h"
+#include "gstvulkanelements.h"
+#include "vkoverlaycompositor.h"
 
-#define GST_CAT_DEFAULT gst_vulkan_debug
-GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  GST_DEBUG_CATEGORY_INIT (gst_vulkan_debug, "vulkan", 0, "vulkan");
+  gboolean ret = FALSE;
 
-  if (!gst_element_register (plugin, "vulkansink",
-          GST_RANK_NONE, GST_TYPE_VULKAN_SINK)) {
-    return FALSE;
-  }
+  ret |= GST_DEVICE_PROVIDER_REGISTER (vulkandeviceprovider, plugin);
 
-  if (!gst_element_register (plugin, "vulkanupload",
-          GST_RANK_NONE, GST_TYPE_VULKAN_UPLOAD)) {
-    return FALSE;
-  }
+  ret |= GST_ELEMENT_REGISTER (vulkansink, plugin);
 
-  if (!gst_element_register (plugin, "vulkandownload",
-          GST_RANK_NONE, GST_TYPE_VULKAN_DOWNLOAD)) {
-    return FALSE;
-  }
+  ret |= GST_ELEMENT_REGISTER (vulkanupload, plugin);
 
-  if (!gst_element_register (plugin, "vulkancolorconvert",
-          GST_RANK_NONE, GST_TYPE_VULKAN_COLOR_CONVERT)) {
-    return FALSE;
-  }
+  ret |= GST_ELEMENT_REGISTER (vulkandownload, plugin);
 
-  if (!gst_element_register (plugin, "vulkanimageidentity",
-          GST_RANK_NONE, GST_TYPE_VULKAN_IMAGE_IDENTITY)) {
-    return FALSE;
-  }
+  ret |= GST_ELEMENT_REGISTER (vulkancolorconvert, plugin);
 
-  if (!gst_element_register (plugin, "vulkanviewconvert",
-          GST_RANK_NONE, GST_TYPE_VULKAN_VIEW_CONVERT)) {
-    return FALSE;
-  }
+  ret |= GST_ELEMENT_REGISTER (vulkanimageidentity, plugin);
 
-  if (!gst_device_provider_register (plugin, "vulkandeviceprovider",
-          GST_RANK_MARGINAL, GST_TYPE_VULKAN_DEVICE_PROVIDER))
-    return FALSE;
+  ret |= GST_ELEMENT_REGISTER (vulkanshaderspv, plugin);
 
-  return TRUE;
+  ret |= GST_ELEMENT_REGISTER (vulkanviewconvert, plugin);
+
+  ret |= GST_ELEMENT_REGISTER (vulkanoverlaycompositor, plugin);
+
+  return ret;
 }
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,

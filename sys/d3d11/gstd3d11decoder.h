@@ -22,161 +22,150 @@
 
 #include <gst/gst.h>
 #include <gst/video/video.h>
-#include "gstd3d11_fwd.h"
-#include "gstd3d11device.h"
-#include "gstd3d11utils.h"
+#include <gst/d3d11/gstd3d11.h>
 
 G_BEGIN_DECLS
 
-#define GST_TYPE_D3D11_DECODER \
-  (gst_d3d11_decoder_get_type())
-#define GST_D3D11_DECODER(obj) \
-  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_D3D11_DECODER,GstD3D11Decoder))
-#define GST_D3D11_DECODER_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_D3D11_DECODER,GstD3D11DecoderClass))
-#define GST_D3D11_DECODER_GET_CLASS(obj) \
-  (G_TYPE_INSTANCE_GET_CLASS((obj),GST_TYPE_D3D11_DECODER,GstD3D11DecoderClass))
-#define GST_IS_D3D11_DECODER(obj) \
-  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_D3D11_DECODER))
-#define GST_IS_D3D11_DECODER_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_D3D11_DECODER))
+#define GST_TYPE_D3D11_DECODER (gst_d3d11_decoder_get_type())
+G_DECLARE_FINAL_TYPE (GstD3D11Decoder,
+    gst_d3d11_decoder, GST, D3D11_DECODER, GstObject);
 
-typedef struct _GstD3D11DecoderOutputView GstD3D11DecoderOutputView;
-
-struct _GstD3D11DecoderOutputView
-{
-  GstD3D11Device *device;
-  ID3D11VideoDecoderOutputView *handle;
-  guint view_id;
-};
+typedef struct _GstD3D11DecoderClassData GstD3D11DecoderClassData;
 
 typedef enum
 {
-  GST_D3D11_CODEC_NONE,
-  GST_D3D11_CODEC_H264,
-  GST_D3D11_CODEC_VP9,
-  GST_D3D11_CODEC_H265,
-  GST_D3D11_CODEC_VP8,
+  GST_DXVA_CODEC_NONE,
+  GST_DXVA_CODEC_MPEG2,
+  GST_DXVA_CODEC_H264,
+  GST_DXVA_CODEC_H265,
+  GST_DXVA_CODEC_VP8,
+  GST_DXVA_CODEC_VP9,
+  GST_DXVA_CODEC_AV1,
 
   /* the last of supported codec */
-  GST_D3D11_CODEC_LAST
-} GstD3D11Codec;
+  GST_DXVA_CODEC_LAST
+} GstDXVACodec;
 
 typedef struct
 {
-  GstCaps *sink_caps;
-  GstCaps *src_caps;
-  guint adapter;
+  GstDXVACodec codec;
+  gint64 adapter_luid;
   guint device_id;
   guint vendor_id;
-  gchar *description;
-} GstD3D11DecoderClassData;
+} GstD3D11DecoderSubClassData;
 
-struct _GstD3D11Decoder
+typedef struct _GstD3D11DecodeInputStreamArgs
 {
-  GstObject parent;
+  gpointer picture_params;
+  gsize picture_params_size;
 
-  /* TRUE if decoder was successfully opened ever */
-  gboolean opened;
+  gpointer slice_control;
+  gsize slice_control_size;
 
-  /*< private >*/
-  GstD3D11DecoderPrivate *priv;
-  gpointer padding[GST_PADDING_LARGE];
-};
+  gpointer bitstream;
+  gsize bitstream_size;
 
-struct _GstD3D11DecoderClass
-{
-  GstObjectClass parent_class;
-};
+  gpointer inverse_quantization_matrix;
+  gsize inverse_quantization_matrix_size;
+} GstD3D11DecodeInputStreamArgs;
 
-GType gst_d3d11_decoder_get_type (void);
+GstD3D11Decoder * gst_d3d11_decoder_new (GstD3D11Device * device,
+                                         GstDXVACodec codec);
 
-GstD3D11Decoder * gst_d3d11_decoder_new (GstD3D11Device * device);
+gboolean          gst_d3d11_decoder_is_configured (GstD3D11Decoder * decoder);
 
-gboolean          gst_d3d11_decoder_open (GstD3D11Decoder * decoder,
-                                          GstD3D11Codec codec,
-                                          GstVideoInfo * info,
-                                          guint codec_width,
-                                          guint codec_height,
-                                          guint pool_size,
-                                          const GUID ** decoder_profiles,
-                                          guint profile_size);
+gboolean          gst_d3d11_decoder_configure     (GstD3D11Decoder * decoder,
+                                                   GstVideoCodecState * input_state,
+                                                   const GstVideoInfo * out_info,
+                                                   gint offset_x,
+                                                   gint offset_y,
+                                                   gint coded_width,
+                                                   gint coded_height,
+                                                   guint dpb_size);
 
-void              gst_d3d11_decoder_reset (GstD3D11Decoder * decoder);
+GstFlowReturn     gst_d3d11_decoder_decode_frame  (GstD3D11Decoder * decoder,
+                                                   ID3D11VideoDecoderOutputView * output_view,
+                                                   GstD3D11DecodeInputStreamArgs * input_args);
 
-gboolean          gst_d3d11_decoder_begin_frame (GstD3D11Decoder * decoder,
-                                                 GstD3D11DecoderOutputView * output_view,
-                                                 guint content_key_size,
-                                                 gconstpointer content_key);
 
-gboolean          gst_d3d11_decoder_end_frame (GstD3D11Decoder * decoder);
+GstBuffer *       gst_d3d11_decoder_get_output_view_buffer (GstD3D11Decoder * decoder,
+                                                            GstVideoDecoder * videodec);
 
-gboolean          gst_d3d11_decoder_get_decoder_buffer (GstD3D11Decoder * decoder,
-                                                        D3D11_VIDEO_DECODER_BUFFER_TYPE type,
-                                                        guint * buffer_size,
-                                                        gpointer * buffer);
-
-gboolean          gst_d3d11_decoder_release_decoder_buffer (GstD3D11Decoder * decoder,
-                                                            D3D11_VIDEO_DECODER_BUFFER_TYPE type);
-
-gboolean          gst_d3d11_decoder_submit_decoder_buffers (GstD3D11Decoder * decoder,
-                                                            guint buffer_count,
-                                                            const D3D11_VIDEO_DECODER_BUFFER_DESC * buffers);
-
-GstBuffer *       gst_d3d11_decoder_get_output_view_buffer (GstD3D11Decoder * decoder);
-
-GstD3D11DecoderOutputView * gst_d3d11_decoder_get_output_view_from_buffer (GstD3D11Decoder * decoder,
-                                                                           GstBuffer * buffer);
-
-guint             gst_d3d11_decoder_get_output_view_index (GstD3D11Decoder * decoder,
-                                                           ID3D11VideoDecoderOutputView * view_handle);
+ID3D11VideoDecoderOutputView * gst_d3d11_decoder_get_output_view_from_buffer (GstD3D11Decoder * decoder,
+                                                                              GstBuffer * buffer,
+                                                                              guint8 * view_id);
 
 gboolean          gst_d3d11_decoder_process_output      (GstD3D11Decoder * decoder,
-                                                         GstVideoInfo * info,
+                                                         GstVideoDecoder * videodec,
+                                                         GstVideoCodecState * in_state,
                                                          gint display_width,
                                                          gint display_height,
                                                          GstBuffer * decoder_buffer,
-                                                         GstBuffer * output);
+                                                         GstBuffer ** output);
 
-gboolean          gst_d3d11_decoder_negotiate           (GstVideoDecoder * decoder,
-                                                         GstVideoCodecState * input_state,
-                                                         GstVideoFormat format,
-                                                         guint width,
-                                                         guint height,
-                                                         GstVideoCodecState ** output_state,
-                                                         gboolean * downstream_supports_d3d11);
+gboolean          gst_d3d11_decoder_negotiate           (GstD3D11Decoder * decoder,
+                                                         GstVideoDecoder * videodec);
 
-gboolean          gst_d3d11_decoder_decide_allocation   (GstVideoDecoder * decoder,
-                                                         GstQuery * query,
-                                                         GstD3D11Device * device,
-                                                         GstD3D11Codec codec,
-                                                         gboolean use_d3d11_pool);
+gboolean          gst_d3d11_decoder_decide_allocation   (GstD3D11Decoder * decoder,
+                                                         GstVideoDecoder * videodec,
+                                                         GstQuery * query);
 
-gboolean          gst_d3d11_decoder_supports_direct_rendering (GstD3D11Decoder * decoder);
+gboolean          gst_d3d11_decoder_set_flushing        (GstD3D11Decoder * decoder,
+                                                         GstVideoDecoder * videodec,
+                                                         gboolean flushing);
 
 /* Utils for class registration */
+typedef struct _GstDXVAResolution
+{
+  guint width;
+  guint height;
+} GstDXVAResolution;
+
+static const GstDXVAResolution gst_dxva_resolutions[] = {
+  {1920, 1088}, {2560, 1440}, {3840, 2160}, {4096, 2160},
+  {7680, 4320}, {8192, 4320}, {15360, 8640}, {16384, 8640}
+};
+
 gboolean          gst_d3d11_decoder_util_is_legacy_device (GstD3D11Device * device);
 
-gboolean          gst_d3d11_decoder_get_supported_decoder_profile (GstD3D11Decoder * decoder,
-                                                                   const GUID ** decoder_profiles,
-                                                                   guint profile_size,
-                                                                   GUID * selected_profile);
+gboolean          gst_d3d11_decoder_get_supported_decoder_profile (GstD3D11Device * device,
+                                                                   GstDXVACodec codec,
+                                                                   GstVideoFormat format,
+                                                                   const GUID ** selected_profile);
 
-gboolean          gst_d3d11_decoder_supports_format (GstD3D11Decoder * decoder,
+gboolean          gst_d3d11_decoder_supports_format (GstD3D11Device * device,
                                                      const GUID * decoder_profile,
                                                      DXGI_FORMAT format);
 
-gboolean          gst_d3d11_decoder_supports_resolution (GstD3D11Decoder * decoder,
+gboolean          gst_d3d11_decoder_supports_resolution (GstD3D11Device * device,
                                                          const GUID * decoder_profile,
                                                          DXGI_FORMAT format,
                                                          guint width,
                                                          guint height);
 
-GstD3D11DecoderClassData * gst_d3d11_decoder_class_data_new (GstD3D11Device * device,
-                                                             GstCaps * sink_caps,
-                                                             GstCaps * src_caps);
+GstD3D11DecoderClassData *  gst_d3d11_decoder_class_data_new  (GstD3D11Device * device,
+                                                               GstDXVACodec codec,
+                                                               GstCaps * sink_caps,
+                                                               GstCaps * src_caps,
+                                                               guint max_resolution);
 
-void              gst_d3d11_decoder_class_data_free (GstD3D11DecoderClassData * data);
+void  gst_d3d11_decoder_class_data_fill_subclass_data (GstD3D11DecoderClassData * data,
+                                                       GstD3D11DecoderSubClassData * subclass_data);
+
+void  gst_d3d11_decoder_proxy_class_init              (GstElementClass * klass,
+                                                       GstD3D11DecoderClassData * data,
+                                                       const gchar * author);
+
+void  gst_d3d11_decoder_proxy_get_property            (GObject * object,
+                                                       guint prop_id,
+                                                       GValue * value,
+                                                       GParamSpec * pspec,
+                                                       GstD3D11DecoderSubClassData * subclass_data);
+
+gboolean gst_d3d11_decoder_proxy_open                 (GstVideoDecoder * videodec,
+                                                       GstD3D11DecoderSubClassData * subclass_data,
+                                                       GstD3D11Device ** device,
+                                                       GstD3D11Decoder ** decoder);
 
 G_END_DECLS
 

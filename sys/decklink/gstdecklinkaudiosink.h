@@ -58,6 +58,8 @@ struct _GstDecklinkAudioSink
   GstAudioStreamAlign *stream_align;
   GstAudioResampler *resampler;
   guint resampler_in_rate, resampler_out_rate;
+
+  gint64 persistent_id;
 };
 
 struct _GstDecklinkAudioSinkClass
@@ -66,6 +68,8 @@ struct _GstDecklinkAudioSinkClass
 };
 
 GType gst_decklink_audio_sink_get_type (void);
+
+GST_ELEMENT_REGISTER_DECLARE (decklinkaudiosink);
 
 G_END_DECLS
 

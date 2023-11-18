@@ -424,7 +424,7 @@ gst_vulkan_device_foreach_queue (GstVulkanDevice * device,
  *
  * Performs `vkGetDeviceProcAddr()` with @device and @name
  *
- * Returns: the function pointer for @name or %NULL
+ * Returns: (nullable): the function pointer for @name or %NULL
  *
  * Since: 1.18
  */
@@ -445,7 +445,7 @@ gst_vulkan_device_get_proc_address (GstVulkanDevice * device,
  * gst_vulkan_device_get_instance:
  * @device: a #GstVulkanDevice
  *
- * Returns: (transfer full): the #GstVulkanInstance used to create this @device
+ * Returns: (transfer full) (nullable): the #GstVulkanInstance used to create this @device
  *
  * Since: 1.18
  */
@@ -454,7 +454,7 @@ gst_vulkan_device_get_instance (GstVulkanDevice * device)
 {
   g_return_val_if_fail (GST_IS_VULKAN_DEVICE (device), NULL);
 
-  return device->instance ? gst_object_ref (device->instance) : NULL;
+  return gst_object_ref (device->instance);
 }
 
 /**
@@ -629,7 +629,7 @@ gst_vulkan_device_run_context_query (GstElement * element,
  * @device: a #GstVulkanDevice
  * @error: a #GError to fill on failure
  *
- * Returns: a new #GstVulkanFence or %NULL
+ * Returns: (transfer full) (nullable): a new #GstVulkanFence or %NULL
  *
  * Since: 1.18
  */

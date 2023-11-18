@@ -22,6 +22,7 @@
 #  include "config.h"
 #endif
 
+#include "gstvideoparserselements.h"
 #include "gstjpeg2000parse.h"
 #include <gst/base/base.h>
 
@@ -57,19 +58,24 @@ gst_jpeg2000_parse_is_part_2 (guint16 rsiz)
 
 
 static void
-gst_jpeg2000_parse_get_subsampling (GstJPEG2000Sampling sampling, guint8 * dx,
-    guint8 * dy)
+gst_jpeg2000_parse_get_subsampling (guint16 compno,
+    GstJPEG2000Sampling sampling, guint8 * dx, guint8 * dy)
 {
   *dx = 1;
   *dy = 1;
-  if (sampling == GST_JPEG2000_SAMPLING_YBR422) {
-    *dx = 2;
-  } else if (sampling == GST_JPEG2000_SAMPLING_YBR420) {
-    *dx = 2;
-    *dy = 2;
-  } else if (sampling == GST_JPEG2000_SAMPLING_YBR410) {
-    *dx = 4;
-    *dy = 2;
+  if (compno == 1 || compno == 2) {
+    if (sampling == GST_JPEG2000_SAMPLING_YBR422) {
+      *dx = 2;
+    } else if (sampling == GST_JPEG2000_SAMPLING_YBR420) {
+      *dx = 2;
+      *dy = 2;
+    } else if (sampling == GST_JPEG2000_SAMPLING_YBR411) {
+      *dx = 4;
+      *dy = 1;
+    } else if (sampling == GST_JPEG2000_SAMPLING_YBR410) {
+      *dx = 4;
+      *dy = 4;
+    }
   }
 }
 
@@ -103,16 +109,27 @@ static GstStaticPadTemplate srctemplate =
         " width = (int)[1, MAX], height = (int)[1, MAX],"
         GST_JPEG2000_SAMPLING_LIST ","
         GST_JPEG2000_COLORSPACE_LIST ","
-        " profile = (int)[0, 49151]," " parsed = (boolean) true")
+        " profile = (int)[0, 49151],"
+        " parsed = (boolean) true ; "
+        "image/x-jpc-striped,"
+        " width = (int)[1, MAX], height = (int)[1, MAX],"
+        GST_JPEG2000_SAMPLING_LIST ","
+        GST_JPEG2000_COLORSPACE_LIST ","
+        " profile = (int)[0, 49151],"
+        " num-stripes = [ 2, MAX ], parsed = (boolean) true;")
     );
 
 static GstStaticPadTemplate sinktemplate =
     GST_STATIC_PAD_TEMPLATE ("sink", GST_PAD_SINK,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS ("image/jp2;image/x-jpc;image/x-j2c"));
+    GST_STATIC_CAPS ("image/jp2; image/x-jpc; image/x-j2c; "
+        "image/x-jpc-striped"));
 
 #define parent_class gst_jpeg2000_parse_parent_class
 G_DEFINE_TYPE (GstJPEG2000Parse, gst_jpeg2000_parse, GST_TYPE_BASE_PARSE);
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (jpeg2000parse, "jpeg2000parse",
+    GST_RANK_PRIMARY, GST_TYPE_JPEG2000_PARSE,
+    videoparsers_element_init (plugin));
 
 static gboolean gst_jpeg2000_parse_start (GstBaseParse * parse);
 static gboolean gst_jpeg2000_parse_event (GstBaseParse * parse,
@@ -323,6 +340,8 @@ gst_jpeg2000_parse_handle_frame (GstBaseParse * parse,
   guint num_prefix_bytes = 0;   /* number of bytes to skip before actual code stream */
   GstCaps *src_caps = NULL;
   guint eoc_frame_size = 0;
+  gint num_stripes = 1;
+  gint stripe_height = 0;
 
   for (i = 0; i < GST_JPEG2000_PARSE_MAX_SUPPORTED_COMPONENTS; ++i) {
     dx[i] = 1;
@@ -532,7 +551,9 @@ gst_jpeg2000_parse_handle_frame (GstBaseParse * parse,
     if (sink_sampling_string)
       sink_sampling = gst_jpeg2000_sampling_from_string (sink_sampling_string);
 
-  } else {
+  }
+
+  if (colorspace == GST_JPEG2000_COLORSPACE_NONE) {
     /* guess color space based on number of components       */
     if (numcomps == 0 || numcomps > 4) {
       GST_ERROR_OBJECT (jpeg2000parse,
@@ -588,7 +609,8 @@ gst_jpeg2000_parse_handle_frame (GstBaseParse * parse,
     }
     if (sink_sampling != GST_JPEG2000_SAMPLING_NONE) {
       guint8 dx_caps, dy_caps;
-      gst_jpeg2000_parse_get_subsampling (sink_sampling, &dx_caps, &dy_caps);
+      gst_jpeg2000_parse_get_subsampling (compno, sink_sampling, &dx_caps,
+          &dy_caps);
       if (dx_caps != dx[compno] || dy_caps != dy[compno]) {
         GstJPEG2000Colorspace inferred_colorspace =
             GST_JPEG2000_COLORSPACE_NONE;
@@ -637,7 +659,9 @@ gst_jpeg2000_parse_handle_frame (GstBaseParse * parse,
           parsed_sampling = GST_JPEG2000_SAMPLING_YBR444;
         } else if (dx[1] == 2 && dy[1] == 2) {
           parsed_sampling = GST_JPEG2000_SAMPLING_YBR420;
-        } else if (dx[1] == 4 && dy[1] == 2) {
+        } else if (dx[1] == 4 && dy[1] == 1) {
+          parsed_sampling = GST_JPEG2000_SAMPLING_YBR411;
+        } else if (dx[1] == 4 && dy[1] == 4) {
           parsed_sampling = GST_JPEG2000_SAMPLING_YBR410;
         } else if (dx[1] == 2 && dy[1] == 1) {
           parsed_sampling = GST_JPEG2000_SAMPLING_YBR422;
@@ -665,6 +689,35 @@ gst_jpeg2000_parse_handle_frame (GstBaseParse * parse,
       colorspace = GST_JPEG2000_COLORSPACE_YUV;
     }
   }
+
+  /* use caps height if in sub-frame mode, as encoded frame height will be
+   * strictly less than full frame height */
+  if (current_caps_struct &&
+      gst_structure_has_name (current_caps_struct, "image/x-jpc-striped")) {
+    gint h;
+
+    if (!gst_structure_get_int (current_caps_struct, "num-stripes",
+            &num_stripes) || num_stripes < 2) {
+      GST_ELEMENT_ERROR (parse, STREAM, FORMAT, (NULL),
+          ("Striped JPEG 2000 is missing the stripe count"));
+      ret = GST_FLOW_ERROR;
+      goto beach;
+    }
+
+    if (!gst_structure_get_int (current_caps_struct, "stripe-height",
+            &stripe_height)) {
+      stripe_height = height;
+    } else if (stripe_height != height &&
+        !GST_BUFFER_FLAG_IS_SET (frame->buffer, GST_BUFFER_FLAG_MARKER)) {
+      GST_WARNING_OBJECT (parse,
+          "Only the last stripe is expected to be different"
+          " from the stripe height (%d != %u)", height, stripe_height);
+    }
+
+    gst_structure_get_int (current_caps_struct, "height", &h);
+    height = h;
+  }
+
   /* now we can set the source caps, if something has changed */
   source_sampling =
       sink_sampling !=
@@ -675,14 +728,18 @@ gst_jpeg2000_parse_handle_frame (GstBaseParse * parse,
     gint fr_num = 0, fr_denom = 0;
 
     src_caps =
-        gst_caps_new_simple (media_type_from_codec_format
-        (jpeg2000parse->src_codec_format),
+        gst_caps_new_simple (num_stripes > 1 ? "image/x-jpc-striped" :
+        media_type_from_codec_format (jpeg2000parse->src_codec_format),
         "width", G_TYPE_INT, width,
         "height", G_TYPE_INT, height,
         "colorspace", G_TYPE_STRING,
         gst_jpeg2000_colorspace_to_string (colorspace), "sampling",
         G_TYPE_STRING, gst_jpeg2000_sampling_to_string (source_sampling),
         "profile", G_TYPE_INT, profile, "parsed", G_TYPE_BOOLEAN, TRUE, NULL);
+
+    if (num_stripes > 1)
+      gst_caps_set_simple (src_caps, "num-stripes", G_TYPE_INT, num_stripes,
+          "stripe_height", G_TYPE_INT, stripe_height, NULL);
 
     if (gst_jpeg2000_parse_is_broadcast (capabilities)
         || gst_jpeg2000_parse_is_imf (capabilities)) {
@@ -695,7 +752,9 @@ gst_jpeg2000_parse_handle_frame (GstBaseParse * parse,
     }
 
     if (current_caps_struct) {
-      const gchar *caps_string = gst_structure_get_string
+      const gchar *caps_string;
+
+      caps_string = gst_structure_get_string
           (current_caps_struct, "colorimetry");
       if (caps_string) {
         gst_caps_set_simple (src_caps, "colorimetry", G_TYPE_STRING,

@@ -79,15 +79,22 @@ static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     );
 
 #define gst_audiolatency_parent_class parent_class
-G_DEFINE_TYPE (GstAudioLatency, gst_audiolatency, GST_TYPE_BIN);
+G_DEFINE_TYPE_WITH_CODE (GstAudioLatency, gst_audiolatency, GST_TYPE_BIN,
+    GST_DEBUG_CATEGORY_INIT (gst_audiolatency_debug, "audiolatency", 0,
+        "audiolatency"););
+GST_ELEMENT_REGISTER_DEFINE (audiolatency, "audiolatency", GST_RANK_PRIMARY,
+    GST_TYPE_AUDIOLATENCY);
 
 #define DEFAULT_PRINT_LATENCY   FALSE
+#define DEFAULT_SAMPLES_PER_BUFFER 240
+
 enum
 {
   PROP_0,
   PROP_PRINT_LATENCY,
   PROP_LAST_LATENCY,
-  PROP_AVERAGE_LATENCY
+  PROP_AVERAGE_LATENCY,
+  PROP_SAMPLES_PER_BUFFER,
 };
 
 static gint64 gst_audiolatency_get_latency (GstAudioLatency * self);
@@ -115,6 +122,9 @@ gst_audiolatency_get_property (GObject * object,
     case PROP_AVERAGE_LATENCY:
       g_value_set_int64 (value, gst_audiolatency_get_average_latency (self));
       break;
+    case PROP_SAMPLES_PER_BUFFER:
+      g_value_set_int (value, self->samples_per_buffer);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -130,6 +140,11 @@ gst_audiolatency_set_property (GObject * object,
   switch (prop_id) {
     case PROP_PRINT_LATENCY:
       self->print_latency = g_value_get_boolean (value);
+      break;
+    case PROP_SAMPLES_PER_BUFFER:
+      self->samples_per_buffer = g_value_get_int (value);
+      g_object_set (self->audiosrc,
+          "samplesperbuffer", self->samples_per_buffer, NULL);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -161,6 +176,20 @@ gst_audiolatency_class_init (GstAudioLatencyClass * klass)
           "The running average latency, in microseconds", 0,
           G_USEC_PER_SEC, 0, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * GstAudioLatency:samplesperbuffer:
+   *
+   * The number of audio samples in each outgoing buffer.
+   * See also #GstAudioTestSrc:samplesperbuffer
+   *
+   * Since: 1.20
+   */
+  g_object_class_install_property (gobject_class, PROP_SAMPLES_PER_BUFFER,
+      g_param_spec_int ("samplesperbuffer", "Samples per buffer",
+          "Number of samples in each outgoing buffer",
+          1, G_MAXINT, DEFAULT_SAMPLES_PER_BUFFER,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   gst_element_class_add_static_pad_template (gstelement_class, &src_template);
   gst_element_class_add_static_pad_template (gstelement_class, &sink_template);
 
@@ -179,6 +208,7 @@ gst_audiolatency_init (GstAudioLatency * self)
   self->send_pts = 0;
   self->recv_pts = 0;
   self->print_latency = DEFAULT_PRINT_LATENCY;
+  self->samples_per_buffer = DEFAULT_SAMPLES_PER_BUFFER;
 
   /* Setup sinkpad */
   self->sinkpad = gst_pad_new_from_static_template (&sink_template, "sink");
@@ -191,8 +221,8 @@ gst_audiolatency_init (GstAudioLatency * self)
 
   /* Setup srcpad */
   self->audiosrc = gst_element_factory_make ("audiotestsrc", NULL);
-  g_object_set (self->audiosrc, "wave", 8, "samplesperbuffer", 240,
-      "is-live", TRUE, NULL);
+  g_object_set (self->audiosrc, "wave", 8, "samplesperbuffer",
+      DEFAULT_SAMPLES_PER_BUFFER, "is-live", TRUE, NULL);
   gst_bin_add (GST_BIN (self), self->audiosrc);
 
   templ = gst_static_pad_template_get (&src_template);
@@ -454,11 +484,7 @@ gst_audiolatency_sink_event (GstPad * pad, GstObject * parent, GstEvent * event)
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  GST_DEBUG_CATEGORY_INIT (gst_audiolatency_debug, "audiolatency", 0,
-      "audiolatency");
-
-  return gst_element_register (plugin, "audiolatency", GST_RANK_PRIMARY,
-      GST_TYPE_AUDIOLATENCY);
+  return GST_ELEMENT_REGISTER (audiolatency, plugin);
 }
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,

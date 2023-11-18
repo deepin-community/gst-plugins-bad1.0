@@ -92,7 +92,15 @@ struct _GstPsStream
   gint id;
   gint type;
 
-  GstClockTime segment_thresh;
+  /* Threshold for sending a GAP event on this stream */
+  GstClockTime gap_threshold;
+  /* Reference PTS used to detect gaps */
+  GstClockTime gap_ref_pts;
+  /* Number of outputted buffers */
+  guint32 nb_out_buffers;
+  /* Reference number of buffers for gaps */
+  guint32 gap_ref_buffers;
+
   GstClockTime last_ts;
 
   gboolean discont;
@@ -141,7 +149,7 @@ struct _GstPsDemux
 
   GstSegment sink_segment;
   GstSegment src_segment;
-  gboolean adjust_segment;
+  guint32 segment_seqnum;
 
   /* stream output */
   GstPsStream *current_stream;
@@ -173,6 +181,7 @@ struct _GstPsDemuxClass
 };
 
 GType gst_ps_demux_get_type (void);
+GST_ELEMENT_REGISTER_DECLARE (mpegpsdemux);
 
 G_END_DECLS
 #endif /* __GST_PS_DEMUX_H__ */

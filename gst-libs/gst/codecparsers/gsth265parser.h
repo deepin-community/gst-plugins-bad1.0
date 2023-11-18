@@ -788,6 +788,7 @@ struct _GstH265ShortTermRefPicSet
 
 /**
  * GstH265VUIParams:
+ * @parsed: %TRUE indicate that VUI parameters have been parsed (Since: 1.22)
  * @aspect_ratio_info_present_flag: %TRUE specifies that aspect_ratio_idc is present.
  *  %FALSE specifies that aspect_ratio_idc is not present
  * @aspect_ratio_idc specifies the value of the sample aspect ratio of the luma samples
@@ -856,6 +857,14 @@ struct _GstH265ShortTermRefPicSet
  */
 struct _GstH265VUIParams
 {
+  /**
+   * _GstH265VUIParams.parsed:
+   *
+   * %TRUE indicate that VUI parameters have been parsed.
+   *
+   * Since: 1.22
+   */
+  gboolean parsed;
   guint8 aspect_ratio_info_present_flag;
   guint8 aspect_ratio_idc;
   /* if aspect_ratio_idc == 255 */
@@ -1102,6 +1111,14 @@ struct _GstH265SPS
 {
   guint8 id;
 
+  /**
+   * _GstH265SPS.vps_id:
+   *
+   * The ID of the VPS. This is used to store the ID until the VPS is
+   * parsed in case its placed after the SPS.
+   * Since: 1.22
+   */
+  guint8 vps_id;
   GstH265VPS *vps;
 
   guint8 max_sub_layers_minus1;
@@ -1166,7 +1183,7 @@ struct _GstH265SPS
   guint8 strong_intra_smoothing_enabled_flag;
   guint8 vui_parameters_present_flag;
 
-  /* if vui_parameters_present_flat */
+  /* if vui_parameters_present_flag */
   GstH265VUIParams vui_params;
 
   guint8 sps_extension_flag;
@@ -1179,7 +1196,12 @@ struct _GstH265SPS
   guint8 sps_extension_4bits;
 
   /* if sps_range_extension_flag */
-  GstH265SPSExtensionParams sps_extnsion_params;
+  /**
+   * _GstH265SPS.sps_extension_params:
+   *
+   * Since: 1.22
+   */
+  GstH265SPSExtensionParams sps_extension_params;
   /* if sps_scc_extension_flag */
   GstH265SPSSccExtensionParams sps_scc_extension_params;
 
@@ -1201,6 +1223,15 @@ struct _GstH265PPS
 {
   guint id;
 
+  /**
+   * _GstH265PPS.sps_id:
+   *
+   * The ID of the SPS. This is used to store the ID until the SPS is
+   * parsed in case its placed after the PPS.
+   *
+   * Since: 1.22
+   */
+  guint sps_id;
   GstH265SPS *sps;
 
   guint8 dependent_slice_segments_enabled_flag;
@@ -1384,6 +1415,9 @@ struct _GstH265PredWeightTable
  *   in this slice_header\()
  * @short_term_ref_pic_set_size: the calculated size of short_term_ref_pic_set\()
  *   in bits. (Since: 1.18)
+ * @long_term_ref_pic_set_size: the calculated size of the branch
+ *   `if( long_term_ref_pics_present_flag )` `inside slice_segment_header()` syntax
+ *   in bits. (Since: 1.22)
  */
 struct _GstH265SliceHdr
 {
@@ -1460,8 +1494,19 @@ struct _GstH265SliceHdr
   /* Number of emulation prevention bytes (EPB) in this slice_header() */
   guint n_emulation_prevention_bytes;
 
-  /* Size of short_term_ref_pic_set() in bits */
+  /* Size of short_term_ref_pic_set() after emulation preventation bytes are
+   * removed, in bits */
   guint short_term_ref_pic_set_size;
+
+  /**
+   * _GstH265SliceHdr.long_term_ref_pic_set_size:
+   *
+   * The calculated size of the branch `if( long_term_ref_pics_present_flag )`
+   * inside `slice_segment_header()` syntax in bits.
+   *
+   * Since: 1.22
+   */
+  guint long_term_ref_pic_set_size;
 };
 
 struct _GstH265PicTiming
@@ -1653,6 +1698,15 @@ GstH265ParserResult gst_h265_parser_identify_nalu_hevc (GstH265Parser  * parser,
                                                         GstH265NalUnit * nalu);
 
 GST_CODEC_PARSERS_API
+GstH265ParserResult gst_h265_parser_identify_and_split_nalu_hevc (GstH265Parser * parser,
+                                                                  const guint8 * data,
+                                                                  guint offset,
+                                                                  gsize size,
+                                                                  guint8 nal_length_size,
+                                                                  GArray * nalus,
+                                                                  gsize * consumed);
+
+GST_CODEC_PARSERS_API
 GstH265ParserResult gst_h265_parser_parse_nal       (GstH265Parser   * parser,
                                                      GstH265NalUnit  * nalu);
 
@@ -1777,7 +1831,7 @@ void    gst_h265_quant_matrix_8x8_get_raster_from_uprightdiagonal (guint8 out_qu
         gst_h265_quant_matrix_8x8_get_raster_from_uprightdiagonal
 
 GST_CODEC_PARSERS_API
-GstH265Profile gst_h265_profile_tier_level_get_profile (GstH265ProfileTierLevel * ptl);
+GstH265Profile gst_h265_profile_tier_level_get_profile (const GstH265ProfileTierLevel * ptl);
 
 GST_CODEC_PARSERS_API
 const gchar * gst_h265_profile_to_string (GstH265Profile profile);
@@ -1807,6 +1861,9 @@ GstBuffer * gst_h265_parser_insert_sei_hevc (GstH265Parser * parser,
                                              guint8 nal_length_size,
                                              GstBuffer * au,
                                              GstMemory * sei);
+
+GST_CODEC_PARSERS_API
+GstH265Profile gst_h265_get_profile_from_sps (GstH265SPS * sps);
 
 G_END_DECLS
 #endif

@@ -6,13 +6,10 @@ openjpeg_sources = [
 
 openjpeg_cargs = []
 
-if get_option('openjpeg').disabled()
-  subdir_done()
-endif
-
 openjpeg_dep = dependency('libopenjp2', version : '>=2.2',
                           fallback : ['libopenjp2', 'libopenjp2_dep'],
-                          required : get_option('openjpeg'))
+                          required : get_option('openjpeg'),
+                          default_options: ['build_codec=false'])
 
 if openjpeg_dep.found()
   gstopenjpeg = library('gstopenjpeg',
@@ -21,10 +18,9 @@ if openjpeg_dep.found()
     link_args : noseh_link_args,
     include_directories : [configinc],
     dependencies : [gst_dep, gstvideo_dep, openjpeg_dep,
-		    gstcodecparsers_dep],
+		    gstcodecparsers_dep, libm],
     install : true,
     install_dir : plugins_install_dir,
   )
-  pkgconfig.generate(gstopenjpeg, install_dir : plugins_pkgconfig_install_dir)
   plugins += [gstopenjpeg]
 endif

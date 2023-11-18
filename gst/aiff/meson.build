@@ -1,5 +1,5 @@
 aiff_sources = [
-  'aiff.c', 'aiffmux.c', 'aiffparse.c',
+  'aiff.c', 'aiffmux.c', 'aiffparse.c', 'gstaiffelement.c'
 ]
 
 gstaiff = library('gstaiff',
@@ -10,5 +10,4 @@ gstaiff = library('gstaiff',
   install : true,
   install_dir : plugins_install_dir,
 )
-pkgconfig.generate(gstaiff, install_dir : plugins_pkgconfig_install_dir)
 plugins += [gstaiff]

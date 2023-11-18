@@ -34,8 +34,12 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
+#include <xf86drm.h>
 #include <va/va_drm.h>
 #include <gudev/gudev.h>
+#include <gst/va/gstvadisplay_drm.h>
+#else
+#include <gst/d3d11/gstd3d11.h>
 #endif
 
 GST_DEBUG_CATEGORY_STATIC (gst_debug_msdkcontext);
@@ -43,18 +47,19 @@ GST_DEBUG_CATEGORY_STATIC (gst_debug_msdkcontext);
 
 struct _GstMsdkContextPrivate
 {
-  mfxSession session;
+  MsdkSession session;
   GList *cached_alloc_responses;
   gboolean hardware;
-  gboolean is_joined;
   gboolean has_frame_allocator;
   GstMsdkContextJobType job_type;
   gint shared_async_depth;
   GMutex mutex;
   GList *child_session_list;
+  GstMsdkContext *parent_context;
 #ifndef _WIN32
-  gint fd;
-  VADisplay dpy;
+  GstVaDisplay *display;
+#else
+  GstD3D11Device *device;
 #endif
 };
 
@@ -66,8 +71,8 @@ G_DEFINE_TYPE_WITH_CODE (GstMsdkContext, gst_msdk_context, GST_TYPE_OBJECT,
 
 #ifndef _WIN32
 
-static gint
-get_device_id (void)
+static char *
+get_device_path (void)
 {
   GUdevClient *client = NULL;
   GUdevEnumerator *e = NULL;
@@ -76,6 +81,36 @@ get_device_id (void)
   const gchar *devnode_path;
   const gchar *devnode_files[2] = { "renderD[0-9]*", "card[0-9]*" };
   int fd = -1, i;
+  const gchar *user_choice = g_getenv ("GST_MSDK_DRM_DEVICE");
+  gchar *ret_path = NULL;
+
+  if (user_choice) {
+    if (g_str_has_prefix (user_choice, "/dev/dri/"))
+      fd = open (user_choice, O_RDWR | O_CLOEXEC);
+
+    if (fd >= 0) {
+      drmVersionPtr drm_version = drmGetVersion (fd);
+
+      if (!drm_version || strncmp (drm_version->name, "i915", 4)) {
+        GST_ERROR ("The specified device isn't an Intel device");
+        drmFreeVersion (drm_version);
+        close (fd);
+        fd = -1;
+      } else {
+        GST_DEBUG ("Opened the specified drm device %s", user_choice);
+        drmFreeVersion (drm_version);
+      }
+    } else {
+      GST_ERROR ("The specified device isn't a valid drm device");
+    }
+
+    if (fd >= 0) {
+      ret_path = g_strdup (user_choice);
+      close (fd);
+    }
+
+    return ret_path;
+  }
 
   client = g_udev_client_new (NULL);
   if (!client)
@@ -106,6 +141,7 @@ get_device_id (void)
       if (fd < 0)
         continue;
       GST_DEBUG ("Opened the drm device node %s", devnode_path);
+      ret_path = g_strdup (devnode_path);
       break;
     }
 
@@ -116,44 +152,42 @@ get_device_id (void)
   }
 
 done:
+  if (fd >= 0)
+    close (fd);
+
   if (e)
     g_object_unref (e);
   if (client)
     g_object_unref (client);
 
-  return fd;
+  return ret_path;
 }
-
 
 static gboolean
 gst_msdk_context_use_vaapi (GstMsdkContext * context)
 {
-  gint fd;
-  gint maj_ver, min_ver;
+  char *path;
   VADisplay va_dpy = NULL;
-  VAStatus va_status;
+  GstVaDisplay *display_drm = NULL;
   mfxStatus status;
   GstMsdkContextPrivate *priv = context->priv;
 
-  fd = get_device_id ();
-  if (fd < 0) {
-    GST_ERROR ("Couldn't find a drm device node to open");
+  path = get_device_path ();
+  if (path == NULL) {
+    GST_WARNING ("Couldn't find a drm device node to open");
     return FALSE;
   }
 
-  va_dpy = vaGetDisplayDRM (fd);
-  if (!va_dpy) {
-    GST_ERROR ("Couldn't get a VA DRM display");
+  display_drm = gst_va_display_drm_new_from_path (path);
+  if (!display_drm) {
+    GST_ERROR ("Couldn't create a VA DRM display");
     goto failed;
   }
+  g_free (path);
 
-  va_status = vaInitialize (va_dpy, &maj_ver, &min_ver);
-  if (va_status != VA_STATUS_SUCCESS) {
-    GST_ERROR ("Couldn't initialize VA DRM display");
-    goto failed;
-  }
+  va_dpy = gst_va_display_get_va_dpy (display_drm);
 
-  status = MFXVideoCORE_SetHandle (priv->session, MFX_HANDLE_VA_DISPLAY,
+  status = MFXVideoCORE_SetHandle (priv->session.session, MFX_HANDLE_VA_DISPLAY,
       (mfxHDL) va_dpy);
   if (status != MFX_ERR_NONE) {
     GST_ERROR ("Setting VAAPI handle failed (%s)",
@@ -161,16 +195,110 @@ gst_msdk_context_use_vaapi (GstMsdkContext * context)
     goto failed;
   }
 
-  priv->fd = fd;
-  priv->dpy = va_dpy;
+  priv->display = display_drm;
 
   return TRUE;
 
 failed:
-  if (va_dpy)
-    vaTerminate (va_dpy);
-  close (fd);
+  if (display_drm)
+    gst_object_unref (display_drm);
+
   return FALSE;
+}
+#else
+static GstD3D11Device *
+get_device_by_index (IDXGIFactory1 * factory, guint idx)
+{
+  HRESULT hr;
+  IDXGIAdapter1 *adapter;
+  ID3D11Device *device_handle;
+  ID3D10Multithread *multi_thread;
+  DXGI_ADAPTER_DESC desc;
+  GstD3D11Device *device = NULL;
+  gint64 luid;
+
+  hr = IDXGIFactory1_EnumAdapters1 (factory, idx, &adapter);
+  if (FAILED (hr)) {
+    return NULL;
+  }
+
+  hr = IDXGIAdapter1_GetDesc (adapter, &desc);
+  if (FAILED (hr)) {
+    IDXGIAdapter1_Release (adapter);
+    return NULL;
+  }
+
+  if (desc.VendorId != 0x8086) {
+    IDXGIAdapter1_Release (adapter);
+    return NULL;
+  }
+
+  luid = gst_d3d11_luid_to_int64 (&desc.AdapterLuid);
+  device = gst_d3d11_device_new_for_adapter_luid (luid,
+      D3D11_CREATE_DEVICE_BGRA_SUPPORT);
+  IDXGIAdapter1_Release (adapter);
+
+  device_handle = gst_d3d11_device_get_device_handle (device);
+  hr = ID3D11Device_QueryInterface (device_handle,
+      &IID_ID3D10Multithread, (void **) &multi_thread);
+  if (FAILED (hr)) {
+    gst_object_unref (device);
+    return NULL;
+  }
+
+  hr = ID3D10Multithread_SetMultithreadProtected (multi_thread, TRUE);
+  ID3D10Multithread_Release (multi_thread);
+
+  return device;
+}
+
+static gboolean
+gst_msdk_context_use_d3d11 (GstMsdkContext * context)
+{
+  HRESULT hr;
+  IDXGIFactory1 *factory = NULL;
+  GstD3D11Device *device = NULL;
+  ID3D11Device *device_handle;
+  GstMsdkContextPrivate *priv = context->priv;
+  mfxStatus status;
+  guint idx = 0;
+  gint user_idx = -1;
+  const gchar *user_choice = g_getenv ("GST_MSDK_DEVICE");
+
+  hr = CreateDXGIFactory1 (&IID_IDXGIFactory1, (void **) &factory);
+  if (FAILED (hr)) {
+    GST_ERROR ("Couldn't create DXGI factory");
+    return FALSE;
+  }
+
+  if (user_choice) {
+    user_idx = atoi (user_choice);
+    if (!(device = get_device_by_index (factory, user_idx)))
+      GST_WARNING
+          ("Failed to get device by user index, try to pick the first available device");
+  }
+
+  /* Pick the first available device */
+  while (!device) {
+    device = get_device_by_index (factory, idx++);
+  }
+
+  IDXGIFactory1_Release (factory);
+  device_handle = gst_d3d11_device_get_device_handle (device);
+
+  status =
+      MFXVideoCORE_SetHandle (priv->session.session, MFX_HANDLE_D3D11_DEVICE,
+      gst_d3d11_device_get_device_handle (device));
+  if (status != MFX_ERR_NONE) {
+    GST_ERROR ("Setting D3D11VA handle failed (%s)",
+        msdk_status_to_string (status));
+    gst_object_unref (device);
+    return FALSE;
+  }
+
+  priv->device = device;
+
+  return TRUE;
 }
 #endif
 
@@ -180,24 +308,36 @@ gst_msdk_context_open (GstMsdkContext * context, gboolean hardware,
 {
   mfxU16 codename;
   GstMsdkContextPrivate *priv = context->priv;
+  MsdkSession msdk_session;
+  mfxIMPL impl;
 
   priv->job_type = job_type;
   priv->hardware = hardware;
-  priv->session =
-      msdk_open_session (hardware ? MFX_IMPL_HARDWARE_ANY : MFX_IMPL_SOFTWARE);
-  if (!priv->session)
+
+  impl = hardware ? MFX_IMPL_HARDWARE_ANY : MFX_IMPL_SOFTWARE;
+
+#ifdef _WIN32
+  impl |= MFX_IMPL_VIA_D3D11;
+#endif
+
+  msdk_session = msdk_open_session (impl);
+  priv->session = msdk_session;
+  if (!priv->session.session)
     goto failed;
 
 #ifndef _WIN32
-  priv->fd = -1;
-
   if (hardware) {
     if (!gst_msdk_context_use_vaapi (context))
       goto failed;
   }
+#else
+  if (hardware) {
+    if (!gst_msdk_context_use_d3d11 (context))
+      goto failed;
+  }
 #endif
 
-  codename = msdk_get_platform_codename (priv->session);
+  codename = msdk_get_platform_codename (priv->session.session);
 
   if (codename != MFX_PLATFORM_UNKNOWN)
     GST_INFO ("Detected MFX platform with device code %d", codename);
@@ -229,7 +369,7 @@ release_child_session (gpointer session)
   status = MFXDisjoinSession (_session);
   if (status != MFX_ERR_NONE)
     GST_WARNING ("failed to disjoin (%s)", msdk_status_to_string (status));
-  msdk_close_session (_session);
+  msdk_close_mfx_session (_session);
 }
 
 static void
@@ -239,19 +379,21 @@ gst_msdk_context_finalize (GObject * obj)
   GstMsdkContextPrivate *priv = context->priv;
 
   /* child sessions will be closed when the parent session is closed */
-  if (priv->is_joined)
+  if (priv->parent_context) {
+    gst_object_unref (priv->parent_context);
     goto done;
-  else
+  } else
     g_list_free_full (priv->child_session_list, release_child_session);
 
-  msdk_close_session (priv->session);
+  msdk_close_session (&priv->session);
   g_mutex_clear (&priv->mutex);
 
 #ifndef _WIN32
-  if (priv->dpy)
-    vaTerminate (priv->dpy);
-  if (priv->fd >= 0)
-    close (priv->fd);
+  if (priv->display)
+    gst_object_unref (priv->display);
+#else
+  if (priv->device)
+    gst_object_unref (priv->device);
 #endif
 
 done:
@@ -287,65 +429,244 @@ gst_msdk_context_new_with_parent (GstMsdkContext * parent)
   GstMsdkContext *obj = g_object_new (GST_TYPE_MSDK_CONTEXT, NULL);
   GstMsdkContextPrivate *priv = obj->priv;
   GstMsdkContextPrivate *parent_priv = parent->priv;
+  mfxVersion version;
+  mfxIMPL impl;
+  MsdkSession child_msdk_session;
+  mfxHandleType handle_type = 0;
+  mfxHDL handle = NULL;
 
-  status = MFXCloneSession (parent_priv->session, &priv->session);
+  status = MFXQueryIMPL (parent_priv->session.session, &impl);
+
+  if (status == MFX_ERR_NONE)
+    status = MFXQueryVersion (parent_priv->session.session, &version);
+
   if (status != MFX_ERR_NONE) {
-    GST_ERROR ("Failed to clone mfx session");
-    g_object_unref (obj);
+    GST_ERROR ("Failed to query the session attributes (%s)",
+        msdk_status_to_string (status));
+    gst_object_unref (obj);
     return NULL;
   }
 
-  priv->is_joined = TRUE;
+  if (MFX_IMPL_VIA_VAAPI == (0x0f00 & (impl)))
+    handle_type = MFX_HANDLE_VA_DISPLAY;
+  else if (MFX_IMPL_VIA_D3D11 == (0x0f00 & (impl)))
+    handle_type = MFX_HANDLE_D3D11_DEVICE;
+
+  if (handle_type) {
+    status =
+        MFXVideoCORE_GetHandle (parent_priv->session.session, handle_type,
+        &handle);
+
+    if (status != MFX_ERR_NONE || !handle) {
+      GST_ERROR ("Failed to get session handle (%s)",
+          msdk_status_to_string (status));
+      gst_object_unref (obj);
+      return NULL;
+    }
+  }
+
+  child_msdk_session.loader = parent_priv->session.loader;
+  child_msdk_session.session = NULL;
+  status = msdk_init_msdk_session (impl, &version, &child_msdk_session);
+
+  if (status != MFX_ERR_NONE) {
+    GST_ERROR ("Failed to create a child mfx session (%s)",
+        msdk_status_to_string (status));
+    gst_object_unref (obj);
+    return NULL;
+  }
+
+  if (handle) {
+    status =
+        MFXVideoCORE_SetHandle (child_msdk_session.session, handle_type,
+        handle);
+
+    if (status != MFX_ERR_NONE) {
+      GST_ERROR ("Failed to set a HW handle (%s)",
+          msdk_status_to_string (status));
+      MFXClose (child_msdk_session.session);
+      gst_object_unref (obj);
+      return NULL;
+    }
+  }
+#if (MFX_VERSION >= 1025)
+  status =
+      MFXJoinSession (parent_priv->session.session, child_msdk_session.session);
+
+  if (status != MFX_ERR_NONE) {
+    GST_ERROR ("Failed to join two sessions (%s)",
+        msdk_status_to_string (status));
+    MFXClose (child_msdk_session.session);
+    gst_object_unref (obj);
+    return NULL;
+  }
+#endif
+
+  /* Set loader to NULL for child session */
+  priv->session.loader = NULL;
+  priv->session.session = child_msdk_session.session;
   priv->hardware = parent_priv->hardware;
   priv->job_type = parent_priv->job_type;
   parent_priv->child_session_list =
-      g_list_prepend (parent_priv->child_session_list, priv->session);
+      g_list_prepend (parent_priv->child_session_list, priv->session.session);
 #ifndef _WIN32
-  priv->dpy = parent_priv->dpy;
-  priv->fd = parent_priv->fd;
-
-  if (priv->hardware) {
-    status = MFXVideoCORE_SetHandle (priv->session, MFX_HANDLE_VA_DISPLAY,
-        (mfxHDL) parent_priv->dpy);
-
-    if (status != MFX_ERR_NONE) {
-      GST_ERROR ("Setting VA handle failed (%s)",
-          msdk_status_to_string (status));
-      g_object_unref (obj);
-      return NULL;
-    }
-
-  }
+  priv->display = parent_priv->display;
+#else
+  priv->device = parent_priv->device;
 #endif
+  priv->parent_context = gst_object_ref (parent);
 
   return obj;
 }
 
+#ifndef _WIN32
+GstMsdkContext *
+gst_msdk_context_new_with_va_display (GstObject * display_obj,
+    gboolean hardware, GstMsdkContextJobType job_type)
+{
+  GstMsdkContext *obj = NULL;
+
+  GstMsdkContextPrivate *priv;
+  mfxU16 codename;
+  mfxStatus status;
+  GstVaDisplay *va_display;
+
+  va_display = GST_VA_DISPLAY (display_obj);
+  if (!va_display)
+    return NULL;
+
+  obj = g_object_new (GST_TYPE_MSDK_CONTEXT, NULL);
+
+  priv = obj->priv;
+  priv->display = gst_object_ref (va_display);
+
+  priv->job_type = job_type;
+  priv->hardware = hardware;
+  priv->session =
+      msdk_open_session (hardware ? MFX_IMPL_HARDWARE_ANY : MFX_IMPL_SOFTWARE);
+  if (!priv->session.session) {
+    gst_object_unref (obj);
+    return NULL;
+  }
+
+  if (hardware) {
+    status =
+        MFXVideoCORE_SetHandle (priv->session.session, MFX_HANDLE_VA_DISPLAY,
+        (mfxHDL) gst_va_display_get_va_dpy (priv->display));
+    if (status != MFX_ERR_NONE) {
+      GST_ERROR ("Setting VAAPI handle failed (%s)",
+          msdk_status_to_string (status));
+      gst_object_unref (obj);
+      return NULL;
+    }
+  }
+
+  codename = msdk_get_platform_codename (priv->session.session);
+
+  if (codename != MFX_PLATFORM_UNKNOWN)
+    GST_INFO ("Detected MFX platform with device code %d", codename);
+  else
+    GST_WARNING ("Unknown MFX platform");
+
+  return obj;
+}
+#else
+GstMsdkContext *
+gst_msdk_context_new_with_d3d11_device (GstD3D11Device * device,
+    gboolean hardware, GstMsdkContextJobType job_type)
+{
+  GstMsdkContext *obj = NULL;
+  GstMsdkContextPrivate *priv;
+  mfxU16 codename;
+  mfxStatus status;
+  ID3D10Multithread *multi_thread;
+  ID3D11Device *device_handle;
+  HRESULT hr;
+
+  obj = g_object_new (GST_TYPE_MSDK_CONTEXT, NULL);
+
+  priv = obj->priv;
+  priv->device = gst_object_ref (device);
+
+  priv->job_type = job_type;
+  priv->hardware = hardware;
+  priv->session =
+      msdk_open_session (hardware ? MFX_IMPL_HARDWARE_ANY : MFX_IMPL_SOFTWARE);
+  if (!priv->session.session) {
+    goto failed;
+  }
+
+  device_handle = gst_d3d11_device_get_device_handle (device);
+  hr = ID3D11Device_QueryInterface (device_handle,
+      &IID_ID3D10Multithread, (void **) &multi_thread);
+  if (FAILED (hr)) {
+    GST_ERROR ("ID3D10Multithread interface is unavailable");
+    goto failed;
+  }
+
+  hr = ID3D10Multithread_SetMultithreadProtected (multi_thread, TRUE);
+  ID3D10Multithread_Release (multi_thread);
+
+  if (hardware) {
+    status =
+        MFXVideoCORE_SetHandle (priv->session.session, MFX_HANDLE_D3D11_DEVICE,
+        device_handle);
+    if (status != MFX_ERR_NONE) {
+      GST_ERROR ("Setting D3D11VA handle failed (%s)",
+          msdk_status_to_string (status));
+      goto failed;
+    }
+  }
+
+  codename = msdk_get_platform_codename (priv->session.session);
+
+  if (codename != MFX_PLATFORM_UNKNOWN)
+    GST_INFO ("Detected MFX platform with device code %d", codename);
+  else
+    GST_WARNING ("Unknown MFX platform");
+
+  return obj;
+
+failed:
+  gst_object_unref (obj);
+  gst_object_unref (device);
+  return NULL;
+}
+#endif
+
 mfxSession
 gst_msdk_context_get_session (GstMsdkContext * context)
 {
-  return context->priv->session;
+  return context->priv->session.session;
 }
 
 gpointer
 gst_msdk_context_get_handle (GstMsdkContext * context)
 {
 #ifndef _WIN32
-  return context->priv->dpy;
+  return gst_va_display_get_va_dpy (context->priv->display);
 #else
   return NULL;
 #endif
 }
 
-gint
-gst_msdk_context_get_fd (GstMsdkContext * context)
-{
 #ifndef _WIN32
-  return context->priv->fd;
-#else
-  return -1;
-#endif
+GstObject *
+gst_msdk_context_get_va_display (GstMsdkContext * context)
+{
+  if (context->priv->display)
+    return gst_object_ref (GST_OBJECT_CAST (context->priv->display));
+  return NULL;
 }
+#else
+GstD3D11Device *
+gst_msdk_context_get_d3d11_device (GstMsdkContext * context)
+{
+  if (context->priv->device)
+    return gst_object_ref (context->priv->device);
+  return NULL;
+}
+#endif
 
 static gint
 _find_response (gconstpointer resp, gconstpointer comp_resp)
@@ -633,7 +954,7 @@ gst_msdk_context_set_frame_allocator (GstMsdkContext * context,
   if (!priv->has_frame_allocator) {
     mfxStatus status;
 
-    status = MFXVideoCORE_SetFrameAllocator (priv->session, allocator);
+    status = MFXVideoCORE_SetFrameAllocator (priv->session.session, allocator);
 
     if (status != MFX_ERR_NONE)
       GST_ERROR ("Failed to set frame allocator");

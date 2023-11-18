@@ -35,19 +35,28 @@
  * @short_description: Sections for the various SCTE specifications
  * @include: gst/mpegts/mpegts.h
  *
+ * This contains the %GstMpegtsSection relevent to SCTE specifications.
  */
+
+/* TODO: port to gst_bit_reader / gst_bit_writer */
 
 /* Splice Information Table (SIT) */
 
 static GstMpegtsSCTESpliceEvent *
 _gst_mpegts_scte_splice_event_copy (GstMpegtsSCTESpliceEvent * event)
 {
-  return g_slice_dup (GstMpegtsSCTESpliceEvent, event);
+  GstMpegtsSCTESpliceEvent *copy =
+      g_slice_dup (GstMpegtsSCTESpliceEvent, event);
+
+  copy->components = g_ptr_array_ref (event->components);
+
+  return copy;
 }
 
 static void
 _gst_mpegts_scte_splice_event_free (GstMpegtsSCTESpliceEvent * event)
 {
+  g_ptr_array_unref (event->components);
   g_slice_free (GstMpegtsSCTESpliceEvent, event);
 }
 
@@ -55,8 +64,73 @@ G_DEFINE_BOXED_TYPE (GstMpegtsSCTESpliceEvent, gst_mpegts_scte_splice_event,
     (GBoxedCopyFunc) _gst_mpegts_scte_splice_event_copy,
     (GFreeFunc) _gst_mpegts_scte_splice_event_free);
 
+static GstMpegtsSCTESpliceComponent *
+_gst_mpegts_scte_splice_component_copy (GstMpegtsSCTESpliceComponent *
+    component)
+{
+  return g_slice_dup (GstMpegtsSCTESpliceComponent, component);
+}
+
+static void
+_gst_mpegts_scte_splice_component_free (GstMpegtsSCTESpliceComponent *
+    component)
+{
+  g_slice_free (GstMpegtsSCTESpliceComponent, component);
+}
+
+G_DEFINE_BOXED_TYPE (GstMpegtsSCTESpliceComponent,
+    gst_mpegts_scte_splice_component,
+    (GBoxedCopyFunc) _gst_mpegts_scte_splice_component_copy,
+    (GFreeFunc) _gst_mpegts_scte_splice_component_free);
+
+static GstMpegtsSCTESpliceComponent *
+_parse_splice_component (GstMpegtsSCTESpliceEvent * event, guint8 ** orig_data,
+    guint8 * end)
+{
+  GstMpegtsSCTESpliceComponent *component =
+      g_slice_new0 (GstMpegtsSCTESpliceComponent);
+  guint8 *data = *orig_data;
+
+  if (data + 1 + 6 > end)
+    goto error;
+
+  component->tag = *data;
+  data += 1;
+
+  if (event->insert_event && event->splice_immediate_flag == 0) {
+    component->splice_time_specified = *data >> 7;
+    if (component->splice_time_specified) {
+      component->splice_time = ((guint64) (*data & 0x01)) << 32;
+      data += 1;
+      component->splice_time += GST_READ_UINT32_BE (data);
+      data += 4;
+      GST_LOG ("component %u splice_time %" G_GUINT64_FORMAT " (%"
+          GST_TIME_FORMAT ")", component->tag, component->splice_time,
+          GST_TIME_ARGS (MPEGTIME_TO_GSTTIME (component->splice_time)));
+    } else {
+      data += 1;
+    }
+  } else if (!event->insert_event) {
+    component->utc_splice_time = GST_READ_UINT32_BE (data);
+    GST_LOG ("component %u utc_splice_time %u", component->tag,
+        component->utc_splice_time);
+    data += 4;
+  }
+
+  *orig_data = data;
+
+  return component;
+
+error:
+  {
+    if (event)
+      _gst_mpegts_scte_splice_event_free (event);
+    return NULL;
+  }
+}
+
 static GstMpegtsSCTESpliceEvent *
-_parse_slice_event (guint8 ** orig_data, guint8 * end, gboolean insert_event)
+_parse_splice_event (guint8 ** orig_data, guint8 * end, gboolean insert_event)
 {
   GstMpegtsSCTESpliceEvent *event = g_slice_new0 (GstMpegtsSCTESpliceEvent);
   guint8 *data = *orig_data;
@@ -64,6 +138,9 @@ _parse_slice_event (guint8 ** orig_data, guint8 * end, gboolean insert_event)
   /* Note : +6 is because of the final descriptor_loop_length and CRC */
   if (data + 5 + 6 > end)
     goto error;
+
+  event->components = g_ptr_array_new_with_free_func ((GDestroyNotify)
+      _gst_mpegts_scte_splice_component_free);
 
   event->insert_event = insert_event;
   event->splice_event_id = GST_READ_UINT32_BE (data);
@@ -82,30 +159,50 @@ _parse_slice_event (guint8 ** orig_data, guint8 * end, gboolean insert_event)
     event->out_of_network_indicator = *data >> 7;
     event->program_splice_flag = (*data >> 6) & 0x01;
     event->duration_flag = (*data >> 5) & 0x01;
-    event->splice_immediate_flag = (*data >> 4) & 0x01;
+
+    if (insert_event)
+      event->splice_immediate_flag = (*data >> 4) & 0x01;
+
     GST_LOG ("out_of_network_indicator:%d", event->out_of_network_indicator);
     GST_LOG ("program_splice_flag:%d", event->program_splice_flag);
     GST_LOG ("duration_flag:%d", event->duration_flag);
-    GST_LOG ("splice_immediate_flag:%d", event->splice_immediate_flag);
+
+    if (insert_event)
+      GST_LOG ("splice_immediate_flag:%d", event->splice_immediate_flag);
+
     data += 1;
 
     if (event->program_splice_flag == 0) {
-      GST_ERROR ("Component splice flag not supported !");
-      goto error;
-    }
+      guint component_count = *data;
+      guint i;
 
-    if (event->splice_immediate_flag == 0) {
-      event->program_splice_time_specified = *data >> 7;
-      if (event->program_splice_time_specified) {
-        event->program_splice_time = ((guint64) (*data & 0x01)) << 32;
-        data += 1;
-        event->program_splice_time += GST_READ_UINT32_BE (data);
+      data += 1;
+
+      for (i = 0; i < component_count; i++) {
+        GstMpegtsSCTESpliceComponent *component =
+            _parse_splice_component (event, &data, end);
+        if (component == NULL)
+          goto error;
+        g_ptr_array_add (event->components, component);
+      }
+    } else {
+      if (insert_event && event->splice_immediate_flag == 0) {
+        event->program_splice_time_specified = *data >> 7;
+        if (event->program_splice_time_specified) {
+          event->program_splice_time = ((guint64) (*data & 0x01)) << 32;
+          data += 1;
+          event->program_splice_time += GST_READ_UINT32_BE (data);
+          data += 4;
+          GST_LOG ("program_splice_time %" G_GUINT64_FORMAT " (%"
+              GST_TIME_FORMAT ")", event->program_splice_time,
+              GST_TIME_ARGS (MPEGTIME_TO_GSTTIME (event->program_splice_time)));
+        } else
+          data += 1;
+      } else if (!insert_event) {
+        event->utc_splice_time = GST_READ_UINT32_BE (data);
+        GST_LOG ("utc_splice_time %u", event->utc_splice_time);
         data += 4;
-        GST_LOG ("program_splice_time %" G_GUINT64_FORMAT " (%" GST_TIME_FORMAT
-            ")", event->program_splice_time,
-            GST_TIME_ARGS (MPEGTIME_TO_GSTTIME (event->program_splice_time)));
-      } else
-        data += 1;
+      }
     }
 
     if (event->duration_flag) {
@@ -183,6 +280,8 @@ _parse_sit (GstMpegtsSection * section)
 
   sit = g_slice_new0 (GstMpegtsSCTESIT);
 
+  sit->fully_parsed = FALSE;
+
   data = section->data;
   end = data + section->section_length;
 
@@ -219,15 +318,21 @@ _parse_sit (GstMpegtsSection * section)
   if (sit->splice_command_length == 0xfff)
     sit->splice_command_length = 0;
   GST_LOG ("command length %d", sit->splice_command_length);
-  sit->splice_command_type = *data;
-  data += 1;
+
+  if (sit->encrypted_packet) {
+    GST_LOG ("Encrypted SIT, parsed partially");
+    goto done;
+  }
 
   if (sit->splice_command_length
-      && (data + sit->splice_command_length > end - 4)) {
+      && (data + sit->splice_command_length > end - 5)) {
     GST_WARNING ("PID %d invalid SCTE SIT splice command length %d",
         section->pid, sit->splice_command_length);
     goto error;
   }
+
+  sit->splice_command_type = *data;
+  data += 1;
 
   sit->splices = g_ptr_array_new_with_free_func ((GDestroyNotify)
       _gst_mpegts_scte_splice_event_free);
@@ -248,9 +353,24 @@ _parse_sit (GstMpegtsSection * section)
         data += 1;
     }
       break;
+    case GST_MTS_SCTE_SPLICE_COMMAND_SCHEDULE:
+    {
+      guint i;
+      guint splice_count = *data;
+      data += 1;
+
+      for (i = 0; i < splice_count; i++) {
+        GstMpegtsSCTESpliceEvent *event =
+            _parse_splice_event (&data, end, FALSE);
+        if (event == NULL)
+          goto error;
+        g_ptr_array_add (sit->splices, event);
+      }
+    }
+      break;
     case GST_MTS_SCTE_SPLICE_COMMAND_INSERT:
     {
-      GstMpegtsSCTESpliceEvent *event = _parse_slice_event (&data, end, TRUE);
+      GstMpegtsSCTESpliceEvent *event = _parse_splice_event (&data, end, TRUE);
       if (event == NULL)
         goto error;
       g_ptr_array_add (sit->splices, event);
@@ -263,9 +383,9 @@ _parse_sit (GstMpegtsSection * section)
     }
       break;
     default:
-      GST_ERROR ("Unknown SCTE splice command type (0x%02x) !",
+      GST_WARNING ("Unknown SCTE splice command type (0x%02x) !",
           sit->splice_command_type);
-      goto error;
+      break;;
   }
 
   /* descriptors */
@@ -279,7 +399,6 @@ _parse_sit (GstMpegtsSection * section)
   }
   data += tmp;
 
-
   GST_DEBUG ("%p - %p", data, end);
   if (data != end - 4) {
     GST_WARNING ("PID %d invalid SIT parsed %d length %d",
@@ -287,13 +406,18 @@ _parse_sit (GstMpegtsSection * section)
     goto error;
   }
 
+  sit->fully_parsed = TRUE;
+
+done:
   return sit;
 
 error:
-  if (sit)
+  if (sit) {
     _gst_mpegts_scte_sit_free (sit);
+    sit = NULL;
+  }
 
-  return NULL;
+  goto done;
 }
 
 /**
@@ -336,11 +460,14 @@ gst_mpegts_scte_sit_new (void)
 
   /* Set all default values (which aren't already 0/NULL) */
   sit->tier = 0xfff;
+  sit->fully_parsed = TRUE;
 
   sit->splices = g_ptr_array_new_with_free_func ((GDestroyNotify)
       _gst_mpegts_scte_splice_event_free);
   sit->descriptors = g_ptr_array_new_with_free_func ((GDestroyNotify)
       gst_mpegts_descriptor_free);
+
+  sit->is_running_time = TRUE;
 
   return sit;
 }
@@ -358,6 +485,9 @@ gst_mpegts_scte_null_new (void)
   GstMpegtsSCTESIT *sit = gst_mpegts_scte_sit_new ();
 
   sit->splice_command_type = GST_MTS_SCTE_SPLICE_COMMAND_NULL;
+
+  sit->is_running_time = TRUE;
+
   return sit;
 }
 
@@ -381,13 +511,15 @@ gst_mpegts_scte_cancel_new (guint32 event_id)
   event->splice_event_cancel_indicator = TRUE;
   g_ptr_array_add (sit->splices, event);
 
+  sit->is_running_time = TRUE;
+
   return sit;
 }
 
 /**
  * gst_mpegts_scte_splice_in_new:
  * @event_id: The event ID.
- * @splice_time: The PCR time for the splice event
+ * @splice_time: The running time for the splice event
  *
  * Allocates and initializes a new "Splice In" INSERT command
  * #GstMpegtsSCTESIT for the given @event_id and @splice_time.
@@ -398,13 +530,14 @@ gst_mpegts_scte_cancel_new (guint32 event_id)
  * Returns: (transfer full): A newly allocated #GstMpegtsSCTESIT
  */
 GstMpegtsSCTESIT *
-gst_mpegts_scte_splice_in_new (guint32 event_id, guint64 splice_time)
+gst_mpegts_scte_splice_in_new (guint32 event_id, GstClockTime splice_time)
 {
   GstMpegtsSCTESIT *sit = gst_mpegts_scte_sit_new ();
   GstMpegtsSCTESpliceEvent *event = gst_mpegts_scte_splice_event_new ();
 
   sit->splice_command_type = GST_MTS_SCTE_SPLICE_COMMAND_INSERT;
   event->splice_event_id = event_id;
+  event->insert_event = TRUE;
   if (splice_time == G_MAXUINT64) {
     event->splice_immediate_flag = TRUE;
   } else {
@@ -413,18 +546,20 @@ gst_mpegts_scte_splice_in_new (guint32 event_id, guint64 splice_time)
   }
   g_ptr_array_add (sit->splices, event);
 
+  sit->is_running_time = TRUE;
+
   return sit;
 }
 
 /**
  * gst_mpegts_scte_splice_out_new:
  * @event_id: The event ID.
- * @splice_time: The PCR time for the splice event
+ * @splice_time: The running time for the splice event
  * @duration: The optional duration.
  *
  * Allocates and initializes a new "Splice Out" INSERT command
  * #GstMpegtsSCTESIT for the given @event_id, @splice_time and
- * duration.
+ * @duration.
  *
  * If the @splice_time is #G_MAXUINT64 then the event will be
  * immediate as opposed to for the target @splice_time.
@@ -434,8 +569,8 @@ gst_mpegts_scte_splice_in_new (guint32 event_id, guint64 splice_time)
  * Returns: (transfer full): A newly allocated #GstMpegtsSCTESIT
  */
 GstMpegtsSCTESIT *
-gst_mpegts_scte_splice_out_new (guint32 event_id, guint64 splice_time,
-    guint64 duration)
+gst_mpegts_scte_splice_out_new (guint32 event_id, GstClockTime splice_time,
+    GstClockTime duration)
 {
   GstMpegtsSCTESIT *sit = gst_mpegts_scte_sit_new ();
   GstMpegtsSCTESpliceEvent *event = gst_mpegts_scte_splice_event_new ();
@@ -443,6 +578,7 @@ gst_mpegts_scte_splice_out_new (guint32 event_id, guint64 splice_time,
   sit->splice_command_type = GST_MTS_SCTE_SPLICE_COMMAND_INSERT;
   event->splice_event_id = event_id;
   event->out_of_network_indicator = TRUE;
+  event->insert_event = TRUE;
   if (splice_time == G_MAXUINT64) {
     event->splice_immediate_flag = TRUE;
   } else {
@@ -454,6 +590,8 @@ gst_mpegts_scte_splice_out_new (guint32 event_id, guint64 splice_time,
     event->break_duration = duration;
   }
   g_ptr_array_add (sit->splices, event);
+
+  sit->is_running_time = TRUE;
 
   return sit;
 }
@@ -472,8 +610,31 @@ gst_mpegts_scte_splice_event_new (void)
 
   /* Non-0 Default values */
   event->program_splice_flag = TRUE;
+  event->components = g_ptr_array_new_with_free_func ((GDestroyNotify)
+      _gst_mpegts_scte_splice_component_free);
+
 
   return event;
+}
+
+/**
+ * gst_mpegts_scte_splice_component_new:
+ * @tag: the elementary PID stream identifier
+ *
+ * Allocates and initializes a #GstMpegtsSCTESpliceComponent.
+ *
+ * Returns: (transfer full): A newly allocated #GstMpegtsSCTESpliceComponent
+ * Since: 1.20
+ */
+GstMpegtsSCTESpliceComponent *
+gst_mpegts_scte_splice_component_new (guint8 tag)
+{
+  GstMpegtsSCTESpliceComponent *component =
+      g_slice_new0 (GstMpegtsSCTESpliceComponent);
+
+  component->tag = tag;
+
+  return component;
 }
 
 static gboolean
@@ -491,6 +652,11 @@ _packetize_sit (GstMpegtsSection * section)
   if (sit == NULL)
     return FALSE;
 
+  if (sit->fully_parsed == FALSE) {
+    GST_WARNING ("Attempted to packetize an incompletely parsed SIT");
+    return FALSE;
+  }
+
   /* Skip cases we don't handle for now */
   if (sit->encrypted_packet) {
     GST_WARNING ("SCTE encrypted packet is not supported");
@@ -498,8 +664,6 @@ _packetize_sit (GstMpegtsSection * section)
   }
 
   switch (sit->splice_command_type) {
-    case GST_MTS_SCTE_SPLICE_COMMAND_SCHEDULE:
-    case GST_MTS_SCTE_SPLICE_COMMAND_TIME:
     case GST_MTS_SCTE_SPLICE_COMMAND_PRIVATE:
       GST_WARNING ("SCTE command not supported");
       return FALSE;
@@ -521,22 +685,59 @@ _packetize_sit (GstMpegtsSection * section)
     /* There is at least 5 bytes */
     command_length += 5;
     if (!event->splice_event_cancel_indicator) {
-      if (!event->program_splice_flag) {
-        GST_WARNING ("Only SCTE program splices are supported");
-        return FALSE;
-      }
       /* Add at least 5 bytes for common fields */
       command_length += 5;
-      if (!event->splice_immediate_flag) {
-        if (event->program_splice_time_specified)
-          command_length += 5;
-        else
+
+      if (event->program_splice_flag) {
+        if (event->insert_event) {
+          if (!event->splice_immediate_flag) {
+            if (event->program_splice_time_specified)
+              command_length += 5;
+            else
+              command_length += 1;
+          }
+        } else {
+          /* Schedule events, 4 bytes for utc_splice_time */
+          command_length += 4;
+        }
+      } else {
+        guint j;
+
+        /* component_count */
+        command_length += 1;
+
+        for (j = 0; j < event->components->len; j++) {
+          GstMpegtsSCTESpliceComponent *component =
+              g_ptr_array_index (event->components, j);
+
+          /* component_tag */
           command_length += 1;
+          if (event->insert_event) {
+            if (!event->splice_immediate_flag) {
+              if (component->splice_time_specified)
+                command_length += 5;
+              else
+                command_length += 1;
+            }
+          } else {
+            /* utc_splice_time */
+            command_length += 4;
+          }
+        }
       }
+
       if (event->duration_flag)
         command_length += 5;
     }
   }
+
+  if (sit->splice_command_type == GST_MTS_SCTE_SPLICE_COMMAND_TIME) {
+    if (sit->splice_time_specified)
+      command_length += 5;
+    else
+      command_length += 1;
+  }
+
   length += command_length;
 
   /* Calculate size of descriptors */
@@ -572,6 +773,16 @@ _packetize_sit (GstMpegtsSection * section)
   GST_WRITE_UINT32_BE (data, tmp32);
   data += 4;
 
+  if (sit->splice_command_type == GST_MTS_SCTE_SPLICE_COMMAND_TIME) {
+    if (!sit->splice_time_specified) {
+      *data++ = 0x7f;
+    } else {
+      *data++ = 0xf2 | ((sit->splice_time >> 32) & 0x1);
+      GST_WRITE_UINT32_BE (data, sit->splice_time & 0xffffffff);
+      data += 4;
+    }
+  }
+
   /* Write the events */
   for (i = 0; i < sit->splices->len; i++) {
     GstMpegtsSCTESpliceEvent *event = g_ptr_array_index (sit->splices, i);
@@ -592,19 +803,58 @@ _packetize_sit (GstMpegtsSection * section)
       *data++ = (event->out_of_network_indicator << 7) |
           (event->program_splice_flag << 6) |
           (event->duration_flag << 5) |
-          (event->splice_immediate_flag << 4) | 0x0f;
-      if (!event->splice_immediate_flag) {
-        /* program_splice_time_specified : 1bit
-         * reserved : 6/7 bit */
-        if (!event->program_splice_time_specified)
-          *data++ = 0x7f;
-        else {
-          /* time : 33bit */
-          *data++ = 0xf2 | ((event->program_splice_time >> 32) & 0x1);
-          GST_WRITE_UINT32_BE (data, event->program_splice_time & 0xffffffff);
+          (event->insert_event ? (event->splice_immediate_flag << 4) : 0) |
+          0x0f;
+      if (event->program_splice_flag) {
+        if (event->insert_event) {
+          if (!event->splice_immediate_flag) {
+            /* program_splice_time_specified : 1bit
+             * reserved : 6/7 bit */
+            if (!event->program_splice_time_specified)
+              *data++ = 0x7f;
+            else {
+              /* time : 33bit */
+              *data++ = 0xf2 | ((event->program_splice_time >> 32) & 0x1);
+              GST_WRITE_UINT32_BE (data,
+                  event->program_splice_time & 0xffffffff);
+              data += 4;
+            }
+          }
+        } else {
+          GST_WRITE_UINT32_BE (data, event->utc_splice_time);
           data += 4;
         }
+      } else {
+        guint j;
+
+        *data++ = event->components->len & 0xff;
+
+        for (j = 0; j < event->components->len; j++) {
+          GstMpegtsSCTESpliceComponent *component =
+              g_ptr_array_index (event->components, j);
+
+          *data++ = component->tag;
+
+          if (event->insert_event) {
+            if (!event->splice_immediate_flag) {
+              /* program_splice_time_specified : 1bit
+               * reserved : 6/7 bit */
+              if (!component->splice_time_specified)
+                *data++ = 0x7f;
+              else {
+                /* time : 33bit */
+                *data++ = 0xf2 | ((component->splice_time >> 32) & 0x1);
+                GST_WRITE_UINT32_BE (data, component->splice_time & 0xffffffff);
+                data += 4;
+              }
+            }
+          } else {
+            GST_WRITE_UINT32_BE (data, component->utc_splice_time);
+            data += 4;
+          }
+        }
       }
+
       if (event->duration_flag) {
         *data = event->break_duration_auto_return ? 0xfe : 0x7e;
         *data++ |= (event->break_duration >> 32) & 0x1;

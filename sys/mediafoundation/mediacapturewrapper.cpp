@@ -34,17 +34,14 @@
 #include <algorithm>
 #include <iterator>
 
+/* *INDENT-OFF* */
 using namespace ABI::Windows::ApplicationModel::Core;
 using namespace ABI::Windows::Foundation::Collections;
 using namespace ABI::Windows::Media::Devices;
 using namespace ABI::Windows::Media::MediaProperties;
 
-G_BEGIN_DECLS
-
 GST_DEBUG_CATEGORY_EXTERN (gst_mf_source_object_debug);
 #define GST_CAT_DEFAULT gst_mf_source_object_debug
-
-G_END_DECLS
 
 static std::string
 convert_hstring_to_string (HString * hstr)
@@ -186,11 +183,11 @@ GstWinRTMediaDescription::Fill(HString &source_id,
 
   caps = gst_caps_new_simple ("video/x-raw",
       "format", G_TYPE_STRING, format.c_str(), "width", G_TYPE_INT, width,
-      "height", G_TYPE_INT, height, NULL);
+      "height", G_TYPE_INT, height, nullptr);
 
   if (fps_n > 0 && fps_d > 0)
     gst_caps_set_simple (caps,
-        "framerate", GST_TYPE_FRACTION, fps_n, fps_d, NULL);
+        "framerate", GST_TYPE_FRACTION, fps_n, fps_d, nullptr);
 
   source_id.CopyTo (source_id_.GetAddressOf());
   hstr_subtype.CopyTo (subtype_.GetAddressOf());
@@ -1047,19 +1044,11 @@ MediaCaptureWrapper::onFrameArrived(IMediaFrameReader *reader,
   if (!frame_ref)
     return S_OK;
 
-  hr = frame_ref->get_VideoMediaFrame (&video_frame);
-  if (!gst_mf_result (hr))
-    return hr;
-
-  hr = video_frame->get_SoftwareBitmap (&bitmap);
-  if (!gst_mf_result (hr) || !bitmap)
-    return hr;
-
   /* nothing to do if no callback was installed */
   if (!user_cb_.frame_arrived)
     return S_OK;
 
-  return user_cb_.frame_arrived (bitmap.Get(), user_data_);
+  return user_cb_.frame_arrived (frame_ref.Get(), user_data_);
 }
 
 HRESULT
@@ -1184,3 +1173,5 @@ WinRTCapsCompareFunc (const GstWinRTMediaDescription & a,
 {
   return gst_mf_source_object_caps_compare (a.caps_, b.caps_) < 0;
 }
+
+/* *INDENT-ON* */

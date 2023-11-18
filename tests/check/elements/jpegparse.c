@@ -27,25 +27,25 @@
 /* This test doesn't use actual JPEG data, but some fake data that we know
    will trigger certain paths in jpegparse. */
 
-guint8 test_data_garbage[] = { 0x00, 0x01, 0xff, 0x32, 0x00, 0xff };
-guint8 test_data_short_frame[] = { 0xff, 0xd8, 0xff, 0xd9 };
+static guint8 test_data_garbage[] = { 0x00, 0x01, 0xff, 0x32, 0x00, 0xff };
+static guint8 test_data_short_frame[] = { 0xff, 0xd8, 0xff, 0xd9 };
 
-guint8 test_data_normal_frame[] = { 0xff, 0xd8, 0xff, 0x12, 0x00, 0x03, 0x33,
-  0xff, 0xd9
+static guint8 test_data_normal_frame[] = { 0xff, 0xd8, 0xff, 0x12, 0x00, 0x03,
+  0x33, 0xff, 0xd9
 };
 
-guint8 test_data_entropy[] = { 0xff, 0xd8, 0xff, 0xda, 0x00, 0x04, 0x22, 0x33,
-  0x44, 0xff, 0x00, 0x55, 0xff, 0x04, 0x00, 0x04, 0x22, 0x33, 0xff, 0xd9
+static guint8 test_data_entropy[] = { 0xff, 0xd8, 0xff, 0xda, 0x00, 0x04, 0x22,
+  0x33, 0x44, 0xff, 0x00, 0x55, 0xff, 0x04, 0x00, 0x04, 0x22, 0x33, 0xff, 0xd9
 };
-guint8 test_data_ff[] = { 0xff, 0xff };
+static guint8 test_data_ff[] = { 0xff, 0xff };
 
-guint8 test_data_extra_ff[] = { 0xff, 0xd8, 0xff, 0xff, 0xff, 0x12, 0x00, 0x03,
-  0x33, 0xff, 0xff, 0xff, 0xd9
+static guint8 test_data_extra_ff[] = { 0xff, 0xd8, 0xff, 0xff, 0xff, 0x12, 0x00,
+  0x03, 0x33, 0xff, 0xff, 0xff, 0xd9
 };
 
-guint8 test_data_soi[] = { 0xff, 0xd8 };
+static guint8 test_data_soi[] = { 0xff, 0xd8 };
 
-guint8 test_data_app1_exif[] = {
+static guint8 test_data_app1_exif[] = {
   0xff, 0xe1,
   0x00, 0xd2,                   /* length = 210 */
   0x45, 0x78, 0x69, 0x66, 0x00, /* Exif */
@@ -129,14 +129,14 @@ guint8 test_data_app1_exif[] = {
   0x22, 0x20,
 };
 
-guint8 test_data_comment[] = {
+static guint8 test_data_comment[] = {
   0xff, 0xfe,
   0x00, 0x08,                   /* size */
   /* xxxxx */
   0x78, 0x78, 0x78, 0x78, 0x78, 0x00,
 };
 
-guint8 test_data_sof0[] = {
+static guint8 test_data_sof0[] = {
   0xff, 0xc0,                   /* baseline dct-based */
   0x00, 0x11,                   /* size */
   0x08,                         /* precision */
@@ -148,7 +148,7 @@ guint8 test_data_sof0[] = {
   0x03, 0x11, 0x01,             /* component 3 */
 };
 
-guint8 test_data_eoi[] = { 0xff, 0xd9 };
+static guint8 test_data_eoi[] = { 0xff, 0xd9 };
 
 static GList *
 _make_buffers_in (GList * buffer_in, guint8 * test_data, gsize test_data_size)
@@ -192,7 +192,7 @@ GST_START_TEST (test_parse_single_byte)
   caps_in = gst_caps_new_simple ("image/jpeg", "parsed", G_TYPE_BOOLEAN, FALSE,
       NULL);
   caps_out = gst_caps_new_simple ("image/jpeg", "parsed", G_TYPE_BOOLEAN, TRUE,
-      "framerate", GST_TYPE_FRACTION, 1, 1, NULL);
+      "framerate", GST_TYPE_FRACTION, 0, 1, NULL);
 
   /* Push the data byte by byte, injecting some garbage. */
   buffer_in = make_buffers_in (buffer_in, test_data_garbage);
@@ -262,7 +262,7 @@ GST_START_TEST (test_parse_all_in_one_buf)
   buffer_in = g_list_append (buffer_in, buffer);
 
   caps_out = gst_caps_new_simple ("image/jpeg", "parsed", G_TYPE_BOOLEAN, TRUE,
-      "framerate", GST_TYPE_FRACTION, 1, 1, NULL);
+      "framerate", GST_TYPE_FRACTION, 0, 1, NULL);
   buffer_out = make_buffers_out (buffer_out, test_data_short_frame);
   buffer_out = make_buffers_out (buffer_out, test_data_normal_frame);
   buffer_out = make_buffers_out (buffer_out, test_data_entropy);
@@ -326,8 +326,9 @@ GST_START_TEST (test_parse_app1_exif)
       G_TYPE_BOOLEAN, FALSE, NULL);
 
   caps_out = gst_caps_new_simple ("image/jpeg", "parsed", G_TYPE_BOOLEAN, TRUE,
-      "framerate", GST_TYPE_FRACTION, 1, 1, "format", G_TYPE_STRING,
-      "I420", "width", G_TYPE_INT, 80, "height", G_TYPE_INT, 60, NULL);
+      "framerate", GST_TYPE_FRACTION, 0, 1, "width", G_TYPE_INT, 80, "height",
+      G_TYPE_INT, 60, "sof-marker", G_TYPE_INT, 0, "colorspace", G_TYPE_STRING,
+      "sYUV", "sampling", G_TYPE_STRING, "YCbCr-4:2:0", NULL);
 
   buffer_in = make_my_input_buffer (test_data_app1_exif,
       sizeof (test_data_app1_exif));
@@ -351,8 +352,9 @@ GST_START_TEST (test_parse_comment)
       G_TYPE_BOOLEAN, FALSE, NULL);
 
   caps_out = gst_caps_new_simple ("image/jpeg", "parsed", G_TYPE_BOOLEAN, TRUE,
-      "framerate", GST_TYPE_FRACTION, 1, 1, "format", G_TYPE_STRING,
-      "I420", "width", G_TYPE_INT, 80, "height", G_TYPE_INT, 60, NULL);
+      "framerate", GST_TYPE_FRACTION, 0, 1, "width", G_TYPE_INT, 80, "height",
+      G_TYPE_INT, 60, "sof-marker", G_TYPE_INT, 0, "colorspace", G_TYPE_STRING,
+      "sYUV", "sampling", G_TYPE_STRING, "YCbCr-4:2:0", NULL);
 
   buffer_in = make_my_input_buffer (test_data_comment,
       sizeof (test_data_comment));
