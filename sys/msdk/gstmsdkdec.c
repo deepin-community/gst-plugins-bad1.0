@@ -58,6 +58,9 @@ static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
 #define GST_TO_MFX_TIME(time) ((time) == GST_CLOCK_TIME_NONE ? \
     MFX_TIMESTAMP_UNKNOWN : gst_util_uint64_scale_round ((time), 9, 100000))
 
+#define MFX_TO_GST_TIME(time) ((time) == MFX_TIMESTAMP_UNKNOWN ? \
+    GST_CLOCK_TIME_NONE : gst_util_uint64_scale_round ((time), 100000, 9))
+
 #define MFX_TIME_IS_VALID(time) ((time) != MFX_TIMESTAMP_UNKNOWN)
 
 #define gst_msdkdec_parent_class parent_class
@@ -82,6 +85,24 @@ struct _MsdkDecTask
 static gboolean gst_msdkdec_drain (GstVideoDecoder * decoder);
 static gboolean gst_msdkdec_flush (GstVideoDecoder * decoder);
 static gboolean gst_msdkdec_negotiate (GstMsdkDec * thiz, gboolean hard_reset);
+
+void
+gst_msdkdec_add_bs_extra_param (GstMsdkDec * thiz, mfxExtBuffer * param)
+{
+  if (thiz->num_bs_extra_params < MAX_BS_EXTRA_PARAMS) {
+    thiz->bs_extra_params[thiz->num_bs_extra_params] = param;
+    thiz->num_bs_extra_params++;
+  }
+}
+
+void
+gst_msdkdec_add_video_extra_param (GstMsdkDec * thiz, mfxExtBuffer * param)
+{
+  if (thiz->num_video_extra_params < MAX_VIDEO_EXTRA_PARAMS) {
+    thiz->video_extra_params[thiz->num_video_extra_params] = param;
+    thiz->num_video_extra_params++;
+  }
+}
 
 static GstVideoCodecFrame *
 gst_msdkdec_get_oldest_frame (GstVideoDecoder * decoder)
@@ -244,8 +265,9 @@ get_surface (GstMsdkDec * thiz, GstBuffer * buffer)
       goto failed_unref_buffer2;
   }
 
-  gst_msdk_update_mfx_frame_info_from_mfx_video_param (&i->surface->Info,
-      &thiz->param);
+  if (!thiz->sfc)
+    gst_msdk_update_mfx_frame_info_from_mfx_video_param (&i->surface->Info,
+        &thiz->param);
 
   thiz->locked_msdk_surfaces = g_list_append (thiz->locked_msdk_surfaces, i);
   return i;
@@ -288,6 +310,8 @@ gst_msdkdec_close_decoder (GstMsdkDec * thiz, gboolean reset_param)
   if (reset_param)
     memset (&thiz->param, 0, sizeof (thiz->param));
 
+  thiz->num_bs_extra_params = 0;
+  thiz->num_video_extra_params = 0;
   thiz->initialized = FALSE;
   gst_adapter_clear (thiz->adapter);
 }
@@ -302,7 +326,24 @@ gst_msdkdec_set_context (GstElement * element, GstContext * context)
     gst_object_replace ((GstObject **) & thiz->context,
         (GstObject *) msdk_context);
     gst_object_unref (msdk_context);
+  } else
+#ifndef _WIN32
+    if (gst_msdk_context_from_external_va_display (context,
+          thiz->hardware, 0 /* GST_MSDK_JOB_DECODER will be set later */ ,
+          &msdk_context)) {
+    gst_object_replace ((GstObject **) & thiz->context,
+        (GstObject *) msdk_context);
+    gst_object_unref (msdk_context);
   }
+#else
+    if (gst_msdk_context_from_external_d3d11_device (context,
+          thiz->hardware, 0 /* GST_MSDK_JOB_DECODER will be set later */ ,
+          &msdk_context)) {
+    gst_object_replace ((GstObject **) & thiz->context,
+        (GstObject *) msdk_context);
+    gst_object_unref (msdk_context);
+  }
+#endif
 
   GST_ELEMENT_CLASS (parent_class)->set_context (element, context);
 }
@@ -311,10 +352,16 @@ static gboolean
 gst_msdkdec_init_decoder (GstMsdkDec * thiz)
 {
   GstMsdkDecClass *klass = GST_MSDKDEC_GET_CLASS (thiz);
-  GstVideoInfo *info;
+  GstVideoInfo *info, *output_info;
   mfxSession session;
   mfxStatus status;
   mfxFrameAllocRequest request;
+#if (MFX_VERSION >= 1022)
+  mfxExtDecVideoProcessing ext_dec_video_proc;
+#endif
+
+  GstVideoCodecState *output_state =
+      gst_video_decoder_get_output_state (GST_VIDEO_DECODER (thiz));
 
   if (thiz->initialized)
     return TRUE;
@@ -329,6 +376,7 @@ gst_msdkdec_init_decoder (GstMsdkDec * thiz)
     return FALSE;
   }
   info = &thiz->input_state->info;
+  output_info = &output_state->info;
 
   GST_OBJECT_LOCK (thiz);
 
@@ -373,8 +421,37 @@ gst_msdkdec_init_decoder (GstMsdkDec * thiz)
       thiz->param.mfx.FrameInfo.ChromaFormat ? thiz->param.mfx.
       FrameInfo.ChromaFormat : MFX_CHROMAFORMAT_YUV420;
 
+#if (MFX_VERSION >= 1022)
+  if (output_info && thiz->sfc) {
+    memset (&ext_dec_video_proc, 0, sizeof (ext_dec_video_proc));
+    ext_dec_video_proc.Header.BufferId = MFX_EXTBUFF_DEC_VIDEO_PROCESSING;
+    ext_dec_video_proc.Header.BufferSz = sizeof (ext_dec_video_proc);
+    ext_dec_video_proc.In.CropW = thiz->param.mfx.FrameInfo.CropW;
+    ext_dec_video_proc.In.CropH = thiz->param.mfx.FrameInfo.CropH;
+    ext_dec_video_proc.In.CropX = 0;
+    ext_dec_video_proc.In.CropY = 0;
+    ext_dec_video_proc.Out.FourCC =
+        gst_msdk_get_mfx_fourcc_from_format (output_info->finfo->format);
+    ext_dec_video_proc.Out.ChromaFormat =
+        gst_msdk_get_mfx_chroma_from_format (output_info->finfo->format);
+    ext_dec_video_proc.Out.Width = GST_ROUND_UP_16 (output_info->width);
+    ext_dec_video_proc.Out.Height = GST_ROUND_UP_32 (output_info->height);
+    ext_dec_video_proc.Out.CropW = output_info->width;
+    ext_dec_video_proc.Out.CropH = output_info->height;
+    ext_dec_video_proc.Out.CropX = 0;
+    ext_dec_video_proc.Out.CropY = 0;
+    gst_msdkdec_add_video_extra_param (thiz,
+        (mfxExtBuffer *) & ext_dec_video_proc);
+  }
+#endif
+
+  if (thiz->num_video_extra_params) {
+    thiz->param.NumExtParam = thiz->num_video_extra_params;
+    thiz->param.ExtParam = thiz->video_extra_params;
+  }
+
   session = gst_msdk_context_get_session (thiz->context);
-  /* validate parameters and allow the Media SDK to make adjustments */
+  /* validate parameters and allow MFX to make adjustments */
   status = MFXVideoDECODE_Query (session, &thiz->param, &thiz->param);
   if (status < MFX_ERR_NONE) {
     GST_ERROR_OBJECT (thiz, "Video Decode Query failed (%s)",
@@ -421,6 +498,13 @@ gst_msdkdec_init_decoder (GstMsdkDec * thiz)
     request.Type |= MFX_MEMTYPE_VIDEO_MEMORY_DECODER_TARGET;
     if (thiz->use_dmabuf)
       request.Type |= MFX_MEMTYPE_EXPORT_FRAME;
+#if (MFX_VERSION >= 1022)
+    if (thiz->sfc) {
+      request.Info.Width = ext_dec_video_proc.Out.Width;
+      request.Info.Height = ext_dec_video_proc.Out.Height;
+    }
+#endif
+
     gst_msdk_frame_alloc (thiz->context, &request, &thiz->alloc_resp);
   }
 
@@ -511,6 +595,25 @@ done:
   return ret;
 }
 
+static GstCaps *
+gst_msdkdec_getcaps (GstVideoDecoder * decoder, GstCaps * filter)
+{
+  GstCaps *caps, *tmp = NULL;
+
+  caps = gst_pad_get_pad_template_caps (decoder->sinkpad);
+  if (caps) {
+    if (filter) {
+      tmp = gst_caps_intersect_full (filter, caps, GST_CAPS_INTERSECT_FIRST);
+      gst_caps_unref (caps);
+      caps = tmp;
+    }
+  } else {
+    caps = gst_video_decoder_proxy_getcaps (decoder, NULL, filter);
+  }
+
+  return caps;
+}
+
 static gboolean
 gst_msdkdec_set_src_caps (GstMsdkDec * thiz, gboolean need_allocation)
 {
@@ -518,10 +621,18 @@ gst_msdkdec_set_src_caps (GstMsdkDec * thiz, gboolean need_allocation)
   GstVideoInfo *vinfo;
   GstVideoAlignment align;
   GstCaps *allocation_caps = NULL;
+  GstCaps *allowed_caps = NULL, *temp_caps;
   GstVideoFormat format;
   guint width, height;
   guint alloc_w, alloc_h;
+  int out_width = 0, out_height = 0;
+  gint dar_n = -1, dar_d = -1;
   const gchar *format_str;
+  GstStructure *outs = NULL;
+  const gchar *out_format;
+  GValue v_format = G_VALUE_INIT;
+  GValue v_width = G_VALUE_INIT;
+  GValue v_height = G_VALUE_INIT;
 
   /* use display width and display height in output state, which
    * will be used for caps negotiation */
@@ -540,6 +651,79 @@ gst_msdkdec_set_src_caps (GstMsdkDec * thiz, gboolean need_allocation)
     GST_WARNING_OBJECT (thiz, "Failed to find a valid video format");
     return FALSE;
   }
+#if (MFX_VERSION >= 1022)
+  /* SFC is triggered (for AVC and HEVC) when default output format is not
+   * accepted by downstream or when downstream requests for a smaller
+   * resolution (i.e. SFC supports down-scaling)
+   * Here we need to do the query twice: the first time uses default color
+   * format and bitstream's original size to query peer pad, empty caps
+   * means default format and/or size are not accepted by downstream;
+   * then we need the second query to decide src caps' color format and size,
+   * and let SFC work. */
+  if (thiz->param.mfx.CodecId == MFX_CODEC_AVC ||
+      thiz->param.mfx.CodecId == MFX_CODEC_HEVC) {
+    temp_caps = gst_pad_query_caps (GST_VIDEO_DECODER (thiz)->srcpad, NULL);
+    temp_caps = gst_caps_make_writable (temp_caps);
+
+    g_value_init (&v_format, G_TYPE_STRING);
+    g_value_init (&v_width, G_TYPE_INT);
+    g_value_init (&v_height, G_TYPE_INT);
+
+    g_value_set_string (&v_format, gst_video_format_to_string (format));
+    g_value_set_int (&v_width, width);
+    g_value_set_int (&v_height, height);
+
+    gst_caps_set_value (temp_caps, "format", &v_format);
+    gst_caps_set_value (temp_caps, "width", &v_width);
+    gst_caps_set_value (temp_caps, "height", &v_height);
+
+    if (gst_caps_is_empty (gst_pad_peer_query_caps (GST_VIDEO_DECODER
+                (thiz)->srcpad, temp_caps))) {
+      if (!gst_util_fraction_multiply (width, height,
+              GST_VIDEO_INFO_PAR_N (&thiz->input_state->info),
+              GST_VIDEO_INFO_PAR_D (&thiz->input_state->info),
+              &dar_n, &dar_d)) {
+        GST_ERROR_OBJECT (thiz, "Error to calculate the output scaled size");
+        gst_caps_unref (temp_caps);
+        return FALSE;
+      }
+
+      allowed_caps =
+          gst_pad_get_allowed_caps (GST_VIDEO_DECODER (thiz)->srcpad);
+      outs = gst_caps_get_structure (allowed_caps, 0);
+      out_format = gst_structure_get_string (outs, "format");
+      gst_structure_get_int (outs, "width", &out_width);
+      gst_structure_get_int (outs, "height", &out_height);
+
+      if (out_format) {
+        format = gst_video_format_from_string (out_format);
+        thiz->sfc = TRUE;
+      }
+
+      if (!out_width && !out_height) {
+        out_width = width;
+        out_height = height;
+      } else {
+        /* When user does not set out_width, fill it to fit DAR */
+        if (!out_width)
+          out_width = gst_util_uint64_scale (out_height, dar_n, dar_d);
+        /* When user does not set out_height, fill it to fit DAR */
+        if (!out_height)
+          out_height = gst_util_uint64_scale (out_width, dar_d, dar_n);
+
+        if (out_width > width || out_height > height)
+          goto sfc_error;
+        else if (out_width < width || out_height < height) {
+          width = out_width;
+          height = out_height;
+          thiz->sfc = TRUE;
+        }
+      }
+      gst_caps_unref (allowed_caps);
+    }
+    gst_caps_unref (temp_caps);
+  }
+#endif
 
   output_state =
       gst_video_decoder_set_output_state (GST_VIDEO_DECODER (thiz),
@@ -558,9 +742,13 @@ gst_msdkdec_set_src_caps (GstMsdkDec * thiz, gboolean need_allocation)
   /* Ensure output_state->caps and info have same width and height
    * Also, mandate 32 bit alignment */
   vinfo = &output_state->info;
-  gst_msdk_set_video_alignment (vinfo, alloc_w, alloc_h, &align);
+  if (width == out_width || height == out_height)
+    gst_msdk_set_video_alignment (vinfo, 0, 0, &align);
+  else
+    gst_msdk_set_video_alignment (vinfo, alloc_w, alloc_h, &align);
   gst_video_info_align (vinfo, &align);
   output_state->caps = gst_video_info_to_caps (vinfo);
+
   if (srcpad_can_dmabuf (thiz))
     gst_caps_set_features (output_state->caps, 0,
         gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
@@ -595,6 +783,12 @@ gst_msdkdec_set_src_caps (GstMsdkDec * thiz, gboolean need_allocation)
   gst_video_codec_state_unref (output_state);
 
   return TRUE;
+
+sfc_error:
+  GST_ERROR_OBJECT (thiz, "Decoder SFC cannot do up-scaling");
+  gst_caps_unref (allowed_caps);
+  gst_caps_unref (temp_caps);
+  return FALSE;
 }
 
 static void
@@ -649,6 +843,37 @@ finish_task (GstMsdkDec * thiz, MsdkDecTask * task)
   task->decode_only = FALSE;
 }
 
+static void
+gst_msdkdec_frame_corruption_report (GstMsdkDec * thiz, mfxU16 corruption)
+{
+  if (!thiz->report_error || !corruption)
+    return;
+
+  if (corruption & MFX_CORRUPTION_MINOR)
+    GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+        ("[Corruption] Minor corruption detected!"), (NULL));
+
+  if (corruption & MFX_CORRUPTION_MAJOR)
+    GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+        ("[Corruption] Major corruption detected!"), (NULL));
+
+  if (corruption & MFX_CORRUPTION_ABSENT_TOP_FIELD)
+    GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+        ("[Corruption] Absent top field!"), (NULL));
+
+  if (corruption & MFX_CORRUPTION_ABSENT_BOTTOM_FIELD)
+    GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+        ("[Corruption] Absent bottom field!"), (NULL));
+
+  if (corruption & MFX_CORRUPTION_REFERENCE_FRAME)
+    GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+        ("[Corruption] Corrupted reference frame!"), (NULL));
+
+  if (corruption & MFX_CORRUPTION_REFERENCE_LIST)
+    GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+        ("[Corruption] Corrupted reference list!"), (NULL));
+}
+
 static GstFlowReturn
 gst_msdkdec_finish_task (GstMsdkDec * thiz, MsdkDecTask * task)
 {
@@ -671,6 +896,8 @@ gst_msdkdec_finish_task (GstMsdkDec * thiz, MsdkDecTask * task)
 
   surface = task->surface;
   if (surface) {
+    gst_msdkdec_frame_corruption_report (thiz,
+        surface->surface->Data.Corrupted);
     GST_DEBUG_OBJECT (thiz, "Decoded MFX TimeStamp: %" G_GUINT64_FORMAT,
         (guint64) surface->surface->Data.TimeStamp);
     pts = surface->surface->Data.TimeStamp;
@@ -698,7 +925,12 @@ gst_msdkdec_finish_task (GstMsdkDec * thiz, MsdkDecTask * task)
         GST_MINI_OBJECT_FLAG_SET (surface->buf, GST_MINI_OBJECT_FLAG_LOCKABLE);
         frame->output_buffer = gst_buffer_ref (surface->buf);
       } else {
-        gst_video_frame_copy (&surface->copy, &surface->data);
+        if (!gst_video_frame_copy (&surface->copy, &surface->data)) {
+          GST_ERROR_OBJECT (thiz, "Failed to copy surface data");
+          gst_video_frame_unmap (&surface->copy);
+          gst_video_frame_unmap (&surface->data);
+          return GST_FLOW_ERROR;
+        }
         frame->output_buffer = gst_buffer_ref (surface->copy.buffer);
         unmap_frame (thiz, surface);
       }
@@ -715,6 +947,8 @@ gst_msdkdec_finish_task (GstMsdkDec * thiz, MsdkDecTask * task)
 
     if (decode_only)
       GST_VIDEO_CODEC_FRAME_SET_DECODE_ONLY (frame);
+
+    frame->pts = MFX_TO_GST_TIME (pts);
     flow = gst_video_decoder_finish_frame (decoder, frame);
     if (flow == GST_FLOW_ERROR)
       GST_ERROR_OBJECT (thiz, "Failed to finish frame");
@@ -786,8 +1020,8 @@ gst_msdkdec_start (GstVideoDecoder * decoder)
   GstMsdkDec *thiz = GST_MSDKDEC (decoder);
 
   if (!gst_msdkdec_context_prepare (thiz)) {
-    if (!gst_msdk_context_ensure_context (GST_ELEMENT_CAST (thiz),
-            thiz->hardware, GST_MSDK_JOB_DECODER))
+    if (!gst_msdk_ensure_new_context (GST_ELEMENT_CAST (thiz),
+            thiz->hardware, GST_MSDK_JOB_DECODER, &thiz->context))
       return FALSE;
     GST_INFO_OBJECT (thiz, "Creating new context %" GST_PTR_FORMAT,
         thiz->context);
@@ -960,6 +1194,7 @@ find_msdk_surface (GstMsdkDec * thiz, MsdkDecTask * task,
 {
   GList *l;
   task->surface = NULL;
+
   if (!out_surface)
     return TRUE;
   l = g_list_find_custom (thiz->locked_msdk_surfaces, out_surface,
@@ -972,6 +1207,67 @@ find_msdk_surface (GstMsdkDec * thiz, MsdkDecTask * task,
   thiz->locked_msdk_surfaces =
       g_list_delete_link (thiz->locked_msdk_surfaces, l);
   return TRUE;
+}
+
+static void
+gst_msdkdec_error_report (GstMsdkDec * thiz)
+{
+  if (!thiz->report_error)
+    return;
+
+#if (MFX_VERSION >= 1025)
+  else {
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_SPS)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error] SPS Error detected!"), (NULL));
+
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_PPS)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error] PPS Error detected!"), (NULL));
+
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_SLICEHEADER)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error] SliceHeader Error detected!"), (NULL));
+
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_FRAME_GAP)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error] Frame Gap Error detected!"), (NULL));
+
+#ifdef ONEVPL_EXPERIMENTAL
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_JPEG_APP0_MARKER)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error]  APP0 unknown marker detected!"), (NULL));
+
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_JPEG_APP14_MARKER)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error]  APP14 unknown marker detected!"), (NULL));
+
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_JPEG_DQT_MARKER)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error]  DQT unknown marker detected!"), (NULL));
+
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_JPEG_SOF0_MARKER)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error]  SOF0 unknown marker detected!"), (NULL));
+
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_JPEG_DHT_MARKER)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error]  DHT unknown marker detected!"), (NULL));
+
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_JPEG_DRI_MARKER)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error]  DRI unknown marker detected!"), (NULL));
+
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_JPEG_SOS_MARKER)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error]  SOS unknown marker detected!"), (NULL));
+
+    if (thiz->error_report.ErrorTypes & MFX_ERROR_JPEG_UNKNOWN_MARKER)
+      GST_ELEMENT_WARNING (thiz, STREAM, DECODE,
+          ("[Error]  Error unknown marker detected!"), (NULL));
+#endif
+  }
+#endif
 }
 
 static GstFlowReturn
@@ -1034,6 +1330,12 @@ gst_msdkdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
 
   memset (&bitstream, 0, sizeof (bitstream));
 
+  /* Add extended buffers */
+  if (thiz->num_bs_extra_params) {
+    bitstream.NumExtParam = thiz->num_bs_extra_params;
+    bitstream.ExtParam = thiz->bs_extra_params;
+  }
+
   if (gst_video_decoder_get_packetized (decoder)) {
     /* Packetized stream: we prefer to have a parser as a connected upstream
      * element to the decoder */
@@ -1077,8 +1379,15 @@ gst_msdkdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
      * and this information can't be retrieved from the negotiated caps.
      * So instead of introducing a codecparser dependency to parse the headers
      * inside msdk plugin, we simply use the mfx APIs to extract header information */
+#if (MFX_VERSION >= 1025)
+    if (thiz->report_error)
+      thiz->error_report.ErrorTypes = 0;
+#endif
+
     status = MFXVideoDECODE_DecodeHeader (session, &bitstream, &thiz->param);
     GST_DEBUG_OBJECT (decoder, "DecodeHeader => %d", status);
+    gst_msdkdec_error_report (thiz);
+
     if (status == MFX_ERR_MORE_DATA) {
       flow = GST_FLOW_OK;
       goto done;
@@ -1096,7 +1405,12 @@ gst_msdkdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
           gst_video_decoder_get_output_state (GST_VIDEO_DECODER (thiz));
       if (output_state) {
         if (output_state->allocation_caps) {
-          gst_video_info_from_caps (&alloc_info, output_state->allocation_caps);
+          if (!gst_video_info_from_caps (&alloc_info,
+                  output_state->allocation_caps)) {
+            GST_ERROR_OBJECT (thiz, "Failed to get video info from caps");
+            flow = GST_FLOW_ERROR;
+            goto error;
+          }
 
           /* Check whether we need complete reset for dynamic resolution change */
           if (thiz->param.mfx.FrameInfo.Width >
@@ -1163,6 +1477,10 @@ gst_msdkdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
         }
       }
     }
+#if (MFX_VERSION >= 1025)
+    if (thiz->report_error)
+      thiz->error_report.ErrorTypes = 0;
+#endif
 
     status =
         MFXVideoDECODE_DecodeFrameAsync (session, &bitstream, surface->surface,
@@ -1174,6 +1492,7 @@ gst_msdkdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
     }
 
     GST_DEBUG_OBJECT (decoder, "DecodeFrameAsync => %d", status);
+    gst_msdkdec_error_report (thiz);
 
     /* media-sdk requires complete reset since the surface is inadequate
      * for further decoding */
@@ -1183,8 +1502,14 @@ gst_msdkdec_handle_frame (GstVideoDecoder * decoder, GstVideoCodecFrame * frame)
        * suitable for the current frame. Call MFXVideoDECODE_DecodeHeader to get
        * the current frame size, then do memory re-allocation, otherwise
        * MFXVideoDECODE_DecodeFrameAsync will still fail on next call */
+#if (MFX_VERSION >= 1025)
+      if (thiz->report_error)
+        thiz->error_report.ErrorTypes = 0;
+#endif
       status = MFXVideoDECODE_DecodeHeader (session, &bitstream, &thiz->param);
       GST_DEBUG_OBJECT (decoder, "DecodeHeader => %d", status);
+      gst_msdkdec_error_report (thiz);
+
       if (status == MFX_ERR_MORE_DATA) {
         flow = GST_FLOW_OK;
         goto done;
@@ -1399,6 +1724,10 @@ gst_msdkdec_decide_allocation (GstVideoDecoder * decoder, GstQuery * query)
   GstStructure *pool_config = NULL;
   GstCaps *pool_caps /*, *negotiated_caps */ ;
   guint size, min_buffers, max_buffers;
+  GstAllocator *allocator = NULL;
+
+  if (!thiz->param.mfx.FrameInfo.Width || !thiz->param.mfx.FrameInfo.Height)
+    return FALSE;
 
   if (!GST_VIDEO_DECODER_CLASS (parent_class)->decide_allocation (decoder,
           query))
@@ -1427,7 +1756,8 @@ gst_msdkdec_decide_allocation (GstVideoDecoder * decoder, GstQuery * query)
   if (_gst_caps_has_feature (pool_caps, GST_CAPS_FEATURE_MEMORY_DMABUF)) {
     GST_INFO_OBJECT (decoder, "This MSDK decoder uses DMABuf memory");
     thiz->use_video_memory = thiz->use_dmabuf = TRUE;
-  }
+  } else if (thiz->sfc)
+    thiz->use_video_memory = TRUE;
 
   /* Initialize MSDK decoder before new bufferpool tries to alloc each buffer,
    * which requires information about frame allocation.
@@ -1455,15 +1785,26 @@ gst_msdkdec_decide_allocation (GstVideoDecoder * decoder, GstQuery * query)
     }
   }
 
-  if (gst_query_find_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL)
-      && gst_buffer_pool_has_option (pool,
-          GST_BUFFER_POOL_OPTION_VIDEO_ALIGNMENT)) {
+
+  if (gst_query_get_n_allocation_params (query) > 0) {
+    gst_query_parse_nth_allocation_param (query, 0, &allocator, NULL);
+    if (!(GST_IS_MSDK_VIDEO_ALLOCATOR (allocator) ||
+            GST_IS_MSDK_DMABUF_ALLOCATOR (allocator) ||
+            GST_IS_MSDK_SYSTEM_ALLOCATOR (allocator)))
+      thiz->ds_has_no_msdk_allocator = TRUE;
+  }
+
+  /* If downstream supports video meta and video alignment,
+   * or downstream doesn't have msdk_allocator, we can replace
+   * with our own msdk bufferpool and use it.
+   */
+  if ((gst_query_find_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL)
+          && gst_buffer_pool_has_option
+          (pool, GST_BUFFER_POOL_OPTION_VIDEO_ALIGNMENT))
+      || thiz->ds_has_no_msdk_allocator) {
     GstStructure *config;
     GstAllocator *allocator;
 
-    /* If downstream supports video meta and video alignment,
-     * we can replace with our own msdk bufferpool and use it
-     */
     /* Remove downstream's pool */
     gst_structure_free (pool_config);
     gst_object_unref (pool);
@@ -1490,7 +1831,10 @@ gst_msdkdec_decide_allocation (GstVideoDecoder * decoder, GstQuery * query)
         min_buffers, max_buffers);
     if (!gst_buffer_pool_set_config (pool, pool_config))
       goto error_set_config;
-    gst_video_info_from_caps (&thiz->non_msdk_pool_info, pool_caps);
+    if (!gst_video_info_from_caps (&thiz->non_msdk_pool_info, pool_caps)) {
+      GST_ERROR_OBJECT (thiz, "Failed to get video info from caps");
+      return FALSE;
+    }
 
     /* update width and height with actual negotiated values */
     output_state =
@@ -1558,6 +1902,10 @@ gst_msdkdec_drain (GstVideoDecoder * decoder)
       if (!surface)
         return GST_FLOW_ERROR;
     }
+#if (MFX_VERSION >= 1025)
+    if (thiz->report_error)
+      thiz->error_report.ErrorTypes = 0;
+#endif
 
     status =
         MFXVideoDECODE_DecodeFrameAsync (session, NULL, surface->surface,
@@ -1568,6 +1916,8 @@ gst_msdkdec_drain (GstVideoDecoder * decoder)
     }
 
     GST_DEBUG_OBJECT (decoder, "DecodeFrameAsync => %d", status);
+    gst_msdkdec_error_report (thiz);
+
     if (G_LIKELY (status == MFX_ERR_NONE)) {
       thiz->next_task = (thiz->next_task + 1) % thiz->tasks->len;
       surface = NULL;
@@ -1614,6 +1964,50 @@ static GstFlowReturn
 gst_msdkdec_finish (GstVideoDecoder * decoder)
 {
   return gst_msdkdec_drain (decoder);
+}
+
+static gboolean
+gst_msdkdec_query (GstVideoDecoder * decoder, GstQuery * query,
+    GstPadDirection dir)
+{
+  GstMsdkDec *thiz = GST_MSDKDEC (decoder);
+  gboolean ret = FALSE;
+
+  switch (GST_QUERY_TYPE (query)) {
+    case GST_QUERY_CONTEXT:{
+      GstMsdkContext *msdk_context = NULL;
+
+      gst_object_replace ((GstObject **) & msdk_context,
+          (GstObject *) thiz->context);
+      ret = gst_msdk_handle_context_query (GST_ELEMENT_CAST (decoder),
+          query, msdk_context);
+      gst_clear_object (&msdk_context);
+      break;
+    }
+    default:
+      if (dir == GST_PAD_SRC) {
+        ret =
+            GST_VIDEO_DECODER_CLASS (parent_class)->src_query (decoder, query);
+      } else {
+        ret =
+            GST_VIDEO_DECODER_CLASS (parent_class)->sink_query (decoder, query);
+      }
+      break;
+  }
+
+  return ret;
+}
+
+static gboolean
+gst_msdkdec_src_query (GstVideoDecoder * decoder, GstQuery * query)
+{
+  return gst_msdkdec_query (decoder, query, GST_PAD_SRC);
+}
+
+static gboolean
+gst_msdkdec_sink_query (GstVideoDecoder * decoder, GstQuery * query)
+{
+  return gst_msdkdec_query (decoder, query, GST_PAD_SINK);
 }
 
 static void
@@ -1770,10 +2164,13 @@ gst_msdkdec_class_init (GstMsdkDecClass * klass)
   decoder_class->parse = GST_DEBUG_FUNCPTR (gst_msdkdec_parse);
   decoder_class->decide_allocation =
       GST_DEBUG_FUNCPTR (gst_msdkdec_decide_allocation);
+  decoder_class->getcaps = GST_DEBUG_FUNCPTR (gst_msdkdec_getcaps);
   decoder_class->flush = GST_DEBUG_FUNCPTR (gst_msdkdec_flush);
   decoder_class->drain = GST_DEBUG_FUNCPTR (gst_msdkdec_drain);
   decoder_class->transform_meta =
       GST_DEBUG_FUNCPTR (gst_msdkdec_transform_meta);
+  decoder_class->src_query = GST_DEBUG_FUNCPTR (gst_msdkdec_src_query);
+  decoder_class->sink_query = GST_DEBUG_FUNCPTR (gst_msdkdec_sink_query);
 
   klass->post_configure = GST_DEBUG_FUNCPTR (gst_msdkdec_post_configure);
   klass->preinit_decoder = GST_DEBUG_FUNCPTR (gst_msdkdec_preinit_decoder);
@@ -1802,6 +2199,9 @@ gst_msdkdec_init (GstMsdkDec * thiz)
   thiz->do_renego = TRUE;
   thiz->do_realloc = TRUE;
   thiz->force_reset_on_res_change = TRUE;
+  thiz->report_error = FALSE;
+  thiz->sfc = FALSE;
+  thiz->ds_has_no_msdk_allocator = FALSE;
   thiz->adapter = gst_adapter_new ();
   thiz->input_state = NULL;
   thiz->pool = NULL;

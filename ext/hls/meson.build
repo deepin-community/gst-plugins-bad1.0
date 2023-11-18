@@ -1,6 +1,7 @@
 hls_sources = [
   'gsthlsdemux.c',
   'gsthlsdemux-util.c',
+  'gsthlselement.c',
   'gsthlsplugin.c',
   'gsthlssink.c',
   'gsthlssink2.c',
@@ -62,6 +63,5 @@ gsthls = library('gsthls',
   install : true,
   install_dir : plugins_install_dir,
 )
-pkgconfig.generate(gsthls, install_dir : plugins_pkgconfig_install_dir)
 plugins += [gsthls]
 hls_dep = declare_dependency(include_directories : include_directories('.'))

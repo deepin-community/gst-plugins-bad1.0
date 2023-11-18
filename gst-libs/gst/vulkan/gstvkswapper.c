@@ -753,10 +753,15 @@ _allocate_swapchain (GstVulkanSwapper * swapper, GstCaps * caps,
     swapchain_dims.width = width;
     swapchain_dims.height = height;
     priv->any_current_extent = TRUE;
+    GST_DEBUG_OBJECT (swapper, "using requested swapchain dimensions %ux%u "
+        "from window", width, height);
   } else {
     /* If the surface size is defined, the swap chain size must match */
     swapchain_dims = priv->surf_props.currentExtent;
     priv->any_current_extent = FALSE;
+    GST_DEBUG_OBJECT (swapper, "using current swapchain dimensions %ux%u",
+        priv->surf_props.currentExtent.width,
+        priv->surf_props.currentExtent.height);
   }
   priv->surface_location.w = swapchain_dims.width;
   priv->surface_location.h = swapchain_dims.height;
@@ -767,6 +772,12 @@ _allocate_swapchain (GstVulkanSwapper * swapper, GstCaps * caps,
    * always available. */
   present_mode = VK_PRESENT_MODE_FIFO_KHR;
   for (i = 0; i < priv->n_surf_present_modes; i++) {
+    GST_TRACE_OBJECT (swapper,
+        "surface %" GST_VULKAN_NON_DISPATCHABLE_HANDLE_FORMAT
+        " has present mode \'%s\' (0x%x)", priv->surface,
+        gst_vulkan_present_mode_to_string (priv->surf_present_modes[i]),
+        priv->surf_present_modes[i]);
+
     if (priv->surf_present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
       present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
       break;
@@ -776,6 +787,8 @@ _allocate_swapchain (GstVulkanSwapper * swapper, GstCaps * caps,
       present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
     }
   }
+  GST_DEBUG_OBJECT (swapper, "using present mode \'%s\'",
+      gst_vulkan_present_mode_to_string (present_mode));
 
   /* Determine the number of VkImage's to use in the swap chain (we desire to
    * own only 1 image at a time, besides the images being displayed and
@@ -1090,8 +1103,12 @@ _build_render_buffer_cmd (GstVulkanSwapper * swapper, guint32 swap_idx,
   g_assert (priv->surface_location.h ==
       gst_vulkan_image_memory_get_height (swap_img));
 
-  gst_video_sink_center_rect (src, priv->surface_location, &priv->display_rect,
-      priv->force_aspect_ratio);
+  if (priv->force_aspect_ratio) {
+    gst_video_sink_center_rect (src, priv->surface_location,
+        &priv->display_rect, priv->force_aspect_ratio);
+  } else {
+    priv->display_rect = priv->surface_location;
+  }
 
   GST_TRACE_OBJECT (swapper, "rendering into result rectangle %ux%u+%u,%u "
       "src %ux%u dst %ux%u", priv->display_rect.w, priv->display_rect.h,

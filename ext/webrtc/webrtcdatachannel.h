@@ -24,7 +24,9 @@
 #include <gst/webrtc/webrtc_fwd.h>
 #include <gst/webrtc/dtlstransport.h>
 #include <gst/webrtc/datachannel.h>
-#include "sctptransport.h"
+#include "webrtcsctptransport.h"
+
+#include "gst/webrtc/webrtc-priv.h"
 
 G_BEGIN_DECLS
 
@@ -43,14 +45,17 @@ struct _WebRTCDataChannel
 {
   GstWebRTCDataChannel              parent;
 
-  GstWebRTCSCTPTransport           *sctp_transport;
+  WebRTCSCTPTransport              *sctp_transport;
+  GstElement                       *src_bin;
   GstElement                       *appsrc;
+  GstElement                       *sink_bin;
   GstElement                       *appsink;
 
-  GstWebRTCBin                     *webrtcbin;
+  GWeakRef                          webrtcbin_weak;
   gboolean                          opened;
   gulong                            src_probe;
   GError                           *stored_error;
+  gboolean                          peer_closed;
 
   gpointer                          _padding[GST_PADDING];
 };
@@ -65,7 +70,13 @@ struct _WebRTCDataChannelClass
 void    webrtc_data_channel_start_negotiation   (WebRTCDataChannel       *channel);
 G_GNUC_INTERNAL
 void    webrtc_data_channel_link_to_sctp (WebRTCDataChannel                 *channel,
-                                          GstWebRTCSCTPTransport            *sctp_transport);
+                                          WebRTCSCTPTransport               *sctp_transport);
+
+G_GNUC_INTERNAL
+void    webrtc_data_channel_set_webrtcbin (WebRTCDataChannel                *channel,
+                                           GstWebRTCBin                     *webrtcbin);
+
+G_DECLARE_FINAL_TYPE (WebRTCErrorIgnoreBin, webrtc_error_ignore_bin, WEBRTC, ERROR_IGNORE_BIN, GstBin);
 
 G_END_DECLS
 

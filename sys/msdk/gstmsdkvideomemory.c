@@ -239,6 +239,7 @@ gst_video_meta_map_msdk_memory (GstVideoMeta * meta, guint plane,
 
   switch (meta->format) {
     case GST_VIDEO_FORMAT_BGRA:
+    case GST_VIDEO_FORMAT_BGRx:
       *data = mem->surface->Data.B + offset;
       break;
 
@@ -329,6 +330,14 @@ gst_msdk_video_memory_map_full (GstMemory * base_mem, GstMapInfo * info,
 #if (MFX_VERSION >= 1031)
     case MFX_FOURCC_Y416:
       return mem->surface->Data.U;
+#endif
+
+#if (MFX_VERSION >= 2004)
+    case MFX_FOURCC_RGBP:
+      return mem->surface->Data.R;
+
+    case MFX_FOURCC_BGRP:
+      return mem->surface->Data.B;
 #endif
 
     default:
@@ -499,18 +508,22 @@ gst_msdk_dmabuf_memory_new_with_surface (GstAllocator * allocator,
   g_return_val_if_fail (GST_IS_MSDK_DMABUF_ALLOCATOR (allocator), NULL);
 
   mem_id = surface->Data.MemId;
-  fd = mem_id->info.handle;
-  size = mem_id->info.mem_size;
 
-  if (fd < 0 || (fd = dup (fd)) < 0) {
+  g_assert (mem_id->desc.num_objects == 1);
+
+  fd = mem_id->desc.objects[0].fd;
+  size = mem_id->desc.objects[0].size;
+
+  if (fd < 0) {
     GST_ERROR ("Failed to get dmabuf handle");
     return NULL;
   }
 
-  mem = gst_dmabuf_allocator_alloc (allocator, fd, size);
+  mem = gst_fd_allocator_alloc (allocator, fd, size,
+      GST_FD_MEMORY_FLAG_DONT_CLOSE);
+
   if (!mem) {
     GST_ERROR ("failed ! dmabuf fd: %d", fd);
-    close (fd);
     return NULL;
   }
 

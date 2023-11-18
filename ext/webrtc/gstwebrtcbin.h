@@ -22,8 +22,8 @@
 
 #include <gst/sdp/sdp.h>
 #include "fwd.h"
-#include "gstwebrtcice.h"
 #include "transportstream.h"
+#include "webrtcsctptransport.h"
 
 G_BEGIN_DECLS
 
@@ -38,22 +38,31 @@ GType gst_webrtc_bin_pad_get_type(void);
 typedef struct _GstWebRTCBinPad GstWebRTCBinPad;
 typedef struct _GstWebRTCBinPadClass GstWebRTCBinPadClass;
 
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (GstWebRTCBinPad, gst_object_unref);
+
 struct _GstWebRTCBinPad
 {
   GstGhostPad           parent;
-
-  guint                 mlineindex;
 
   GstWebRTCRTPTransceiver *trans;
   gulong                block_id;
 
   GstCaps              *received_caps;
+  char                 *msid;
 };
 
 struct _GstWebRTCBinPadClass
 {
   GstGhostPadClass      parent_class;
 };
+
+G_DECLARE_FINAL_TYPE (GstWebRTCBinSinkPad, gst_webrtc_bin_sink_pad, GST,
+    WEBRTC_BIN_SINK_PAD, GstWebRTCBinPad);
+#define GST_TYPE_WEBRTC_BIN_SINK_PAD (gst_webrtc_bin_sink_pad_get_type())
+
+G_DECLARE_FINAL_TYPE (GstWebRTCBinSrcPad, gst_webrtc_bin_src_pad, GST,
+    WEBRTC_BIN_SRC_PAD, GstWebRTCBinPad);
+#define GST_TYPE_WEBRTC_BIN_SRC_PAD (gst_webrtc_bin_src_pad_get_type())
 
 GType gst_webrtc_bin_get_type(void);
 #define GST_TYPE_WEBRTC_BIN            (gst_webrtc_bin_get_type())
@@ -94,19 +103,22 @@ struct _GstWebRTCBinClass
 struct _GstWebRTCBinPrivate
 {
   guint max_sink_pad_serial;
+  guint src_pad_counter;
 
   gboolean bundle;
   GPtrArray *transceivers;
-  GArray *session_mid_map;
   GPtrArray *transports;
   GPtrArray *data_channels;
   /* list of data channels we've received a sctp stream for but no data
    * channel protocol for */
   GPtrArray *pending_data_channels;
+  /* dc_lock protects data_channels and pending_data_channels */
+  /* lock ordering is pc_lock first, then dc_lock */
+  GMutex dc_lock;
 
   guint jb_latency;
 
-  GstWebRTCSCTPTransport *sctp_transport;
+  WebRTCSCTPTransport *sctp_transport;
   TransportStream *data_channel_transport;
 
   GstWebRTCICE *ice;
@@ -140,10 +152,10 @@ struct _GstWebRTCBinPrivate
   GstWebRTCSessionDescription *last_generated_offer;
   GstWebRTCSessionDescription *last_generated_answer;
 
-  GstStructure *stats;
+  gboolean tos_attached;
 };
 
-typedef void (*GstWebRTCBinFunc) (GstWebRTCBin * webrtc, gpointer data);
+typedef GstStructure *(*GstWebRTCBinFunc) (GstWebRTCBin * webrtc, gpointer data);
 
 typedef struct
 {

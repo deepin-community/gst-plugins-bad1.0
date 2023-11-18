@@ -81,6 +81,8 @@ static void gst_rtp_sink_uri_handler_init (gpointer g_iface,
 G_DEFINE_TYPE_WITH_CODE (GstRtpSink, gst_rtp_sink, GST_TYPE_BIN,
     G_IMPLEMENT_INTERFACE (GST_TYPE_URI_HANDLER, gst_rtp_sink_uri_handler_init);
     GST_DEBUG_CATEGORY_INIT (gst_rtp_sink_debug, "rtpsink", 0, "RTP Sink"));
+GST_ELEMENT_REGISTER_DEFINE (rtpsink, "rtpsink", GST_RANK_PRIMARY + 1,
+    GST_TYPE_RTP_SINK);
 
 #define GST_RTP_SINK_GET_LOCK(obj) (&((GstRtpSink*)(obj))->lock)
 #define GST_RTP_SINK_LOCK(obj) (g_mutex_lock (GST_RTP_SINK_GET_LOCK(obj)))
@@ -251,7 +253,7 @@ gst_rtp_sink_request_new_pad (GstElement * element,
     return NULL;
 
   GST_RTP_SINK_LOCK (self);
-  rpad = gst_element_get_request_pad (self->rtpbin, "send_rtp_sink_%u");
+  rpad = gst_element_request_pad_simple (self->rtpbin, "send_rtp_sink_%u");
   if (rpad) {
     pad = gst_ghost_pad_new (GST_PAD_NAME (rpad), rpad);
     gst_element_add_pad (element, pad);
@@ -442,9 +444,30 @@ gst_rtp_sink_rtpbin_pad_removed_cb (GstElement * element, GstPad * pad,
 }
 
 static gboolean
-gst_rtp_sink_start (GstRtpSink * self)
+gst_rtp_sink_reuse_socket (GstRtpSink * self)
 {
   GSocket *socket = NULL;
+
+  gst_element_set_locked_state (self->rtcp_src, FALSE);
+  gst_element_sync_state_with_parent (self->rtcp_src);
+
+  /* share the socket created by the sink */
+  g_object_get (self->rtcp_src, "used-socket", &socket, NULL);
+  g_object_set (self->rtcp_sink, "socket", socket, "auto-multicast", FALSE,
+      "close-socket", FALSE, NULL);
+  g_object_unref (socket);
+
+  g_object_set (self->rtcp_sink, "sync", FALSE, "async", FALSE, NULL);
+  gst_element_set_locked_state (self->rtcp_sink, FALSE);
+  gst_element_sync_state_with_parent (self->rtcp_sink);
+
+  return TRUE;
+
+}
+
+static gboolean
+gst_rtp_sink_start (GstRtpSink * self)
+{
   GInetAddress *iaddr = NULL;
   gchar *remote_addr = NULL;
   GError *error = NULL;
@@ -495,18 +518,6 @@ gst_rtp_sink_start (GstRtpSink * self)
   g_free (remote_addr);
   g_object_unref (iaddr);
 
-  gst_element_set_locked_state (self->rtcp_src, FALSE);
-  gst_element_sync_state_with_parent (self->rtcp_src);
-
-  /* share the socket created by the sink */
-  g_object_get (self->rtcp_src, "used-socket", &socket, NULL);
-  g_object_set (self->rtcp_sink, "socket", socket, "auto-multicast", FALSE,
-      "close-socket", FALSE, NULL);
-  g_object_unref (socket);
-
-  gst_element_set_locked_state (self->rtcp_sink, FALSE);
-  gst_element_sync_state_with_parent (self->rtcp_sink);
-
   return TRUE;
 
 dns_resolve_failed:
@@ -529,6 +540,10 @@ gst_rtp_sink_change_state (GstElement * element, GstStateChange transition)
 
   switch (transition) {
     case GST_STATE_CHANGE_NULL_TO_READY:
+      /* Set the properties to the child elements to avoid binding to
+       * a NULL interface on a network without a default gateway */
+      if (gst_rtp_sink_start (self) == FALSE)
+        return GST_STATE_CHANGE_FAILURE;
       break;
     case GST_STATE_CHANGE_READY_TO_PAUSED:
       break;
@@ -542,7 +557,8 @@ gst_rtp_sink_change_state (GstElement * element, GstStateChange transition)
 
   switch (transition) {
     case GST_STATE_CHANGE_NULL_TO_READY:
-      if (gst_rtp_sink_start (self) == FALSE)
+      /* re-use the sockets after they have been initialised */
+      if (gst_rtp_sink_reuse_socket (self) == FALSE)
         return GST_STATE_CHANGE_FAILURE;
       break;
     case GST_STATE_CHANGE_READY_TO_PAUSED:

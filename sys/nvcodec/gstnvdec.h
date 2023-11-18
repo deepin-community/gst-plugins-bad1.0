@@ -33,10 +33,12 @@
 #include <gst/gl/gstglfuncs.h>
 #endif
 
+#include "nvcuvid.h"
 #include <gst/video/video.h>
-#include "gstcuvidloader.h"
-#include "gstcudaloader.h"
-#include "gstcudacontext.h"
+#include <gst/codecparsers/gsth264parser.h>
+#include <gst/codecparsers/gsth265parser.h>
+#include <gst/cuda/gstcudaloader.h>
+#include <gst/cuda/gstcudacontext.h>
 
 G_BEGIN_DECLS
 
@@ -61,7 +63,8 @@ typedef enum
 {
   GST_NVDEC_MEM_TYPE_SYSTEM = 0,
   GST_NVDEC_MEM_TYPE_GL,
-  /* FIXME: add support CUDA, D3D11 memory */
+  GST_NVDEC_MEM_TYPE_CUDA,
+  /* FIXME: add support D3D11 memory */
 } GstNvDecMemType;
 
 struct _GstNvDec
@@ -73,6 +76,10 @@ struct _GstNvDec
   GstGLContext *gl_context;
   GstGLContext *other_gl_context;
 #endif
+
+  guint num_decode_surface;
+  gint max_display_delay;
+  gboolean is_live;
 
   CUvideoparser parser;
   CUvideodecoder decoder;
@@ -90,6 +97,14 @@ struct _GstNvDec
 
   GstBuffer *codec_data;
   gboolean recv_complete_picture;
+
+  GstH264NalParser *h264_parser;
+  GstH265Parser *h265_parser;
+  GstBuffer *vps_nals[GST_H265_MAX_VPS_COUNT];
+  GstBuffer *sps_nals[GST_H264_MAX_SPS_COUNT];
+  GstBuffer *pps_nals[GST_H264_MAX_PPS_COUNT];
+
+  gboolean need_codec_data;
 };
 
 struct _GstNvDecClass

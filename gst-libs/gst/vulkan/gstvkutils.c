@@ -447,8 +447,6 @@ find_compatible_view (GstVulkanImageView * view, VkImageViewCreateInfo * info)
       info->subresourceRange.baseMipLevel
       && view->create_info.subresourceRange.levelCount ==
       info->subresourceRange.levelCount
-      && view->create_info.subresourceRange.levelCount ==
-      info->subresourceRange.levelCount
       && view->create_info.subresourceRange.baseArrayLayer ==
       info->subresourceRange.baseArrayLayer
       && view->create_info.subresourceRange.layerCount ==
@@ -491,7 +489,7 @@ gst_vulkan_get_or_create_image_view (GstVulkanImageMemory * image)
  * @device: a #GstVulkanDevice
  * @code: the SPIR-V shader byte code
  * @size: length of @code.  Must be a multiple of 4
- * @error: a #GError to fill on failure
+ * @error: (optional): a #GError to fill on failure
  *
  * Returns: (transfer full): a #GstVulkanHandle for @image matching the
  *                           original layout and format of @image or %NULL
@@ -499,8 +497,8 @@ gst_vulkan_get_or_create_image_view (GstVulkanImageMemory * image)
  * Since: 1.18
  */
 GstVulkanHandle *
-gst_vulkan_create_shader (GstVulkanDevice * device, gchar * code, gsize size,
-    GError ** error)
+gst_vulkan_create_shader (GstVulkanDevice * device, const gchar * code,
+    gsize size, GError ** error)
 {
   VkShaderModule shader;
   VkResult res;
@@ -511,7 +509,7 @@ gst_vulkan_create_shader (GstVulkanDevice * device, gchar * code, gsize size,
       .pNext = NULL,
       .flags = 0,
       .codeSize = size,
-      .pCode = (guint32 *) code
+      .pCode = (const guint32 *) code
   };
   /* *INDENT-ON* */
   guint32 first_word;
@@ -525,7 +523,7 @@ gst_vulkan_create_shader (GstVulkanDevice * device, gchar * code, gsize size,
       || first_word == SPIRV_MAGIC_NUMBER_OE, VK_NULL_HANDLE);
   if (first_word == SPIRV_MAGIC_NUMBER_OE) {
     /* endianness swap... */
-    guint32 *old_code = (guint32 *) code;
+    const guint32 *old_code = (const guint32 *) code;
     gsize i;
 
     GST_DEBUG ("performaing endianness conversion on spirv shader of size %"

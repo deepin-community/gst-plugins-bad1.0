@@ -123,6 +123,8 @@ GST_DEBUG_CATEGORY (uvc_h264_src_debug);
 
 #define gst_uvc_h264_src_parent_class parent_class
 G_DEFINE_TYPE (GstUvcH264Src, gst_uvc_h264_src, GST_TYPE_BASE_CAMERA_SRC);
+GST_ELEMENT_REGISTER_DEFINE (uvch264src, "uvch264src", GST_RANK_NONE,
+    GST_TYPE_UVC_H264_SRC);
 
 #define GST_UVC_H264_SRC_VF_CAPS_STR \
   GST_VIDEO_CAPS_MAKE (GST_VIDEO_FORMATS_ALL) ";" \
@@ -2814,8 +2816,8 @@ gst_uvc_h264_src_construct_pipeline (GstBaseCameraSrc * bcamsrc)
       }
       if (!gst_element_link (self->v4l2_src, tee))
         goto error_remove_all;
-      vf_pad = gst_element_get_request_pad (tee, "src_%u");
-      vid_pad = gst_element_get_request_pad (tee, "src_%u");
+      vf_pad = gst_element_request_pad_simple (tee, "src_%u");
+      vid_pad = gst_element_request_pad_simple (tee, "src_%u");
     }
       break;
   }

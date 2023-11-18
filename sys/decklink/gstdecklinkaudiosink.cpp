@@ -52,6 +52,8 @@ GST_DEBUG_CATEGORY_STATIC (gst_decklink_audio_sink_debug);
 // Microseconds for audiobasesink compatibility...
 #define DEFAULT_BUFFER_TIME (50 * GST_MSECOND / 1000)
 
+#define DEFAULT_PERSISTENT_ID (-1)
+
 enum
 {
   PROP_0,
@@ -60,6 +62,7 @@ enum
   PROP_ALIGNMENT_THRESHOLD,
   PROP_DISCONT_WAIT,
   PROP_BUFFER_TIME,
+  PROP_PERSISTENT_ID
 };
 
 static void gst_decklink_audio_sink_set_property (GObject * object,
@@ -101,6 +104,8 @@ static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
 #define parent_class gst_decklink_audio_sink_parent_class
 G_DEFINE_TYPE (GstDecklinkAudioSink, gst_decklink_audio_sink,
     GST_TYPE_BASE_SINK);
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (decklinkaudiosink, "decklinkaudiosink", GST_RANK_NONE,
+    GST_TYPE_DECKLINK_AUDIO_SINK, decklink_element_init (plugin));
 
 static void
 gst_decklink_audio_sink_class_init (GstDecklinkAudioSinkClass * klass)
@@ -136,6 +141,23 @@ gst_decklink_audio_sink_class_init (GstDecklinkAudioSinkClass * klass)
   g_object_class_install_property (gobject_class, PROP_DEVICE_NUMBER,
       g_param_spec_int ("device-number", "Device number",
           "Output device instance to use", 0, G_MAXINT, DEFAULT_DEVICE_NUMBER,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+              G_PARAM_CONSTRUCT)));
+
+    /**
+   * GstDecklinkAudioSink:persistent-id
+   *
+   * Decklink device to use. Higher priority than "device-number".
+   * BMDDeckLinkPersistentID is a device speciﬁc, 32-bit unique identiﬁer.
+   * It is stable even when the device is plugged in a diﬀerent connector,
+   * across reboots, and when plugged into diﬀerent computers.
+   *
+   * Since: 1.22
+   */
+  g_object_class_install_property (gobject_class, PROP_PERSISTENT_ID,
+      g_param_spec_int64 ("persistent-id", "Persistent id",
+          "Output device instance to use. Higher priority than \"device-number\".",
+          DEFAULT_PERSISTENT_ID, G_MAXINT64, DEFAULT_PERSISTENT_ID,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
               G_PARAM_CONSTRUCT)));
 
@@ -186,6 +208,8 @@ gst_decklink_audio_sink_init (GstDecklinkAudioSink * self)
       DEFAULT_DISCONT_WAIT);
   self->buffer_time = DEFAULT_BUFFER_TIME * 1000;
 
+  self->persistent_id = DEFAULT_PERSISTENT_ID;
+
   gst_base_sink_set_max_lateness (GST_BASE_SINK_CAST (self), 20 * GST_MSECOND);
 }
 
@@ -215,6 +239,9 @@ gst_decklink_audio_sink_set_property (GObject * object, guint property_id,
       GST_OBJECT_LOCK (self);
       self->buffer_time = g_value_get_uint64 (value) * 1000;
       GST_OBJECT_UNLOCK (self);
+      break;
+    case PROP_PERSISTENT_ID:
+      self->persistent_id = g_value_get_int64 (value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
@@ -254,6 +281,9 @@ gst_decklink_audio_sink_get_property (GObject * object, guint property_id,
       GST_OBJECT_LOCK (self);
       g_value_set_uint64 (value, self->buffer_time / 1000);
       GST_OBJECT_UNLOCK (self);
+      break;
+    case PROP_PERSISTENT_ID:
+      g_value_set_int64 (value, self->persistent_id);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
@@ -302,9 +332,11 @@ gst_decklink_audio_sink_set_caps (GstBaseSink * bsink, GstCaps * caps)
     sample_depth = bmdAudioSampleType32bitInteger;
   }
 
+  g_mutex_lock (&self->output->lock);
   ret = self->output->output->EnableAudioOutput (bmdAudioSampleRate48kHz,
       sample_depth, info.channels, bmdAudioOutputStreamContinuous);
   if (ret != S_OK) {
+    g_mutex_unlock (&self->output->lock);
     GST_WARNING_OBJECT (self, "Failed to enable audio output 0x%08lx",
         (unsigned long) ret);
     return FALSE;
@@ -312,6 +344,10 @@ gst_decklink_audio_sink_set_caps (GstBaseSink * bsink, GstCaps * caps)
 
   self->output->audio_enabled = TRUE;
   self->info = info;
+
+  if (self->output->start_scheduled_playback && self->output->videosink)
+    self->output->start_scheduled_playback (self->output->videosink);
+  g_mutex_unlock (&self->output->lock);
 
   // Create a new resampler as needed
   if (self->resampler)
@@ -684,7 +720,8 @@ gst_decklink_audio_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
         GST_TIME_ARGS (buffered_time), buffered_samples);
 
     {
-      GstClockTimeDiff buffered_ahead_of_clock_ahead = GST_CLOCK_DIFF (clock_ahead, buffered_time);
+      GstClockTimeDiff buffered_ahead_of_clock_ahead =
+          GST_CLOCK_DIFF (clock_ahead, buffered_time);
 
       GST_DEBUG_OBJECT (self, "driver is %" GST_STIME_FORMAT " ahead of the "
           "expected clock", GST_STIME_ARGS (buffered_ahead_of_clock_ahead));
@@ -693,9 +730,11 @@ gst_decklink_audio_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
        * own synchronisation. It seems to count samples instead. */
       /* FIXME: do we need to split buffers? */
       if (buffered_ahead_of_clock_ahead > 0 &&
-            buffered_ahead_of_clock_ahead > gst_base_sink_get_max_lateness (bsink)) {
-        GST_DEBUG_OBJECT (self, "Dropping buffer that is %" GST_STIME_FORMAT
-            " too late", GST_STIME_ARGS (buffered_ahead_of_clock_ahead));
+          buffered_ahead_of_clock_ahead >
+          gst_base_sink_get_max_lateness (bsink)) {
+        GST_DEBUG_OBJECT (self,
+            "Dropping buffer that is %" GST_STIME_FORMAT " too late",
+            GST_STIME_ARGS (buffered_ahead_of_clock_ahead));
         if (self->resampler)
           gst_audio_resampler_reset (self->resampler);
         flow_ret = GST_FLOW_OK;
@@ -710,7 +749,8 @@ gst_decklink_audio_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
 
       GST_DEBUG_OBJECT (self,
           "Buffered enough, wait for preroll or the clock or flushing. "
-          "Configured buffer time: %" GST_TIME_FORMAT, GST_TIME_ARGS (self->buffer_time));
+          "Configured buffer time: %" GST_TIME_FORMAT,
+          GST_TIME_ARGS (self->buffer_time));
 
       if (wait_time < self->buffer_time)
         wait_time = 0;
@@ -793,7 +833,7 @@ gst_decklink_audio_sink_open (GstBaseSink * bsink)
   GST_DEBUG_OBJECT (self, "Starting");
 
   self->output =
-      gst_decklink_acquire_nth_output (self->device_number,
+      gst_decklink_acquire_nth_output (self->device_number, self->persistent_id,
       GST_ELEMENT_CAST (self), TRUE);
   if (!self->output) {
     GST_ERROR_OBJECT (self, "Failed to acquire output");
@@ -821,7 +861,7 @@ gst_decklink_audio_sink_close (GstBaseSink * bsink)
     g_mutex_unlock (&self->output->lock);
 
     self->output->output->DisableAudioOutput ();
-    gst_decklink_release_nth_output (self->device_number,
+    gst_decklink_release_nth_output (self->device_number, self->persistent_id,
         GST_ELEMENT_CAST (self), TRUE);
     self->output = NULL;
   }

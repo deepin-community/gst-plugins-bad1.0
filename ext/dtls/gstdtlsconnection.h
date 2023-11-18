@@ -85,13 +85,13 @@ GType gst_dtls_connection_state_get_type (void);
  * Once the DTLS handshake is completed, on-encoder-key and on-decoder-key will be signalled.
  */
 struct _GstDtlsConnection {
-    GObject parent_instance;
+    GstObject parent_instance;
 
     GstDtlsConnectionPrivate *priv;
 };
 
 struct _GstDtlsConnectionClass {
-    GObjectClass parent_class;
+    GstObjectClass parent_class;
 };
 
 GType gst_dtls_connection_get_type(void) G_GNUC_CONST;
@@ -119,6 +119,11 @@ typedef gboolean (*GstDtlsConnectionSendCallback) (GstDtlsConnection * connectio
 void gst_dtls_connection_set_send_callback(GstDtlsConnection *, GstDtlsConnectionSendCallback, gpointer, GDestroyNotify);
 
 /*
+ * Sets the GstFlowReturn that be returned from gst_dtls_connection_send() if callback returns FALSE
+ */
+void gst_dtls_connection_set_flow_return(GstDtlsConnection *, GstFlowReturn);
+
+/*
  * Processes data that has been received, the transformation is done in-place.
  *
  * Returns:
@@ -142,6 +147,7 @@ GstFlowReturn gst_dtls_connection_process(GstDtlsConnection *, gpointer ptr, gsi
  *     we received an EOS before.
  *   - GST_FLOW_ERROR + err if an error happened
  *   - GST_FLOW_OK + written >= 0 if processing was successful
+ *   - Any GstFlowReturn set with gst_dtls_connection_set_flow_return()
  */
 GstFlowReturn gst_dtls_connection_send(GstDtlsConnection *, gconstpointer ptr, gsize len, gsize *written, GError **err);
 

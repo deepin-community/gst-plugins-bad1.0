@@ -43,6 +43,7 @@
 
 #include <string.h>
 #include <gst/base/gsttypefindhelper.h>
+#include "gsthlselements.h"
 #include "gsthlsdemux.h"
 
 static GstStaticPadTemplate srctemplate = GST_STATIC_PAD_TEMPLATE ("src_%u",
@@ -119,6 +120,8 @@ static void gst_hls_demux_set_current_variant (GstHLSDemux * hlsdemux,
 
 #define gst_hls_demux_parent_class parent_class
 G_DEFINE_TYPE (GstHLSDemux, gst_hls_demux, GST_TYPE_ADAPTIVE_DEMUX);
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (hlsdemux, "hlsdemux", GST_RANK_PRIMARY,
+    GST_TYPE_HLS_DEMUX, hls_element_init (plugin));
 
 static void
 gst_hls_demux_finalize (GObject * obj)
@@ -240,6 +243,10 @@ static guint64
 gst_hls_demux_get_bitrate (GstHLSDemux * hlsdemux)
 {
   GstAdaptiveDemux *demux = GST_ADAPTIVE_DEMUX_CAST (hlsdemux);
+
+  /* FIXME !!!
+   *
+   * No, there isn't a single output :D */
 
   /* Valid because hlsdemux only has a single output */
   if (demux->streams) {
@@ -494,6 +501,10 @@ create_stream_for_playlist (GstAdaptiveDemux * demux, GstM3U8 * playlist,
     return;
   }
 
+  GST_DEBUG_OBJECT (demux,
+      "is_primary_playlist:%d selected:%d playlist name '%s'",
+      is_primary_playlist, selected, playlist->name);
+
   stream = gst_adaptive_demux_stream_new (demux,
       gst_hls_demux_create_pad (hlsdemux));
 
@@ -508,6 +519,79 @@ create_stream_for_playlist (GstAdaptiveDemux * demux, GstM3U8 * playlist,
   hlsdemux_stream->reset_pts = TRUE;
 }
 
+static GstHLSDemuxStream *
+find_adaptive_stream_for_playlist (GstAdaptiveDemux * demux, GstM3U8 * playlist)
+{
+  GList *tmp;
+
+  GST_DEBUG_OBJECT (demux, "Looking for existing stream for '%s' %s",
+      playlist->name, playlist->uri);
+
+  for (tmp = demux->streams; tmp; tmp = tmp->next) {
+    GstHLSDemuxStream *hlsstream = (GstHLSDemuxStream *) tmp->data;
+    if (hlsstream->playlist == playlist)
+      return hlsstream;
+  }
+
+  return NULL;
+}
+
+/* Returns TRUE if the previous and current (to switch to) variant are compatible.
+ *
+ * That is:
+ * * They have the same number of streams
+ * * The streams are of the same type
+ */
+static gboolean
+new_variant_is_compatible (GstAdaptiveDemux * demux)
+{
+  GstHLSDemux *hlsdemux = GST_HLS_DEMUX_CAST (demux);
+  GstHLSVariantStream *previous = hlsdemux->previous_variant;
+  GstHLSVariantStream *current = hlsdemux->current_variant;
+  gint i;
+
+  GST_DEBUG_OBJECT (demux,
+      "Checking whether new variant is compatible with previous");
+
+  for (i = 0; i < GST_HLS_N_MEDIA_TYPES; ++i) {
+    GList *mlist = current->media[i];
+    if (g_list_length (previous->media[i]) != g_list_length (current->media[i])) {
+      GST_LOG_OBJECT (demux, "Number of medias for type %s don't match",
+          gst_hls_media_type_get_name (i));
+      return FALSE;
+    }
+
+    /* Check if all new media were present in previous (if not there are new ones) */
+    while (mlist != NULL) {
+      GstHLSMedia *media = mlist->data;
+      if (!gst_hls_variant_find_matching_media (previous, media)) {
+        GST_LOG_OBJECT (demux,
+            "New stream of type %s present. Variant not compatible",
+            gst_hls_media_type_get_name (i));
+        return FALSE;
+      }
+      mlist = mlist->next;
+    }
+
+    /* Check if all old media are present in current (if not some have gone) */
+    mlist = previous->media[i];
+    while (mlist != NULL) {
+      GstHLSMedia *media = mlist->data;
+      if (!gst_hls_variant_find_matching_media (current, media)) {
+        GST_LOG_OBJECT (demux,
+            "Old stream of type %s gone. Variant not compatible",
+            gst_hls_media_type_get_name (i));
+        return FALSE;
+      }
+      mlist = mlist->next;
+    }
+  }
+
+  GST_DEBUG_OBJECT (demux, "Variants are compatible");
+
+  return TRUE;
+}
+
 static gboolean
 gst_hls_demux_setup_streams (GstAdaptiveDemux * demux)
 {
@@ -520,6 +604,59 @@ gst_hls_demux_setup_streams (GstAdaptiveDemux * demux)
     return FALSE;
   }
 
+  GST_DEBUG_OBJECT (demux, "Setting up streams");
+  if (hlsdemux->streams_aware && hlsdemux->previous_variant &&
+      new_variant_is_compatible (demux)) {
+    GstHLSDemuxStream *hlsstream;
+    GST_DEBUG_OBJECT (demux, "Have a previous variant, Re-using streams");
+
+    /* Carry over the main playlist */
+    hlsstream =
+        find_adaptive_stream_for_playlist (demux,
+        hlsdemux->previous_variant->m3u8);
+    if (G_UNLIKELY (hlsstream == NULL))
+      goto no_match_error;
+
+    gst_m3u8_unref (hlsstream->playlist);
+    hlsstream->playlist = gst_m3u8_ref (playlist->m3u8);
+
+    for (i = 0; i < GST_HLS_N_MEDIA_TYPES; ++i) {
+      GList *mlist = playlist->media[i];
+      while (mlist != NULL) {
+        GstHLSMedia *media = mlist->data;
+        GstHLSMedia *old_media =
+            gst_hls_variant_find_matching_media (hlsdemux->previous_variant,
+            media);
+
+        if (G_UNLIKELY (old_media == NULL)) {
+          GST_FIXME_OBJECT (demux, "Handle new stream !");
+          goto no_match_error;
+        }
+        if (!g_strcmp0 (media->uri, old_media->uri))
+          GST_DEBUG_OBJECT (demux, "Identical stream !");
+        if (media->mtype == GST_HLS_MEDIA_TYPE_AUDIO ||
+            media->mtype == GST_HLS_MEDIA_TYPE_VIDEO) {
+          hlsstream =
+              find_adaptive_stream_for_playlist (demux, old_media->playlist);
+          if (!hlsstream)
+            goto no_match_error;
+
+          GST_DEBUG_OBJECT (demux, "Found matching stream");
+          gst_m3u8_unref (hlsstream->playlist);
+          hlsstream->playlist = gst_m3u8_ref (media->playlist);
+        } else {
+          GST_DEBUG_OBJECT (demux, "Skipping stream of type %s",
+              gst_hls_media_type_get_name (media->mtype));
+        }
+
+        mlist = mlist->next;
+      }
+    }
+
+    return TRUE;
+  }
+
+  /* FIXME : This seems wrong and assumes there's only one stream :( */
   gst_hls_demux_clear_all_pending_data (hlsdemux);
 
   /* 1 output for the main playlist */
@@ -533,22 +670,29 @@ gst_hls_demux_setup_streams (GstAdaptiveDemux * demux)
       if (media->uri == NULL /* || media->mtype != GST_HLS_MEDIA_TYPE_AUDIO */ ) {
         /* No uri means this is a placeholder for a stream
          * contained in another mux */
-        GST_LOG_OBJECT (demux, "Skipping stream %s type %d with no URI",
-            media->name, media->mtype);
+        GST_LOG_OBJECT (demux, "Skipping stream %s type %s with no URI",
+            media->name, gst_hls_media_type_get_name (media->mtype));
         mlist = mlist->next;
         continue;
       }
-      GST_LOG_OBJECT (demux, "media of type %d - %s, uri: %s", i,
-          media->name, media->uri);
+      GST_LOG_OBJECT (demux, "media of type %s - %s, uri: %s",
+          gst_hls_media_type_get_name (i), media->name, media->uri);
       create_stream_for_playlist (demux, media->playlist, FALSE,
-          (media->mtype == GST_HLS_MEDIA_TYPE_VIDEO ||
-              media->mtype == GST_HLS_MEDIA_TYPE_AUDIO));
+          (media->mtype == GST_HLS_MEDIA_TYPE_VIDEO
+              || media->mtype == GST_HLS_MEDIA_TYPE_AUDIO));
 
       mlist = mlist->next;
     }
   }
 
   return TRUE;
+
+no_match_error:
+  {
+    /* POST ERROR MESSAGE */
+    GST_ERROR_OBJECT (demux, "Should not happen ! Could not find old stream");
+    return FALSE;
+  }
 }
 
 static const gchar *
@@ -588,15 +732,27 @@ gst_hls_demux_set_current_variant (GstHLSDemux * hlsdemux,
             gst_hls_variant_find_matching_media (variant, old_media);
 
         if (new_media) {
+          GST_LOG_OBJECT (hlsdemux, "Found matching GstHLSMedia");
+          GST_LOG_OBJECT (hlsdemux, "old_media '%s' '%s'", old_media->name,
+              old_media->uri);
+          GST_LOG_OBJECT (hlsdemux, "new_media '%s' '%s'", new_media->name,
+              new_media->uri);
           new_media->playlist->sequence = old_media->playlist->sequence;
           new_media->playlist->sequence_position =
               old_media->playlist->sequence_position;
+        } else {
+          GST_LOG_OBJECT (hlsdemux,
+              "Didn't find a matching variant for '%s' '%s'", old_media->name,
+              old_media->uri);
         }
         mlist = mlist->next;
       }
     }
 
-    gst_hls_variant_stream_unref (hlsdemux->current_variant);
+    if (hlsdemux->previous_variant)
+      gst_hls_variant_stream_unref (hlsdemux->previous_variant);
+    /* Steal the reference */
+    hlsdemux->previous_variant = hlsdemux->current_variant;
   }
 
   hlsdemux->current_variant = gst_hls_variant_stream_ref (variant);
@@ -855,8 +1011,8 @@ gst_hls_demux_handle_buffer (GstAdaptiveDemux * demux,
       return GST_FLOW_OK;
     }
 
-    GST_DEBUG_OBJECT (hlsdemux, "Typefind result: %" GST_PTR_FORMAT " prob:%d",
-        caps, prob);
+    GST_DEBUG_OBJECT (stream->pad,
+        "Typefind result: %" GST_PTR_FORMAT " prob:%d", caps, prob);
 
     hls_stream->stream_type = caps_to_reader (caps);
     gst_hlsdemux_tsreader_set_type (&hls_stream->tsreader,
@@ -1010,6 +1166,13 @@ gst_hls_demux_data_received (GstAdaptiveDemux * demux,
     buffer = tmp_buffer;
   }
 
+  if (hlsdemux->prog_dt) {
+    gst_adaptive_demux_stream_set_tags (stream,
+        gst_tag_list_new (GST_TAG_DATE_TIME, hlsdemux->prog_dt, NULL));
+    gst_date_time_unref (hlsdemux->prog_dt);
+    hlsdemux->prog_dt = NULL;
+  }
+
   return gst_hls_demux_handle_buffer (demux, stream, buffer, FALSE);
 }
 
@@ -1091,7 +1254,9 @@ gst_hls_demux_update_fragment_info (GstAdaptiveDemuxStream * stream)
   m3u8 = gst_hls_demux_stream_get_m3u8 (hlsdemux_stream);
 
   forward = (stream->demux->segment.rate > 0);
-  file = gst_m3u8_get_next_fragment (m3u8, forward, &sequence_pos, &discont);
+  file =
+      gst_m3u8_get_next_fragment (m3u8, forward, &sequence_pos,
+      &hlsdemux->prog_dt, &discont);
 
   if (file == NULL) {
     GST_INFO_OBJECT (hlsdemux, "This playlist doesn't contain more fragments");
@@ -1124,7 +1289,7 @@ gst_hls_demux_update_fragment_info (GstAdaptiveDemuxStream * stream)
   g_free (hlsdemux_stream->current_key);
   hlsdemux_stream->current_key = g_strdup (file->key);
   g_free (hlsdemux_stream->current_iv);
-  hlsdemux_stream->current_iv = g_memdup (file->iv, sizeof (file->iv));
+  hlsdemux_stream->current_iv = g_memdup2 (file->iv, sizeof (file->iv));
 
   g_free (stream->fragment.uri);
   stream->fragment.uri = g_strdup (file->uri);
@@ -1192,9 +1357,23 @@ gst_hls_demux_reset (GstAdaptiveDemux * ademux)
     gst_hls_variant_stream_unref (demux->current_variant);
     demux->current_variant = NULL;
   }
+  if (demux->previous_variant != NULL) {
+    gst_hls_variant_stream_unref (demux->previous_variant);
+    demux->previous_variant = NULL;
+  }
   demux->srcpad_counter = 0;
+  demux->streams_aware = GST_OBJECT_PARENT (demux)
+      && GST_OBJECT_FLAG_IS_SET (GST_OBJECT_PARENT (demux),
+      GST_BIN_FLAG_STREAMS_AWARE);
+  GST_DEBUG_OBJECT (demux, "Streams aware : %d", demux->streams_aware);
 
   gst_hls_demux_clear_all_pending_data (demux);
+
+  if (demux->prog_dt) {
+    gst_date_time_unref (demux->prog_dt);
+    demux->prog_dt = NULL;
+  }
+
   GST_M3U8_CLIENT_UNLOCK (hlsdemux->client);
 }
 

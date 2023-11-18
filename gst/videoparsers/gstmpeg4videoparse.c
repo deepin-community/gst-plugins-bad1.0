@@ -33,6 +33,7 @@
 #include <gst/pbutils/pbutils.h>
 #include <gst/video/video.h>
 
+#include "gstvideoparserselements.h"
 #include "gstmpeg4videoparse.h"
 
 GST_DEBUG_CATEGORY (mpeg4v_parse_debug);
@@ -71,6 +72,9 @@ enum
 
 #define gst_mpeg4vparse_parent_class parent_class
 G_DEFINE_TYPE (GstMpeg4VParse, gst_mpeg4vparse, GST_TYPE_BASE_PARSE);
+GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (mpeg4videoparse, "mpeg4videoparse",
+    GST_RANK_PRIMARY + 1, GST_TYPE_MPEG4VIDEO_PARSE,
+    videoparsers_element_init (plugin));
 
 static gboolean gst_mpeg4vparse_start (GstBaseParse * parse);
 static gboolean gst_mpeg4vparse_stop (GstBaseParse * parse);
@@ -300,7 +304,7 @@ gst_mpeg4vparse_process_config (GstMpeg4VParse * mp4vparse,
   if (mp4vparse->config != NULL)
     gst_buffer_unref (mp4vparse->config);
 
-  mp4vparse->config = gst_buffer_new_wrapped (g_memdup (data, size), size);
+  mp4vparse->config = gst_buffer_new_memdup (data, size);
 
   /* trigger src caps update */
   mp4vparse->update_caps = TRUE;
@@ -793,26 +797,30 @@ gst_mpeg4vparse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
 
         /* we need to send config now first */
         GST_INFO_OBJECT (parse, "inserting config in stream");
-        gst_buffer_map (mp4vparse->config, &cmap, GST_MAP_READ);
-        diffconf = (gst_buffer_get_size (buffer) < cmap.size)
-            || gst_buffer_memcmp (buffer, 0, cmap.data, cmap.size);
-        csize = cmap.size;
-        gst_buffer_unmap (mp4vparse->config, &cmap);
+        if (mp4vparse->config != NULL
+            && gst_buffer_map (mp4vparse->config, &cmap, GST_MAP_READ)) {
+          diffconf = (gst_buffer_get_size (buffer) < cmap.size)
+              || gst_buffer_memcmp (buffer, 0, cmap.data, cmap.size);
+          csize = cmap.size;
+          gst_buffer_unmap (mp4vparse->config, &cmap);
 
-        /* avoid inserting duplicate config */
-        if (diffconf) {
-          GstBuffer *superbuf;
+          /* avoid inserting duplicate config */
+          if (diffconf) {
+            GstBuffer *superbuf;
 
-          /* insert header */
-          superbuf =
-              gst_buffer_append (gst_buffer_ref (mp4vparse->config),
-              gst_buffer_ref (buffer));
-          gst_buffer_copy_into (superbuf, buffer, GST_BUFFER_COPY_METADATA, 0,
-              csize);
-          gst_buffer_replace (&frame->out_buffer, superbuf);
-          gst_buffer_unref (superbuf);
+            /* insert header */
+            superbuf =
+                gst_buffer_append (gst_buffer_ref (mp4vparse->config),
+                gst_buffer_ref (buffer));
+            gst_buffer_copy_into (superbuf, buffer, GST_BUFFER_COPY_METADATA, 0,
+                csize);
+            gst_buffer_replace (&frame->out_buffer, superbuf);
+            gst_buffer_unref (superbuf);
+          } else {
+            GST_INFO_OBJECT (parse, "... but avoiding duplication");
+          }
         } else {
-          GST_INFO_OBJECT (parse, "... but avoiding duplication");
+          GST_WARNING_OBJECT (parse, "No config received yet");
         }
 
         if (G_UNLIKELY (timestamp != -1)) {
