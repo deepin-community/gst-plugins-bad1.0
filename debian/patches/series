@@ -1,2 +1,4 @@
 02_opencv-data-path.patch
 Skip-failing-tests.patch
+skip-elements_netsim
+
