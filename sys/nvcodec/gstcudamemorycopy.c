@@ -41,16 +41,15 @@
 #include "gstcudabasetransform.h"
 #include "gstcudamemorycopy.h"
 #include "gstcudaformat.h"
-#include <gst/cuda/gstcudautils.h>
 #include <gst/cuda/gstcuda-private.h>
 #ifdef HAVE_NVCODEC_NVMM
 #include "gstcudanvmm.h"
 #endif
 
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
 #include <gst/gl/gl.h>
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
 #include <gst/d3d11/gstd3d11.h>
 #endif
 
@@ -73,12 +72,12 @@ struct _GstCudaMemoryCopy
 
   gboolean downstream_supports_video_meta;
 
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   GstGLDisplay *gl_display;
   GstGLContext *gl_context;
   GstGLContext *other_gl_context;
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   GstD3D11Device *d3d11_device;
 #endif
 };
@@ -128,7 +127,7 @@ static gboolean gst_cuda_memory_copy_set_info (GstCudaBaseTransform * btrans,
     GstVideoInfo * out_info);
 static GstFlowReturn gst_cuda_memory_copy_transform (GstBaseTransform * trans,
     GstBuffer * inbuf, GstBuffer * outbuf);
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
 static gboolean
 gst_cuda_memory_copy_ensure_d3d11_interop (GstCudaContext * context,
     GstD3D11Device * device);
@@ -169,15 +168,15 @@ static void
 gst_cuda_memory_copy_set_context (GstElement * element, GstContext * context)
 {
   /* CUDA context is handled by parent class, handle only non-CUDA context */
-#if defined (HAVE_NVCODEC_GST_GL) || defined (GST_CUDA_HAS_D3D)
+#if defined (HAVE_CUDA_GST_GL) || defined (G_OS_WIN32)
   GstCudaMemoryCopy *self = GST_CUDA_MEMORY_COPY (element);
 
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   gst_gl_handle_set_context (element, context, &self->gl_display,
       &self->other_gl_context);
-#endif /* HAVE_NVCODEC_GST_GL */
+#endif /* HAVE_CUDA_GST_GL */
 
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   GstCudaBaseTransform *base = GST_CUDA_BASE_TRANSFORM (element);
   if (gst_d3d11_handle_set_context (element, context, -1, &self->d3d11_device)) {
     gboolean compatible = TRUE;
@@ -212,8 +211,8 @@ gst_cuda_memory_copy_set_context (GstElement * element, GstContext * context)
           self->d3d11_device);
     }
   }
-#endif /* GST_CUDA_HAS_D3D */
-#endif /* defined (HAVE_NVCODEC_GST_GL) || defined (GST_CUDA_HAS_D3D) */
+#endif /* G_OS_WIN32 */
+#endif /* defined (HAVE_CUDA_GST_GL) || defined (G_OS_WIN32) */
 
   GST_ELEMENT_CLASS (parent_class)->set_context (element, context);
 }
@@ -221,17 +220,17 @@ gst_cuda_memory_copy_set_context (GstElement * element, GstContext * context)
 static gboolean
 gst_cuda_memory_copy_transform_stop (GstBaseTransform * trans)
 {
-#if defined(HAVE_NVCODEC_GST_GL) || defined(GST_CUDA_HAS_D3D)
+#if defined(HAVE_CUDA_GST_GL) || defined(G_OS_WIN32)
   GstCudaMemoryCopy *self = GST_CUDA_MEMORY_COPY (trans);
 
-# ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   gst_clear_object (&self->gl_display);
   gst_clear_object (&self->gl_context);
   gst_clear_object (&self->other_gl_context);
-# endif
-# ifdef GST_CUDA_HAS_D3D
+#endif
+#ifdef G_OS_WIN32
   gst_clear_object (&self->d3d11_device);
-# endif
+#endif
 #endif
 
   return GST_BASE_TRANSFORM_CLASS (parent_class)->stop (trans);
@@ -298,11 +297,11 @@ create_transform_caps (GstCaps * caps, gboolean to_cuda)
     }
 #endif
 
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
     new_caps = _set_caps_features (caps, GST_CAPS_FEATURE_MEMORY_GL_MEMORY);
     ret = gst_caps_merge (ret, new_caps);
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
     new_caps = _set_caps_features (caps, GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY);
     ret = gst_caps_merge (ret, new_caps);
 #endif
@@ -346,7 +345,7 @@ gst_cuda_memory_copy_transform_caps (GstBaseTransform * trans,
   return result;
 }
 
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
 static void
 gst_cuda_memory_copy_ensure_gl_interop (GstGLContext * context, gboolean * ret)
 {
@@ -359,7 +358,7 @@ gst_cuda_memory_copy_ensure_gl_interop (GstGLContext * context, gboolean * ret)
   cuda_ret = CuGLGetDevices (&device_count,
       device_list, 1, CU_GL_DEVICE_LIST_ALL);
 
-  if (cuda_ret != CUDA_SUCCESS || device_count == 0)
+  if (!gst_cuda_result (cuda_ret) || device_count == 0)
     return;
 
   *ret = TRUE;
@@ -427,7 +426,7 @@ gst_cuda_memory_copy_ensure_gl_context (GstCudaMemoryCopy * self)
 }
 #endif
 
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
 static gboolean
 gst_cuda_memory_copy_ensure_d3d11_interop (GstCudaContext * context,
     GstD3D11Device * device)
@@ -486,6 +485,7 @@ gst_cuda_memory_copy_propose_allocation (GstBaseTransform * trans,
   GstBufferPool *pool = NULL;
   GstCaps *caps;
   guint size;
+  gboolean is_cuda = FALSE;
 
   if (!GST_BASE_TRANSFORM_CLASS (parent_class)->propose_allocation (trans,
           decide_query, query))
@@ -513,7 +513,7 @@ gst_cuda_memory_copy_propose_allocation (GstBaseTransform * trans,
             GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY)) {
       GST_DEBUG_OBJECT (self, "upstream support CUDA memory");
       pool = gst_cuda_buffer_pool_new (ctrans->context);
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
     } else if (features && gst_caps_features_contains (features,
             GST_CAPS_FEATURE_MEMORY_GL_MEMORY) &&
         gst_cuda_memory_copy_ensure_gl_context (self)) {
@@ -521,7 +521,7 @@ gst_cuda_memory_copy_propose_allocation (GstBaseTransform * trans,
 
       pool = gst_gl_buffer_pool_new (self->gl_context);
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
     } else if (features && gst_caps_features_contains (features,
             GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY) &&
         gst_cuda_memory_copy_ensure_d3d11_context (self)) {
@@ -575,6 +575,8 @@ gst_cuda_memory_copy_propose_allocation (GstBaseTransform * trans,
 
     size = GST_VIDEO_INFO_SIZE (&info);
     gst_buffer_pool_config_set_params (config, caps, size, 0, 0);
+    if (is_cuda && ctrans->stream)
+      gst_buffer_pool_config_set_cuda_stream (config, ctrans->stream);
 
     if (!gst_buffer_pool_set_config (pool, config)) {
       GST_ERROR_OBJECT (ctrans, "failed to set config");
@@ -610,10 +612,10 @@ gst_cuda_memory_copy_decide_allocation (GstBaseTransform * trans,
   gboolean update_pool = FALSE;
   GstCapsFeatures *features;
   gboolean need_cuda = FALSE;
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   gboolean need_gl = FALSE;
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   gboolean need_d3d11 = FALSE;
 #endif
 #ifdef HAVE_NVCODEC_NVMM
@@ -636,14 +638,14 @@ gst_cuda_memory_copy_decide_allocation (GstBaseTransform * trans,
           GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY)) {
     need_cuda = TRUE;
   }
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   else if (features && gst_caps_features_contains (features,
           GST_CAPS_FEATURE_MEMORY_GL_MEMORY) &&
       gst_cuda_memory_copy_ensure_gl_context (self)) {
     need_gl = TRUE;
   }
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   else if (features && gst_caps_features_contains (features,
           GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY) &&
       gst_cuda_memory_copy_ensure_d3d11_context (self)) {
@@ -691,13 +693,13 @@ gst_cuda_memory_copy_decide_allocation (GstBaseTransform * trans,
       GST_DEBUG_OBJECT (self, "creating cuda pool");
       pool = gst_cuda_buffer_pool_new (ctrans->context);
     }
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
     else if (need_gl) {
       GST_DEBUG_OBJECT (self, "creating gl pool");
       pool = gst_gl_buffer_pool_new (self->gl_context);
     }
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
     else if (need_d3d11) {
       GST_DEBUG_OBJECT (self, "creating d3d11 pool");
       pool = gst_d3d11_buffer_pool_new (self->d3d11_device);
@@ -776,25 +778,25 @@ static gboolean
 gst_cuda_memory_copy_query (GstBaseTransform * trans,
     GstPadDirection direction, GstQuery * query)
 {
-#if defined(HAVE_NVCODEC_GST_GL) || defined(GST_CUDA_HAS_D3D)
+#if defined(HAVE_CUDA_GST_GL) || defined(G_OS_WIN32)
   GstCudaMemoryCopy *self = GST_CUDA_MEMORY_COPY (trans);
 
   switch (GST_QUERY_TYPE (query)) {
     case GST_QUERY_CONTEXT:
     {
       gboolean ret;
-# ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
       ret = gst_gl_handle_context_query (GST_ELEMENT (self), query,
           self->gl_display, self->gl_context, self->other_gl_context);
       if (ret)
         return TRUE;
-# endif
-# ifdef GST_CUDA_HAS_D3D
+#endif
+#ifdef G_OS_WIN32
       ret = gst_d3d11_handle_context_query (GST_ELEMENT (self), query,
           self->d3d11_device);
       if (ret)
         return TRUE;
-# endif
+#endif
       break;
     }
     default:
@@ -829,7 +831,7 @@ gst_cuda_memory_copy_set_info (GstCudaBaseTransform * btrans,
           GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY)) {
     self->out_type = GST_CUDA_BUFFER_COPY_CUDA;
   }
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   if (in_features && gst_caps_features_contains (in_features,
           GST_CAPS_FEATURE_MEMORY_GL_MEMORY)) {
     self->in_type = GST_CUDA_BUFFER_COPY_GL;
@@ -841,7 +843,7 @@ gst_cuda_memory_copy_set_info (GstCudaBaseTransform * btrans,
   }
 #endif
 
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   if (in_features && gst_caps_features_contains (in_features,
           GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY)) {
     self->in_type = GST_CUDA_BUFFER_COPY_D3D11;
@@ -889,7 +891,7 @@ gst_cuda_memory_copy_transform (GstBaseTransform * trans, GstBuffer * inbuf,
   GstCudaBufferCopyType in_type = GST_CUDA_BUFFER_COPY_SYSTEM;
   GstCudaBufferCopyType out_type = GST_CUDA_BUFFER_COPY_SYSTEM;
   gboolean use_device_copy = FALSE;
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   D3D11_TEXTURE2D_DESC desc;
 #endif
 
@@ -914,11 +916,11 @@ gst_cuda_memory_copy_transform (GstBaseTransform * trans, GstBuffer * inbuf,
   } else if (gst_is_cuda_memory (in_mem)) {
     in_type = GST_CUDA_BUFFER_COPY_CUDA;
     use_device_copy = TRUE;
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   } else if (self->gl_context && gst_is_gl_memory_pbo (in_mem)) {
     in_type = GST_CUDA_BUFFER_COPY_GL;
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   } else if (self->d3d11_device && gst_is_d3d11_memory (in_mem)
       && gst_d3d11_memory_get_texture_desc (GST_D3D11_MEMORY_CAST (in_mem),
           &desc) && desc.Usage == D3D11_USAGE_DEFAULT) {
@@ -934,11 +936,11 @@ gst_cuda_memory_copy_transform (GstBaseTransform * trans, GstBuffer * inbuf,
   } else if (gst_is_cuda_memory (out_mem)) {
     out_type = GST_CUDA_BUFFER_COPY_CUDA;
     use_device_copy = TRUE;
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   } else if (self->gl_context && gst_is_gl_memory_pbo (out_mem)) {
     out_type = GST_CUDA_BUFFER_COPY_GL;
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   } else if (self->d3d11_device && gst_is_d3d11_memory (out_mem)
       && gst_d3d11_memory_get_texture_desc (GST_D3D11_MEMORY_CAST (out_mem),
           &desc) && desc.Usage == D3D11_USAGE_DEFAULT) {
@@ -952,7 +954,7 @@ gst_cuda_memory_copy_transform (GstBaseTransform * trans, GstBuffer * inbuf,
     GST_TRACE_OBJECT (self, "Both in/out buffers are not CUDA");
     if (!gst_cuda_buffer_copy (outbuf, GST_CUDA_BUFFER_COPY_SYSTEM, out_info,
             inbuf, GST_CUDA_BUFFER_COPY_SYSTEM, in_info, ctrans->context,
-            ctrans->cuda_stream)) {
+            ctrans->stream)) {
       return GST_FLOW_ERROR;
     }
 
@@ -960,7 +962,7 @@ gst_cuda_memory_copy_transform (GstBaseTransform * trans, GstBuffer * inbuf,
   }
 
   ret = gst_cuda_buffer_copy (outbuf, out_type, out_info, inbuf, in_type,
-      in_info, ctrans->context, ctrans->cuda_stream);
+      in_info, ctrans->context, ctrans->stream);
 
   /* system memory <-> CUDA copy fallback if possible */
   if (!ret) {
@@ -1003,7 +1005,7 @@ gst_cuda_memory_copy_transform (GstBaseTransform * trans, GstBuffer * inbuf,
         gst_cuda_buffer_copy_type_to_string (fallback_out_type));
 
     ret = gst_cuda_buffer_copy (outbuf, fallback_out_type, out_info, inbuf,
-        fallback_in_type, in_info, ctrans->context, ctrans->cuda_stream);
+        fallback_in_type, in_info, ctrans->context, ctrans->stream);
   }
 
   if (ret)
@@ -1018,7 +1020,7 @@ gst_cuda_memory_copy_transform (GstBaseTransform * trans, GstBuffer * inbuf,
   /* final fallback using system memory */
   ret = gst_cuda_buffer_copy (outbuf, GST_CUDA_BUFFER_COPY_SYSTEM, out_info,
       inbuf, GST_CUDA_BUFFER_COPY_SYSTEM, in_info, ctrans->context,
-      ctrans->cuda_stream);
+      ctrans->stream);
 
   if (ret)
     return GST_FLOW_OK;
@@ -1075,11 +1077,16 @@ gst_cuda_download_before_transform (GstBaseTransform * trans,
   GST_BASE_TRANSFORM_CLASS (parent_class)->before_transform (trans, buffer);
 
   old = gst_base_transform_is_passthrough (trans);
-  if (copy->in_type == copy->out_type ||
-      (copy->in_type == GST_CUDA_BUFFER_COPY_CUDA &&
-          copy->out_type == GST_CUDA_BUFFER_COPY_SYSTEM &&
-          copy->downstream_supports_video_meta)) {
+  if (copy->in_type == copy->out_type) {
     new = TRUE;
+  } else if (copy->in_type == GST_CUDA_BUFFER_COPY_CUDA &&
+      copy->out_type == GST_CUDA_BUFFER_COPY_SYSTEM &&
+      copy->downstream_supports_video_meta) {
+    GstMemory *mem = gst_buffer_peek_memory (buffer, 0);
+    /* zero-copy decoded memory belongs to NVDEC's fixed size pool.
+     * We should return the memory to the decoder as soon as possible */
+    if (!gst_cuda_memory_is_from_fixed_pool (mem))
+      new = TRUE;
   }
 
   if (new != old) {
@@ -1156,10 +1163,10 @@ gst_cuda_memory_copy_register (GstPlugin * plugin, guint rank)
 #ifdef HAVE_NVCODEC_NVMM
   GstCaps *nvmm_caps = NULL;
 #endif
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   GstCaps *gl_caps;
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   GstCaps *d3d11_caps;
 #endif
   GstCaps *upload_sink_caps;
@@ -1183,22 +1190,22 @@ gst_cuda_memory_copy_register (GstPlugin * plugin, guint rank)
         (GST_CAPS_FEATURE_MEMORY_CUDA_NVMM_MEMORY, GST_CUDA_NVMM_FORMATS));
   }
 #endif
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   gl_caps =
       gst_caps_from_string (GST_VIDEO_CAPS_MAKE_WITH_FEATURES
       (GST_CAPS_FEATURE_MEMORY_GL_MEMORY, GST_CUDA_GL_FORMATS));
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   d3d11_caps =
       gst_caps_from_string (GST_VIDEO_CAPS_MAKE_WITH_FEATURES
       (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY, GST_CUDA_D3D11_FORMATS));
 #endif
 
   upload_sink_caps = gst_caps_copy (sys_caps);
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   upload_sink_caps = gst_caps_merge (upload_sink_caps, gst_caps_copy (gl_caps));
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   upload_sink_caps =
       gst_caps_merge (upload_sink_caps, gst_caps_copy (d3d11_caps));
 #endif
@@ -1231,10 +1238,10 @@ gst_cuda_memory_copy_register (GstPlugin * plugin, guint rank)
       gst_caps_merge (download_sink_caps, gst_caps_copy (sys_caps));
 
   download_src_caps = sys_caps;
-#ifdef HAVE_NVCODEC_GST_GL
+#ifdef HAVE_CUDA_GST_GL
   download_src_caps = gst_caps_merge (download_src_caps, gl_caps);
 #endif
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
   download_src_caps = gst_caps_merge (download_src_caps, d3d11_caps);
 #endif
 #ifdef HAVE_NVCODEC_NVMM

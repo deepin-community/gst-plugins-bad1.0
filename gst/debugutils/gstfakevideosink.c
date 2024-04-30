@@ -162,7 +162,7 @@ static GstStaticPadTemplate sink_factory = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE_WITH_FEATURES ("ANY",
-            GST_VIDEO_FORMATS_ALL)));
+            GST_VIDEO_FORMATS_ANY)));
 
 G_DEFINE_TYPE (GstFakeVideoSink, gst_fake_video_sink, GST_TYPE_BIN);
 GST_ELEMENT_REGISTER_DEFINE (fakevideosink, "fakevideosink",
@@ -215,12 +215,6 @@ gst_fake_video_sink_proxy_handoff (GstElement * element, GstBuffer * buffer,
 }
 
 static void
-gst_fake_video_sink_proxy_last_message (GstElement * element)
-{
-  g_object_notify_by_pspec ((GObject *) element, pspec_last_message);
-}
-
-static void
 gst_fake_video_sink_proxy_preroll_handoff (GstElement * element,
     GstBuffer * buffer, GstPad * pad, GstFakeVideoSink * self)
 {
@@ -259,8 +253,6 @@ gst_fake_video_sink_init (GstFakeVideoSink * self)
 
     self->child = child;
 
-    g_signal_connect (child, "notify::last-message",
-        G_CALLBACK (gst_fake_video_sink_proxy_last_message), self);
     g_signal_connect (child, "handoff",
         G_CALLBACK (gst_fake_video_sink_proxy_handoff), self);
     g_signal_connect (child, "preroll-handoff",

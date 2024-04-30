@@ -28,18 +28,49 @@
 #include <gst/gst.h>
 #include <gmodule.h>
 #include <gio/gunixfdlist.h>
-#include <wpe/webkit-web-extension.h>
 
 GST_DEBUG_CATEGORY_STATIC (wpe_extension_debug);
 #define GST_CAT_DEFAULT wpe_extension_debug
 
-G_MODULE_EXPORT void webkit_web_extension_initialize (WebKitWebExtension *
-    extension);
+#if USE_WPE2
+#define WebKitWebExtension WebKitWebProcessExtension
+#define extension_initialize webkit_web_process_extension_initialize
+#define extension_send_message_to_context webkit_web_process_extension_send_message_to_context
+#else
+#define extension_initialize webkit_web_extension_initialize
+#define extension_send_message_to_context webkit_web_extension_send_message_to_context
+#endif
+
+G_MODULE_EXPORT void extension_initialize (WebKitWebExtension * extension);
 
 static WebKitWebExtension *global_extension = NULL;
 
+#if !USE_WPE2
+static void
+console_message_cb (WebKitWebPage * page,
+    WebKitConsoleMessage * console_message, gpointer data)
+{
+  char *message = g_strdup (webkit_console_message_get_text (console_message));
+  gst_wpe_extension_send_message (webkit_user_message_new
+      ("gstwpe.console_message", g_variant_new ("(s)", message)), NULL, NULL,
+      NULL);
+  g_free (message);
+}
+#endif
+
+static void
+web_page_created_callback (WebKitWebExtension * extension,
+    WebKitWebPage * web_page, gpointer data)
+{
+  // WebKitConsoleMessage is deprecated in wpe1 and has no replacement in wpe2.
+#if !USE_WPE2
+  g_signal_connect (web_page, "console-message-sent",
+      G_CALLBACK (console_message_cb), NULL);
+#endif
+}
+
 void
-webkit_web_extension_initialize (WebKitWebExtension * extension)
+extension_initialize (WebKitWebExtension * extension)
 {
   g_return_if_fail (!global_extension);
 
@@ -55,12 +86,15 @@ webkit_web_extension_initialize (WebKitWebExtension * extension)
 
   global_extension = extension;
   GST_INFO ("Setting as global extension.");
+
+  g_signal_connect (global_extension, "page-created",
+      G_CALLBACK (web_page_created_callback), NULL);
 }
 
 void
 gst_wpe_extension_send_message (WebKitUserMessage * msg,
     GCancellable * cancellable, GAsyncReadyCallback cb, gpointer udata)
 {
-  webkit_web_extension_send_message_to_context (global_extension, msg,
-      cancellable, cb, udata);
+  extension_send_message_to_context (global_extension, msg, cancellable, cb,
+      udata);
 }

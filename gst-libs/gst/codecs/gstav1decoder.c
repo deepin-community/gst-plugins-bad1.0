@@ -409,7 +409,8 @@ gst_av1_decoder_process_sequence (GstAV1Decoder * self, GstAV1OBU * obu)
   }
 
   ret = klass->new_sequence (self, &seq_header,
-      GST_AV1_TOTAL_REFS_PER_FRAME + priv->preferred_output_delay);
+      /* +1 for the current frame */
+      GST_AV1_TOTAL_REFS_PER_FRAME + 1 + priv->preferred_output_delay);
   if (ret != GST_FLOW_OK) {
     GST_ERROR_OBJECT (self, "subclass does not want accept new sequence");
     return ret;
@@ -490,7 +491,7 @@ gst_av1_decoder_decode_frame_header (GstAV1Decoder * self,
       return GST_FLOW_ERROR;
     }
 
-    picture->system_frame_number = ref_picture->system_frame_number;
+    GST_CODEC_PICTURE_COPY_FRAME_NUMBER (picture, ref_picture);
     picture->frame_hdr = *frame_header;
     priv->current_picture = picture;
   } else {
@@ -500,7 +501,8 @@ gst_av1_decoder_decode_frame_header (GstAV1Decoder * self,
     picture->show_frame = frame_header->show_frame;
     picture->showable_frame = frame_header->showable_frame;
     picture->apply_grain = frame_header->film_grain_params.apply_grain;
-    picture->system_frame_number = priv->current_frame->system_frame_number;
+    GST_CODEC_PICTURE_FRAME_NUMBER (picture) =
+        priv->current_frame->system_frame_number;
     picture->temporal_id = obu->header.obu_temporal_id;
     picture->spatial_id = obu->header.obu_spatial_id;
 
@@ -675,6 +677,7 @@ gst_av1_decoder_handle_frame (GstVideoDecoder * decoder,
   GstBuffer *in_buf = frame->input_buffer;
   GstMapInfo map;
   GstFlowReturn ret = GST_FLOW_OK;
+  GstFlowReturn output_ret = GST_FLOW_OK;
   guint32 total_consumed, consumed;
   GstAV1OBU obu;
   GstAV1ParserResult res;
@@ -759,8 +762,8 @@ out:
         /* If subclass didn't update output state at this point,
          * marking this picture as a discont and stores current input state */
         if (priv->input_state_changed) {
-          priv->current_picture->discont_state =
-              gst_video_codec_state_ref (self->input_state);
+          gst_av1_picture_set_discont_state (priv->current_picture,
+              self->input_state);
           priv->input_state_changed = FALSE;
         }
 
@@ -780,13 +783,20 @@ out:
     if (priv->current_picture)
       gst_av1_picture_unref (priv->current_picture);
 
-    gst_video_decoder_drop_frame (decoder, frame);
+    gst_video_decoder_release_frame (decoder, frame);
   }
 
-  gst_av1_decoder_drain_output_queue (self, priv->preferred_output_delay, &ret);
+  gst_av1_decoder_drain_output_queue (self,
+      priv->preferred_output_delay, &output_ret);
 
   priv->current_picture = NULL;
   priv->current_frame = NULL;
+
+  if (output_ret != GST_FLOW_OK) {
+    GST_DEBUG_OBJECT (self,
+        "Output returned %s", gst_flow_get_name (output_ret));
+    return output_ret;
+  }
 
   if (ret == GST_FLOW_ERROR) {
     GST_VIDEO_DECODER_ERROR (decoder, 1, STREAM, DECODE,

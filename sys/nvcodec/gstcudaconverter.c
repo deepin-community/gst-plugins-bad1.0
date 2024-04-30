@@ -22,9 +22,6 @@
 #endif
 
 #include "gstcudaconverter.h"
-#include <gst/cuda/gstcudautils.h>
-#include <gst/cuda/gstcudaloader.h>
-#include <gst/cuda/gstcudanvrtc.h>
 #include <string.h>
 
 GST_DEBUG_CATEGORY_STATIC (gst_cuda_converter_debug);
@@ -638,6 +635,8 @@ typedef struct
 #define SAMPLE_RGBP "sample_rgbp"
 #define SAMPLE_BGRP "sample_bgrp"
 #define SAMPLE_GBR "sample_gbr"
+#define SAMPLE_GBR_10 "sample_gbr_10"
+#define SAMPLE_GBR_12 "sample_gbr_12"
 #define SAMPLE_GBRA "sample_gbra"
 
 #define WRITE_I420 "write_i420"
@@ -645,10 +644,11 @@ typedef struct
 #define WRITE_NV12 "write_nv12"
 #define WRITE_NV21 "write_nv21"
 #define WRITE_P010 "write_p010"
-/* same as P010 */
-#define WRITE_P016 "write_p010"
 #define WRITE_I420_10 "write_i420_10"
+#define WRITE_I420_12 "write_i420_12"
 #define WRITE_Y444 "write_y444"
+#define WRITE_Y444_10 "write_y444_10"
+#define WRITE_Y444_12 "write_y444_12"
 #define WRITE_Y444_16 "write_y444_16"
 #define WRITE_RGBA "write_rgba"
 #define WRITE_RGBx "write_rgbx"
@@ -666,7 +666,18 @@ typedef struct
 #define WRITE_RGBP "write_rgbp"
 #define WRITE_BGRP "write_bgrp"
 #define WRITE_GBR "write_gbr"
+#define WRITE_GBR_10 "write_gbr_10"
+#define WRITE_GBR_12 "write_gbr_12"
+#define WRITE_GBR_16 "write_gbr_16"
 #define WRITE_GBRA "write_gbra"
+#define ROTATE_IDENTITY "rotate_identity"
+#define ROTATE_90R "rotate_90r"
+#define ROTATE_180 "rotate_180"
+#define ROTATE_90L "rotate_90l"
+#define ROTATE_HORIZ "rotate_horiz"
+#define ROTATE_VERT "rotate_vert"
+#define ROTATE_UL_LR "rotate_ul_lr"
+#define ROTATE_UR_LL "rotate_ur_ll"
 
 /* *INDENT-OFF* */
 const static gchar KERNEL_COMMON[] =
@@ -787,7 +798,7 @@ SAMPLE_YUV_PLANAR_12BIS "(cudaTextureObject_t tex0, cudaTextureObject_t tex1,\n"
 "  float luma = tex2D<float>(tex0, x, y);\n"
 "  float u = tex2D<float>(tex1, x, y);\n"
 "  float v = tex2D<float>(tex2, x, y);\n"
-"  /* (1 << 6) to scale [0, 1.0) range */\n"
+"  /* (1 << 4) to scale [0, 1.0) range */\n"
 "  return make_float4 (luma * 16, u * 16, v * 16, 1);\n"
 "}\n"
 "\n"
@@ -887,6 +898,27 @@ SAMPLE_GBR "(cudaTextureObject_t tex0, cudaTextureObject_t tex1,\n"
 "  float r = tex2D<float>(tex2, x, y);\n"
 "  return make_float4 (r, g, b, 1);\n"
 "}\n"
+"__device__ inline float4\n"
+SAMPLE_GBR_10 "(cudaTextureObject_t tex0, cudaTextureObject_t tex1,\n"
+"    cudaTextureObject_t tex2, cudaTextureObject_t tex3, float x, float y)\n"
+"{\n"
+"  float g = tex2D<float>(tex0, x, y);\n"
+"  float b = tex2D<float>(tex1, x, y);\n"
+"  float r = tex2D<float>(tex2, x, y);\n"
+"  /* (1 << 6) to scale [0, 1.0) range */\n"
+"  return make_float4 (r * 64, g * 64, b * 64, 1);\n"
+"}\n"
+"\n"
+"__device__ inline float4\n"
+SAMPLE_GBR_12 "(cudaTextureObject_t tex0, cudaTextureObject_t tex1,\n"
+"    cudaTextureObject_t tex2, cudaTextureObject_t tex3, float x, float y)\n"
+"{\n"
+"  float g = tex2D<float>(tex0, x, y);\n"
+"  float b = tex2D<float>(tex1, x, y);\n"
+"  float r = tex2D<float>(tex2, x, y);\n"
+"  /* (1 << 4) to scale [0, 1.0) range */\n"
+"  return make_float4 (r * 16, g * 16, b * 16, 1);\n"
+"}\n"
 "\n"
 "__device__ inline float4\n"
 SAMPLE_GBRA "(cudaTextureObject_t tex0, cudaTextureObject_t tex1,\n"
@@ -972,6 +1004,18 @@ WRITE_I420_10 "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2
 "}\n"
 "\n"
 "__device__ inline void\n"
+WRITE_I420_12 "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n"
+"    unsigned char * dst3, float4 sample, int x, int y, int stride0, int stride1)\n"
+"{\n"
+"  *(unsigned short *) &dst0[x * 2 + y * stride0] = scale_to_12bits (sample.x);\n"
+"  if (x % 2 == 0 && y % 2 == 0) {\n"
+"    unsigned int pos = x + (y / 2) * stride1;\n"
+"    *(unsigned short *) &dst1[pos] = scale_to_12bits (sample.y);\n"
+"    *(unsigned short *) &dst2[pos] = scale_to_12bits (sample.z);\n"
+"  }\n"
+"}\n"
+"\n"
+"__device__ inline void\n"
 WRITE_Y444 "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n"
 "    unsigned char * dst3, float4 sample, int x, int y, int stride0, int stride1)\n"
 "{\n"
@@ -979,6 +1023,26 @@ WRITE_Y444 "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n
 "  dst0[pos] = scale_to_uchar (sample.x);\n"
 "  dst1[pos] = scale_to_uchar (sample.y);\n"
 "  dst2[pos] = scale_to_uchar (sample.z);\n"
+"}\n"
+"\n"
+"__device__ inline void\n"
+WRITE_Y444_10 "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n"
+"    unsigned char * dst3, float4 sample, int x, int y, int stride0, int stride1)\n"
+"{\n"
+"  int pos = x * 2 + y * stride0;\n"
+"  *(unsigned short *) &dst0[pos] = scale_to_10bits (sample.x);\n"
+"  *(unsigned short *) &dst1[pos] = scale_to_10bits (sample.y);\n"
+"  *(unsigned short *) &dst2[pos] = scale_to_10bits (sample.z);\n"
+"}\n"
+"\n"
+"__device__ inline void\n"
+WRITE_Y444_12 "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n"
+"    unsigned char * dst3, float4 sample, int x, int y, int stride0, int stride1)\n"
+"{\n"
+"  int pos = x * 2 + y * stride0;\n"
+"  *(unsigned short *) &dst0[pos] = scale_to_12bits (sample.x);\n"
+"  *(unsigned short *) &dst1[pos] = scale_to_12bits (sample.y);\n"
+"  *(unsigned short *) &dst2[pos] = scale_to_12bits (sample.z);\n"
 "}\n"
 "\n"
 "__device__ inline void\n"
@@ -1168,6 +1232,36 @@ WRITE_GBR "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n"
 "}\n"
 "\n"
 "__device__ inline void\n"
+WRITE_GBR_10 "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n"
+"    unsigned char * dst3, float4 sample, int x, int y, int stride0, int stride1)\n"
+"{\n"
+"  int pos = x * 2 + y * stride0;\n"
+"  *(unsigned short *) &dst0[pos] = scale_to_10bits (sample.y);\n"
+"  *(unsigned short *) &dst1[pos] = scale_to_10bits (sample.z);\n"
+"  *(unsigned short *) &dst2[pos] = scale_to_10bits (sample.x);\n"
+"}\n"
+"\n"
+"__device__ inline void\n"
+WRITE_GBR_12 "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n"
+"    unsigned char * dst3, float4 sample, int x, int y, int stride0, int stride1)\n"
+"{\n"
+"  int pos = x * 2 + y * stride0;\n"
+"  *(unsigned short *) &dst0[pos] = scale_to_12bits (sample.y);\n"
+"  *(unsigned short *) &dst1[pos] = scale_to_12bits (sample.z);\n"
+"  *(unsigned short *) &dst2[pos] = scale_to_12bits (sample.x);\n"
+"}\n"
+"\n"
+"__device__ inline void\n"
+WRITE_GBR_16 "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n"
+"    unsigned char * dst3, float4 sample, int x, int y, int stride0, int stride1)\n"
+"{\n"
+"  int pos = x * 2 + y * stride0;\n"
+"  *(unsigned short *) &dst0[pos] = scale_to_ushort (sample.y);\n"
+"  *(unsigned short *) &dst1[pos] = scale_to_ushort (sample.z);\n"
+"  *(unsigned short *) &dst2[pos] = scale_to_ushort (sample.x);\n"
+"}\n"
+"\n"
+"__device__ inline void\n"
 WRITE_GBRA "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n"
 "    unsigned char * dst3, float4 sample, int x, int y, int stride0, int stride1)\n"
 "{\n"
@@ -1176,7 +1270,55 @@ WRITE_GBRA "(unsigned char * dst0, unsigned char * dst1, unsigned char * dst2,\n
 "  dst1[pos] = scale_to_uchar (sample.z);\n"
 "  dst2[pos] = scale_to_uchar (sample.x);\n"
 "  dst3[pos] = scale_to_uchar (sample.w);\n"
-"}\n";
+"}\n"
+"__device__ inline float2\n"
+ROTATE_IDENTITY "(float x, float y)\n"
+"{\n"
+"  return make_float2(x, y);\n"
+"}\n"
+"\n"
+"__device__ inline float2\n"
+ROTATE_90R "(float x, float y)\n"
+"{\n"
+"  return make_float2(y, 1.0 - x);\n"
+"}\n"
+"\n"
+"__device__ inline float2\n"
+ROTATE_180 "(float x, float y)\n"
+"{\n"
+"  return make_float2(1.0 - x, 1.0 - y);\n"
+"}\n"
+"\n"
+"__device__ inline float2\n"
+ROTATE_90L "(float x, float y)\n"
+"{\n"
+"  return make_float2(1.0 - y, x);\n"
+"}\n"
+"\n"
+"__device__ inline float2\n"
+ROTATE_HORIZ "(float x, float y)\n"
+"{\n"
+"  return make_float2(1.0 - x, y);\n"
+"}\n"
+"\n"
+"__device__ inline float2\n"
+ROTATE_VERT "(float x, float y)\n"
+"{\n"
+"  return make_float2(x, 1.0 - y);\n"
+"}\n"
+"\n"
+"__device__ inline float2\n"
+ROTATE_UL_LR "(float x, float y)\n"
+"{\n"
+"  return make_float2(y, x);\n"
+"}\n"
+"\n"
+"__device__ inline float2\n"
+ROTATE_UR_LL "(float x, float y)\n"
+"{\n"
+"  return make_float2(1.0 - y, 1.0 - x);\n"
+"}\n"
+"\n";
 
 #define GST_CUDA_KERNEL_UNPACK_FUNC "gst_cuda_kernel_unpack_func"
 static const gchar RGB_TO_RGBx[] =
@@ -1259,7 +1401,7 @@ GST_CUDA_KERNEL_UNPACK_FUNC
 "}\n"
 "}\n";
 
-#define GST_CUDA_KERNEL_MAIN_FUNC "KernelMain"
+#define GST_CUDA_KERNEL_MAIN_FUNC "gst_cuda_converter_main"
 
 static const gchar TEMPLETA_KERNEL[] =
 /* KERNEL_COMMON */
@@ -1310,7 +1452,8 @@ GST_CUDA_KERNEL_MAIN_FUNC "(cudaTextureObject_t tex0, cudaTextureObject_t tex1,\
 "  } else {\n"
 "    float x = OFFSET_X + (float) (x_pos - LEFT) / VIEW_WIDTH;\n"
 "    float y = OFFSET_Y + (float) (y_pos - TOP) / VIEW_HEIGHT;\n"
-"    float4 s = %s (tex0, tex1, tex2, tex3, x, y);\n"
+"    float2 rotated = %s (x, y);\n"
+"    float4 s = %s (tex0, tex1, tex2, tex3, rotated.x, rotated.y);\n"
 "    float3 xyz = make_float3 (s.x, s.y, s.z);\n"
 "    float3 rgb = %s (xyz, &TO_RGB_MATRIX);\n"
 "    float3 yuv = %s (rgb, &TO_YUV_MATRIX);\n"
@@ -1352,9 +1495,13 @@ static const TextureFormat format_map[] = {
   MAKE_FORMAT_YUV_SEMI_PLANAR (NV12, UNSIGNED_INT8, SAMPLE_SEMI_PLANAR),
   MAKE_FORMAT_YUV_SEMI_PLANAR (NV21, UNSIGNED_INT8, SAMPLE_SEMI_PLANAR_SWAP),
   MAKE_FORMAT_YUV_SEMI_PLANAR (P010_10LE, UNSIGNED_INT16, SAMPLE_SEMI_PLANAR),
+  MAKE_FORMAT_YUV_SEMI_PLANAR (P012_LE, UNSIGNED_INT16, SAMPLE_SEMI_PLANAR),
   MAKE_FORMAT_YUV_SEMI_PLANAR (P016_LE, UNSIGNED_INT16, SAMPLE_SEMI_PLANAR),
   MAKE_FORMAT_YUV_PLANAR (I420_10LE, UNSIGNED_INT16, SAMPLE_YUV_PLANAR_10BIS),
+  MAKE_FORMAT_YUV_PLANAR (I420_12LE, UNSIGNED_INT16, SAMPLE_YUV_PLANAR_12BIS),
   MAKE_FORMAT_YUV_PLANAR (Y444, UNSIGNED_INT8, SAMPLE_YUV_PLANAR),
+  MAKE_FORMAT_YUV_PLANAR (Y444_10LE, UNSIGNED_INT16, SAMPLE_YUV_PLANAR_10BIS),
+  MAKE_FORMAT_YUV_PLANAR (Y444_12LE, UNSIGNED_INT16, SAMPLE_YUV_PLANAR_12BIS),
   MAKE_FORMAT_YUV_PLANAR (Y444_16LE, UNSIGNED_INT16, SAMPLE_YUV_PLANAR),
   MAKE_FORMAT_RGB (RGBA, UNSIGNED_INT8, SAMPLE_RGBA),
   MAKE_FORMAT_RGB (BGRA, UNSIGNED_INT8, SAMPLE_BGRA),
@@ -1369,6 +1516,9 @@ static const TextureFormat format_map[] = {
   MAKE_FORMAT_RGBP (RGBP, UNSIGNED_INT8, SAMPLE_RGBP),
   MAKE_FORMAT_RGBP (BGRP, UNSIGNED_INT8, SAMPLE_BGRP),
   MAKE_FORMAT_RGBP (GBR, UNSIGNED_INT8, SAMPLE_GBR),
+  MAKE_FORMAT_RGBP (GBR_10LE, UNSIGNED_INT16, SAMPLE_GBR_10),
+  MAKE_FORMAT_RGBP (GBR_12LE, UNSIGNED_INT16, SAMPLE_GBR_12),
+  MAKE_FORMAT_RGBP (GBR_16LE, UNSIGNED_INT16, SAMPLE_GBR),
   MAKE_FORMAT_RGBAP (GBRA, UNSIGNED_INT8, SAMPLE_GBRA),
 };
 
@@ -1376,6 +1526,7 @@ typedef struct _TextureBuffer
 {
   CUdeviceptr ptr;
   gsize stride;
+  CUtexObject texture;
 } TextureBuffer;
 
 typedef struct
@@ -1390,6 +1541,8 @@ struct _GstCudaConverterPrivate
 {
   GstVideoInfo in_info;
   GstVideoInfo out_info;
+
+  GstVideoOrientationMethod method;
 
   GstStructure *config;
 
@@ -1450,12 +1603,22 @@ gst_cuda_converter_dispose (GObject * object)
 
     for (i = 0; i < G_N_ELEMENTS (priv->fallback_buffer); i++) {
       if (priv->fallback_buffer[i].ptr) {
+        if (priv->fallback_buffer[i].texture) {
+          CuTexObjectDestroy (priv->fallback_buffer[i].texture);
+          priv->fallback_buffer[i].texture = 0;
+        }
+
         CuMemFree (priv->fallback_buffer[i].ptr);
         priv->fallback_buffer[i].ptr = 0;
       }
     }
 
     if (priv->unpack_buffer.ptr) {
+      if (priv->unpack_buffer.texture) {
+        CuTexObjectDestroy (priv->unpack_buffer.texture);
+        priv->unpack_buffer.texture = 0;
+      }
+
       CuMemFree (priv->unpack_buffer.ptr);
       priv->unpack_buffer.ptr = 0;
     }
@@ -1541,10 +1704,11 @@ gst_cuda_converter_setup (GstCudaConverter * self)
   const gchar *write_func = NULL;
   const gchar *to_rgb_func = COLOR_SPACE_IDENTITY;
   const gchar *to_yuv_func = COLOR_SPACE_IDENTITY;
+  const gchar *rotate_func = ROTATE_IDENTITY;
   const GstVideoColorimetry *in_color;
   const GstVideoColorimetry *out_color;
   gchar *str;
-  gchar *ptx;
+  gchar *program = NULL;
   CUresult ret;
 
   in_info = &priv->in_info;
@@ -1573,16 +1737,24 @@ gst_cuda_converter_setup (GstCudaConverter * self)
       write_func = WRITE_NV21;
       break;
     case GST_VIDEO_FORMAT_P010_10LE:
-      write_func = WRITE_P010;
-      break;
+    case GST_VIDEO_FORMAT_P012_LE:
     case GST_VIDEO_FORMAT_P016_LE:
-      write_func = WRITE_P016;
+      write_func = WRITE_P010;
       break;
     case GST_VIDEO_FORMAT_I420_10LE:
       write_func = WRITE_I420_10;
       break;
+    case GST_VIDEO_FORMAT_I420_12LE:
+      write_func = WRITE_I420_12;
+      break;
     case GST_VIDEO_FORMAT_Y444:
       write_func = WRITE_Y444;
+      break;
+    case GST_VIDEO_FORMAT_Y444_10LE:
+      write_func = WRITE_Y444_10;
+      break;
+    case GST_VIDEO_FORMAT_Y444_12LE:
+      write_func = WRITE_Y444_12;
       break;
     case GST_VIDEO_FORMAT_Y444_16LE:
       write_func = WRITE_Y444_16;
@@ -1634,6 +1806,15 @@ gst_cuda_converter_setup (GstCudaConverter * self)
       break;
     case GST_VIDEO_FORMAT_GBR:
       write_func = WRITE_GBR;
+      break;
+    case GST_VIDEO_FORMAT_GBR_10LE:
+      write_func = WRITE_GBR_10;
+      break;
+    case GST_VIDEO_FORMAT_GBR_12LE:
+      write_func = WRITE_GBR_12;
+      break;
+    case GST_VIDEO_FORMAT_GBR_16LE:
+      write_func = WRITE_GBR_16;
       break;
     case GST_VIDEO_FORMAT_GBRA:
       write_func = WRITE_GBRA;
@@ -1802,6 +1983,32 @@ gst_cuda_converter_setup (GstCudaConverter * self)
   g_ascii_formatd (offset_y, G_ASCII_DTOSTR_BUF_SIZE, "%f",
       (gdouble) 0.5 / priv->dest_rect.height);
 
+  switch (priv->method) {
+    case GST_VIDEO_ORIENTATION_90R:
+      rotate_func = ROTATE_90R;
+      break;
+    case GST_VIDEO_ORIENTATION_180:
+      rotate_func = ROTATE_180;
+      break;
+    case GST_VIDEO_ORIENTATION_90L:
+      rotate_func = ROTATE_90L;
+      break;
+    case GST_VIDEO_ORIENTATION_HORIZ:
+      rotate_func = ROTATE_HORIZ;
+      break;
+    case GST_VIDEO_ORIENTATION_VERT:
+      rotate_func = ROTATE_VERT;
+      break;
+    case GST_VIDEO_ORIENTATION_UL_LR:
+      rotate_func = ROTATE_UL_LR;
+      break;
+    case GST_VIDEO_ORIENTATION_UR_LL:
+      rotate_func = ROTATE_UR_LL;
+      break;
+    default:
+      break;
+  }
+
   str = g_strdup_printf (TEMPLETA_KERNEL, KERNEL_COMMON,
       unpack_function ? unpack_function : "",
       /* TO RGB matrix */
@@ -1852,6 +2059,8 @@ gst_cuda_converter_setup (GstCudaConverter * self)
       /* border colors */
       border_color_str[0], border_color_str[1],
       border_color_str[2], border_color_str[3],
+      /* adjust coord before sampling */
+      rotate_func,
       /* sampler function name */
       priv->texture_fmt->sample_func,
       /* TO RGB conversion function name */
@@ -1862,21 +2071,47 @@ gst_cuda_converter_setup (GstCudaConverter * self)
       write_func);
 
   GST_LOG_OBJECT (self, "kernel code:\n%s\n", str);
-  ptx = gst_cuda_nvrtc_compile (str);
+  gint cuda_device;
+  g_object_get (self->context, "cuda-device-id", &cuda_device, NULL);
+  program = gst_cuda_nvrtc_compile_cubin (str, cuda_device);
+  if (!program) {
+    GST_WARNING_OBJECT (self, "Couldn't compile to cubin, trying ptx");
+    program = gst_cuda_nvrtc_compile (str);
+  }
   g_free (str);
 
-  if (!ptx) {
+  if (!program) {
     GST_ERROR_OBJECT (self, "Could not compile code");
     return FALSE;
   }
 
+  if (priv->dest_rect.x != 0 || priv->dest_rect.y != 0 ||
+      priv->dest_rect.width != out_info->width ||
+      priv->dest_rect.height != out_info->height ||
+      in_info->width != out_info->width
+      || in_info->height != out_info->height) {
+    for (i = 0; i < G_N_ELEMENTS (priv->filter_mode); i++)
+      priv->filter_mode[i] = CU_TR_FILTER_MODE_LINEAR;
+  } else {
+    for (i = 0; i < G_N_ELEMENTS (priv->filter_mode); i++)
+      priv->filter_mode[i] = CU_TR_FILTER_MODE_POINT;
+  }
+
   if (!gst_cuda_context_push (self->context)) {
     GST_ERROR_OBJECT (self, "Couldn't push context");
+    g_free (program);
     return FALSE;
   }
 
   /* Allocates intermediate memory for texture */
   if (unpack_function) {
+    CUDA_TEXTURE_DESC texture_desc;
+    CUDA_RESOURCE_DESC resource_desc;
+    CUtexObject texture = 0;
+
+    memset (&texture_desc, 0, sizeof (CUDA_TEXTURE_DESC));
+    memset (&resource_desc, 0, sizeof (CUDA_RESOURCE_DESC));
+
     ret = CuMemAllocPitch (&priv->unpack_buffer.ptr,
         &priv->unpack_buffer.stride,
         GST_VIDEO_INFO_COMP_WIDTH (texture_info, 0) *
@@ -1886,10 +2121,32 @@ gst_cuda_converter_setup (GstCudaConverter * self)
       GST_ERROR_OBJECT (self, "Couldn't allocate unpack buffer");
       goto error;
     }
+
+    resource_desc.resType = CU_RESOURCE_TYPE_PITCH2D;
+    resource_desc.res.pitch2D.format = priv->texture_fmt->array_format[0];
+    resource_desc.res.pitch2D.numChannels = 4;
+    resource_desc.res.pitch2D.width = in_info->width;
+    resource_desc.res.pitch2D.height = in_info->height;
+    resource_desc.res.pitch2D.pitchInBytes = priv->unpack_buffer.stride;
+    resource_desc.res.pitch2D.devPtr = priv->unpack_buffer.ptr;
+
+    texture_desc.filterMode = priv->filter_mode[0];
+    texture_desc.flags = 0x2;
+    texture_desc.addressMode[0] = 1;
+    texture_desc.addressMode[1] = 1;
+    texture_desc.addressMode[2] = 1;
+
+    ret = CuTexObjectCreate (&texture, &resource_desc, &texture_desc, NULL);
+    if (!gst_cuda_result (ret)) {
+      GST_ERROR_OBJECT (self, "Couldn't create unpack texture");
+      goto error;
+    }
+
+    priv->unpack_buffer.texture = texture;
   }
 
-  ret = CuModuleLoadData (&priv->module, ptx);
-  g_free (ptx);
+  ret = CuModuleLoadData (&priv->module, program);
+  g_clear_pointer (&program, g_free);
   if (!gst_cuda_result (ret)) {
     GST_ERROR_OBJECT (self, "Could not load module");
     priv->module = NULL;
@@ -1914,22 +2171,12 @@ gst_cuda_converter_setup (GstCudaConverter * self)
 
   gst_cuda_context_pop (NULL);
 
-  if (priv->dest_rect.x != 0 || priv->dest_rect.y != 0 ||
-      priv->dest_rect.width != out_info->width ||
-      priv->dest_rect.height != out_info->height ||
-      in_info->width != out_info->width
-      || in_info->height != out_info->height) {
-    for (i = 0; i < G_N_ELEMENTS (priv->filter_mode); i++)
-      priv->filter_mode[i] = CU_TR_FILTER_MODE_LINEAR;
-  } else {
-    for (i = 0; i < G_N_ELEMENTS (priv->filter_mode); i++)
-      priv->filter_mode[i] = CU_TR_FILTER_MODE_POINT;
-  }
-
   return TRUE;
 
 error:
   gst_cuda_context_pop (NULL);
+  g_free (program);
+
   return FALSE;
 }
 
@@ -1966,6 +2213,7 @@ gst_cuda_converter_new (const GstVideoInfo * in_info,
 {
   GstCudaConverter *self;
   GstCudaConverterPrivate *priv;
+  gint method;
 
   g_return_val_if_fail (in_info != NULL, NULL);
   g_return_val_if_fail (out_info != NULL, NULL);
@@ -1992,6 +2240,12 @@ gst_cuda_converter_new (const GstVideoInfo * in_info,
       GST_CUDA_CONVERTER_OPT_DEST_WIDTH, out_info->width);
   priv->dest_rect.height = get_opt_int (self,
       GST_CUDA_CONVERTER_OPT_DEST_HEIGHT, out_info->height);
+  if (gst_structure_get_enum (priv->config,
+          GST_CUDA_CONVERTER_OPT_ORIENTATION_METHOD,
+          GST_TYPE_VIDEO_ORIENTATION_METHOD, &method)) {
+    priv->method = method;
+    GST_DEBUG_OBJECT (self, "Selected orientation method %d", method);
+  }
 
   if (!gst_cuda_converter_setup (self))
     goto error;
@@ -2077,40 +2331,38 @@ gst_cuda_converter_create_texture (GstCudaConverter * self,
   GstCudaConverterPrivate *priv = self->priv;
   CUresult ret;
   CUdeviceptr src_ptr;
+  CUDA_MEMCPY2D params = { 0, };
 
-  src_ptr = src;
+  if (!ensure_fallback_buffer (self, stride, height, plane))
+    return 0;
 
-  if (priv->texture_align > 0 && (src_ptr % priv->texture_align) != 0) {
-    CUDA_MEMCPY2D params = { 0, };
+  params.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+  params.srcPitch = stride;
+  params.srcDevice = (CUdeviceptr) src;
 
-    GST_DEBUG_OBJECT (self, "Plane %d is not aligned, copying", plane);
+  params.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+  params.dstPitch = priv->fallback_buffer[plane].stride;
+  params.dstDevice = priv->fallback_buffer[plane].ptr;
+  params.WidthInBytes = GST_VIDEO_INFO_COMP_WIDTH (&priv->in_info, plane)
+      * GST_VIDEO_INFO_COMP_PSTRIDE (&priv->in_info, plane),
+      params.Height = GST_VIDEO_INFO_COMP_HEIGHT (&priv->in_info, plane);
 
-    if (!ensure_fallback_buffer (self, stride, height, plane))
-      return 0;
-
-    params.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-    params.srcPitch = stride;
-    params.srcDevice = (CUdeviceptr) src_ptr;
-
-    params.dstMemoryType = CU_MEMORYTYPE_DEVICE;
-    params.dstPitch = priv->fallback_buffer[plane].stride;
-    params.dstDevice = priv->fallback_buffer[plane].ptr;
-    params.WidthInBytes = GST_VIDEO_INFO_COMP_WIDTH (&priv->in_info, plane)
-        * GST_VIDEO_INFO_COMP_PSTRIDE (&priv->in_info, plane),
-        params.Height = GST_VIDEO_INFO_COMP_HEIGHT (&priv->in_info, plane);
-
-    ret = CuMemcpy2D (&params);
-    if (!gst_cuda_result (ret)) {
-      GST_ERROR_OBJECT (self, "Couldn't copy to fallback buffer");
-      return 0;
-    }
-
-    src_ptr = priv->fallback_buffer[plane].ptr;
-    stride = priv->fallback_buffer[plane].stride;
+  ret = CuMemcpy2DAsync (&params, stream);
+  if (!gst_cuda_result (ret)) {
+    GST_ERROR_OBJECT (self, "Couldn't copy to fallback buffer");
+    return 0;
   }
 
-  return gst_cuda_converter_create_texture_unchecked (self,
-      src_ptr, width, height, format, channles, stride, plane, mode);
+  if (!priv->fallback_buffer[plane].texture) {
+    src_ptr = priv->fallback_buffer[plane].ptr;
+    stride = priv->fallback_buffer[plane].stride;
+
+    priv->fallback_buffer[plane].texture =
+        gst_cuda_converter_create_texture_unchecked (self, src_ptr, width,
+        height, format, channles, stride, plane, mode);
+  }
+
+  return priv->fallback_buffer[plane].texture;
 }
 
 static gboolean
@@ -2148,7 +2400,8 @@ gst_cuda_converter_unpack_rgb (GstCudaConverter * self,
 
 gboolean
 gst_cuda_converter_convert_frame (GstCudaConverter * converter,
-    GstVideoFrame * src_frame, GstVideoFrame * dst_frame, CUstream stream)
+    GstVideoFrame * src_frame, GstVideoFrame * dst_frame, CUstream stream,
+    gboolean * synchronized)
 {
   GstCudaConverterPrivate *priv;
   const TextureFormat *format;
@@ -2162,6 +2415,8 @@ gst_cuda_converter_convert_frame (GstCudaConverter * converter,
   gpointer args[] = { &texture[0], &texture[1], &texture[2], &texture[3],
     &dst[0], &dst[1], &dst[2], &dst[3], &stride[0], &stride[1]
   };
+  gboolean need_sync = FALSE;
+  GstCudaMemory *cmem;
 
   g_return_val_if_fail (GST_IS_CUDA_CONVERTER (converter), FALSE);
   g_return_val_if_fail (src_frame != NULL, FALSE);
@@ -2172,6 +2427,9 @@ gst_cuda_converter_convert_frame (GstCudaConverter * converter,
 
   g_assert (format);
 
+  cmem = (GstCudaMemory *) gst_buffer_peek_memory (src_frame->buffer, 0);
+  g_return_val_if_fail (gst_is_cuda_memory (GST_MEMORY_CAST (cmem)), FALSE);
+
   if (!gst_cuda_context_push (converter->context)) {
     GST_ERROR_OBJECT (converter, "Couldn't push context");
     return FALSE;
@@ -2181,25 +2439,26 @@ gst_cuda_converter_convert_frame (GstCudaConverter * converter,
     if (!gst_cuda_converter_unpack_rgb (converter, src_frame, stream))
       goto out;
 
-    texture[0] = gst_cuda_converter_create_texture_unchecked (converter,
-        priv->unpack_buffer.ptr, priv->in_info.width, priv->in_info.height,
-        format->array_format[0], 4, priv->unpack_buffer.stride, 0,
-        priv->filter_mode[0]);
+    texture[0] = priv->unpack_buffer.texture;
     if (!texture[0]) {
-      GST_ERROR_OBJECT (converter, "Couldn't create texture");
+      GST_ERROR_OBJECT (converter, "Unpack texture is unavailable");
       goto out;
     }
   } else {
     for (i = 0; i < GST_VIDEO_FRAME_N_PLANES (src_frame); i++) {
-      CUdeviceptr src;
+      if (!gst_cuda_memory_get_texture (cmem,
+              i, priv->filter_mode[i], &texture[i])) {
+        CUdeviceptr src;
+        src = (CUdeviceptr) GST_VIDEO_FRAME_PLANE_DATA (src_frame, i);
+        texture[i] = gst_cuda_converter_create_texture (converter,
+            src, GST_VIDEO_FRAME_COMP_WIDTH (src_frame, i),
+            GST_VIDEO_FRAME_COMP_HEIGHT (src_frame, i),
+            GST_VIDEO_FRAME_PLANE_STRIDE (src_frame, i),
+            priv->filter_mode[i], format->array_format[i], format->channels[i],
+            i, stream);
+        need_sync = TRUE;
+      }
 
-      src = (CUdeviceptr) GST_VIDEO_FRAME_PLANE_DATA (src_frame, i);
-      texture[i] = gst_cuda_converter_create_texture (converter,
-          src, GST_VIDEO_FRAME_COMP_WIDTH (src_frame, i),
-          GST_VIDEO_FRAME_COMP_HEIGHT (src_frame, i),
-          GST_VIDEO_FRAME_PLANE_STRIDE (src_frame, i),
-          priv->filter_mode[i], format->array_format[i], format->channels[i], i,
-          stream);
       if (!texture[i]) {
         GST_ERROR_OBJECT (converter, "Couldn't create texture %d", i);
         goto out;
@@ -2226,17 +2485,15 @@ gst_cuda_converter_convert_frame (GstCudaConverter * converter,
     goto out;
   }
 
-  CuStreamSynchronize (stream);
+  if (need_sync)
+    CuStreamSynchronize (stream);
+
+  if (synchronized)
+    *synchronized = need_sync;
 
   ret = TRUE;
 
 out:
-  for (i = 0; i < G_N_ELEMENTS (texture); i++) {
-    if (texture[i])
-      CuTexObjectDestroy (texture[i]);
-    else
-      break;
-  }
 
   gst_cuda_context_pop (NULL);
   return ret;

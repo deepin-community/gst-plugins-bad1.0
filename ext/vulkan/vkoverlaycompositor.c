@@ -204,8 +204,8 @@ vk_overlay_upload (struct vk_overlay *overlay, GstVideoInfo * out_info,
       .srcAccessMask = buf_mem->barrier.parent.access_flags,
       .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
       /* FIXME: implement exclusive transfers */
-      .srcQueueFamilyIndex = 0,
-      .dstQueueFamilyIndex = 0,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .buffer = buf_mem->buffer,
       .offset = region.bufferOffset,
       .size = region.bufferRowLength * region.bufferImageHeight,
@@ -219,8 +219,8 @@ vk_overlay_upload (struct vk_overlay *overlay, GstVideoInfo * out_info,
       .oldLayout = img_mem->barrier.image_layout,
       .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
       /* FIXME: implement exclusive transfers */
-      .srcQueueFamilyIndex = 0,
-      .dstQueueFamilyIndex = 0,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .image = img_mem->image,
       .subresourceRange = img_mem->barrier.subresource_range,
   };
@@ -446,7 +446,7 @@ static GstFlowReturn
 gst_vulkan_overlay_compositor_transform_ip (GstBaseTransform * bt,
     GstBuffer * inbuf);
 
-#define IMAGE_FORMATS " { BGRA }"
+#define IMAGE_FORMATS " { BGRA, RGBA }"
 
 static GstStaticPadTemplate gst_vulkan_sink_template =
     GST_STATIC_PAD_TEMPLATE ("sink",

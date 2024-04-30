@@ -44,6 +44,7 @@
 #endif
 
 #include <gst/va/gstva.h>
+#include <gst/va/vasurfaceimage.h>
 
 #include "gstvaav1dec.h"
 #include "gstvabasedec.h"
@@ -255,6 +256,7 @@ _create_internal_pool (GstVaAV1Dec * self, gint width, gint height)
   GstAllocator *allocator;
   GstCaps *caps = NULL;
   GstBufferPool *pool;
+  guint usage_hint;
   GstAllocationParams params = { 0, };
 
   gst_allocation_params_init (&params);
@@ -265,7 +267,7 @@ _create_internal_pool (GstVaAV1Dec * self, gint width, gint height)
     GstVideoFormat format;
 
     gst_va_base_dec_get_preferred_format_and_caps_features (base,
-        &format, NULL);
+        &format, NULL, NULL);
     if (format == GST_VIDEO_FORMAT_UNKNOWN) {
       GST_WARNING_OBJECT (self, "Failed to get format for internal pool");
       return NULL;
@@ -288,9 +290,11 @@ _create_internal_pool (GstVaAV1Dec * self, gint width, gint height)
   surface_formats = gst_va_decoder_get_surface_formats (base->decoder);
   allocator = gst_va_allocator_new (base->display, surface_formats);
 
-  pool = gst_va_pool_new_with_config (caps, GST_VIDEO_INFO_SIZE (&info),
-      1, 0, VA_SURFACE_ATTRIB_USAGE_HINT_DECODER, GST_VA_FEATURE_AUTO,
-      allocator, &params);
+  usage_hint = va_get_surface_usage_hint (base->display,
+      VAEntrypointVLD, GST_PAD_SRC, FALSE);
+
+  pool = gst_va_pool_new_with_config (caps, 1, 0, usage_hint,
+      GST_VA_FEATURE_AUTO, allocator, &params);
 
   gst_clear_caps (&caps);
   gst_object_unref (allocator);
@@ -919,7 +923,7 @@ gst_va_av1_dec_end_picture (GstAV1Decoder * decoder, GstAV1Picture * picture)
   GstVaDecodePicture *va_pic;
 
   GST_LOG_OBJECT (self, "end picture %p, (system_frame_number %d)",
-      picture, picture->system_frame_number);
+      picture, GST_CODEC_PICTURE_FRAME_NUMBER (picture));
 
   va_pic = gst_av1_picture_get_user_data (picture);
 
@@ -938,6 +942,7 @@ gst_va_av1_dec_output_picture (GstAV1Decoder * decoder,
   GstVaAV1Dec *self = GST_VA_AV1_DEC (decoder);
   GstVaBaseDec *base = GST_VA_BASE_DEC (decoder);
   GstVideoDecoder *vdec = GST_VIDEO_DECODER (decoder);
+  GstCodecPicture *codec_picture = GST_CODEC_PICTURE (picture);
   gboolean ret;
 
   g_assert (picture->frame_hdr.show_frame ||
@@ -945,7 +950,7 @@ gst_va_av1_dec_output_picture (GstAV1Decoder * decoder,
 
   GST_LOG_OBJECT (self,
       "Outputting picture %p (system_frame_number %d)",
-      picture, picture->system_frame_number);
+      picture, codec_picture->system_frame_number);
 
   if (picture->frame_hdr.show_existing_frame) {
     GstVaDecodePicture *pic;
@@ -955,7 +960,8 @@ gst_va_av1_dec_output_picture (GstAV1Decoder * decoder,
     frame->output_buffer = gst_buffer_ref (pic->gstbuffer);
   }
 
-  ret = gst_va_base_dec_process_output (base, frame, picture->discont_state, 0);
+  ret = gst_va_base_dec_process_output (base,
+      frame, codec_picture->discont_state, 0);
   gst_av1_picture_unref (picture);
 
   if (ret)
@@ -1107,22 +1113,9 @@ gst_va_av1_dec_register (GstPlugin * plugin, GstVaDevice * device,
 
   type_info.class_data = cdata;
 
-  /* The first decoder to be registered should use a constant name,
-   * like vaav1dec, for any additional decoders, we create unique
-   * names, using inserting the render device name. */
-  if (device->index == 0) {
-    type_name = g_strdup ("GstVaAV1Dec");
-    feature_name = g_strdup ("vaav1dec");
-  } else {
-    gchar *basename = g_path_get_basename (device->render_device_path);
-    type_name = g_strdup_printf ("GstVa%sAV1Dec", basename);
-    feature_name = g_strdup_printf ("va%sav1dec", basename);
-    cdata->description = basename;
-
-    /* lower rank for non-first device */
-    if (rank > 0)
-      rank--;
-  }
+  gst_va_create_feature_name (device, "GstVaAV1Dec", "GstVa%sAV1Dec",
+      &type_name, "vaav1dec", "va%sav1dec", &feature_name,
+      &cdata->description, &rank);
 
   g_once (&debug_once, _register_debug_category, NULL);
 

@@ -53,12 +53,13 @@ GType gst_vulkan_memory_allocator_get_type(void);
 #define GST_VULKAN_MEMORY_ALLOCATOR_NAME "Vulkan"
 
 /**
- * GstVulkanMemory
+ * GstVulkanMemory:
  * @mem: the parent #GstMemory
  * @device: the #GstVulkanDevice this memory is allocated from
  * @mem_ptr: the vulkan memory handle
  * @lock: lock for accessing/changing memory informat
  * @map_count: number of times this memory is mapped
+ * @mapping: internal pointer to already mapped memory
  *
  * Since: 1.18
  */
@@ -73,6 +74,14 @@ struct _GstVulkanMemory
   /* <protected> */
   GMutex                    lock;
   guint                     map_count;
+  /**
+   * GstVulkanMemory.mapping:
+   *
+   * internal pointer to already mapped memory
+   *
+   * Since: 1.24
+   */
+  gpointer                  mapping;
 
   /* <private> */
   GDestroyNotify            notify;
@@ -138,10 +147,11 @@ GstMemory *     gst_vulkan_memory_alloc         (GstVulkanDevice * device,
                                                  VkMemoryPropertyFlags mem_prop_flags);
 
 GST_VULKAN_API
-gboolean        gst_vulkan_memory_find_memory_type_index_with_type_properties   (GstVulkanDevice * device,
-                                                                                 guint32 type_bits,
+gboolean       gst_vulkan_memory_find_memory_type_index_with_requirements       (GstVulkanDevice * device,
+                                                                                 VkMemoryRequirements * req,
                                                                                  VkMemoryPropertyFlags properties,
                                                                                  guint32 * type_index);
+
 
 G_END_DECLS
 

@@ -58,6 +58,9 @@ GST_D3D11_API
 gint64          gst_d3d11_luid_to_int64             (const LUID * luid);
 
 GST_D3D11_API
+gint64          gst_d3d11_create_user_token         (void);
+
+GST_D3D11_API
 gboolean       _gst_d3d11_result                    (HRESULT hr,
                                                      GstD3D11Device * device,
                                                      GstDebugCategory * cat,
@@ -73,8 +76,13 @@ gboolean       _gst_d3d11_result                    (HRESULT hr,
  *
  * Since: 1.22
  */
+#ifndef GST_DISABLE_GST_DEBUG
 #define gst_d3d11_result(result,device) \
     _gst_d3d11_result (result, device, GST_CAT_DEFAULT, __FILE__, GST_FUNCTION, __LINE__)
+#else
+#define gst_d3d11_result(result,device) \
+    _gst_d3d11_result (result, device, NULL, __FILE__, GST_FUNCTION, __LINE__)
+#endif /* GST_DISABLE_GST_DEBUG */
 
 G_END_DECLS
 

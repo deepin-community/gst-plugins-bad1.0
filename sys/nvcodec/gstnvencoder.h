@@ -22,15 +22,19 @@
 #include <gst/gst.h>
 #include <gst/video/video.h>
 
-#ifdef GST_CUDA_HAS_D3D
+#ifdef G_OS_WIN32
 #include <gst/d3d11/gstd3d11.h>
+#endif
+
+#ifdef HAVE_CUDA_GST_GL
+#include <gst/gl/gl.h>
 #endif
 
 #include <string.h>
 
+#include <gst/cuda/gstcuda.h>
 #include "nvEncodeAPI.h"
 #include "gstnvenc.h"
-#include <gst/cuda/gstcudamemory.h>
 
 G_BEGIN_DECLS
 
@@ -65,6 +69,13 @@ typedef enum
   GST_NV_ENCODER_PRESET_LOW_LATENCY_HP,
   GST_NV_ENCODER_PRESET_LOSSLESS_DEFAULT,
   GST_NV_ENCODER_PRESET_LOSSLESS_HP,
+  GST_NV_ENCODER_PRESET_P1,
+  GST_NV_ENCODER_PRESET_P2,
+  GST_NV_ENCODER_PRESET_P3,
+  GST_NV_ENCODER_PRESET_P4,
+  GST_NV_ENCODER_PRESET_P5,
+  GST_NV_ENCODER_PRESET_P6,
+  GST_NV_ENCODER_PRESET_P7,
 } GstNvEncoderPreset;
 
 #define GST_TYPE_NV_ENCODER_RC_MODE (gst_nv_encoder_rc_mode_get_type())
@@ -79,6 +90,37 @@ typedef enum
   GST_NV_ENCODER_RC_MODE_CBR_HQ,
   GST_NV_ENCODER_RC_MODE_VBR_HQ,
 } GstNvEncoderRCMode;
+
+#define GST_TYPE_NV_ENCODER_SEI_INSERT_MODE (gst_nv_encoder_sei_insert_mode_get_type ())
+GType gst_nv_encoder_sei_insert_mode_get_type (void);
+
+typedef enum
+{
+  GST_NV_ENCODER_SEI_INSERT,
+  GST_NV_ENCODER_SEI_INSERT_AND_DROP,
+  GST_NV_ENCODER_SEI_DISABLED,
+} GstNvEncoderSeiInsertMode;
+
+#define GST_TYPE_NV_ENCODER_MULTI_PASS (gst_nv_encoder_multi_pass_get_type ())
+GType gst_nv_encoder_multi_pass_get_type (void);
+typedef enum
+{
+  GST_NV_ENCODER_MULTI_PASS_DEFAULT = 0,
+  GST_NV_ENCODER_MULTI_PASS_DISABLED = 1,
+  GST_NV_ENCODER_TWO_PASS_QUARTER_RESOLUTION = 2,
+  GST_NV_ENCODER_TWO_PASS_FULL_RESOLUTION = 3,
+} GstNvEncoderMultiPass;
+
+#define GST_TYPE_NV_ENCODER_TUNE (gst_nv_encoder_tune_get_type ())
+GType gst_nv_encoder_tune_get_type (void);
+typedef enum
+{
+  GST_NV_ENCODER_TUNE_DEFAULT = 0,
+  GST_NV_ENCODER_TUNE_HIGH_QUALITY = 1,
+  GST_NV_ENCODER_TUNE_LOW_LATENCY = 2,
+  GST_NV_ENCODER_TUNE_ULTRA_LOW_LATENCY = 3,
+  GST_NV_ENCODER_TUNE_LOSSLESS = 4,
+} GstNvEncoderTune;
 
 typedef struct
 {
@@ -164,27 +206,6 @@ typedef struct
 
 typedef struct
 {
-  /* without ref */
-  GstNvEncoder *encoder;
-
-  /* Holds ownership */
-  GstBuffer *buffer;
-  GstMapInfo map_info;
-
-  NV_ENC_REGISTER_RESOURCE register_resource;
-  NV_ENC_MAP_INPUT_RESOURCE mapped_resource;
-
-  /* Used when input resource cannot be registered */
-  NV_ENC_CREATE_INPUT_BUFFER input_buffer;
-  NV_ENC_LOCK_INPUT_BUFFER lk_input_buffer;
-
-  NV_ENC_OUTPUT_PTR output_ptr;
-  gpointer event_handle;
-  gboolean is_eos;
-} GstNvEncoderTask;
-
-typedef struct
-{
   GstNvEncoderDeviceMode device_mode;
   guint cuda_device_id;
   gint64 adapter_luid;
@@ -228,16 +249,16 @@ struct _GstNvEncoderClass
 
 GType gst_nv_encoder_get_type (void);
 
-guint gst_nv_encoder_get_task_size (GstNvEncoder * encoder);
+void gst_nv_encoder_preset_to_native (GstNvEncoderPreset preset,
+                                      GstNvEncoderTune tune,
+                                      GUID * preset_guid,
+                                      NV_ENC_TUNING_INFO * tune_info);
 
-const gchar * gst_nv_encoder_status_to_string (NVENCSTATUS status);
-#define GST_NVENC_STATUS_FORMAT "s (%d)"
-#define GST_NVENC_STATUS_ARGS(s) gst_nv_encoder_status_to_string (s), s
+void gst_nv_encoder_rc_mode_to_native (GstNvEncoderRCMode rc_mode,
+                                       GstNvEncoderMultiPass multipass,
+                                       NV_ENC_PARAMS_RC_MODE * rc_mode_native,
+                                       NV_ENC_MULTI_PASS * multipass_native);
 
-void gst_nv_encoder_preset_to_guid (GstNvEncoderPreset preset,
-                                    GUID * guid);
-
-NV_ENC_PARAMS_RC_MODE gst_nv_encoder_rc_mode_to_native (GstNvEncoderRCMode rc_mode);
 
 void gst_nv_encoder_set_device_mode (GstNvEncoder * encoder,
                                      GstNvEncoderDeviceMode mode,
@@ -258,6 +279,14 @@ void gst_nv_encoder_merge_device_caps (const GstNvEncoderDeviceCaps * a,
                                        const GstNvEncoderDeviceCaps * b,
                                        GstNvEncoderDeviceCaps * merged);
 
+gboolean _gst_nv_enc_result (NVENCSTATUS status,
+                             GObject * self,
+                             const gchar * file,
+                             const gchar * function,
+                             gint line);
+
+#define gst_nv_enc_result(status,self) \
+    _gst_nv_enc_result (status, (GObject *) self, __FILE__, GST_FUNCTION, __LINE__)
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(GstNvEncoder, gst_object_unref)
 

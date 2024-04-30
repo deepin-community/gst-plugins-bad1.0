@@ -336,7 +336,7 @@ typedef struct
 static ConnectTaskData *
 connect_task_data_new (const GstRtmpLocation * location)
 {
-  ConnectTaskData *data = g_slice_new0 (ConnectTaskData);
+  ConnectTaskData *data = g_new0 (ConnectTaskData, 1);
   gst_rtmp_location_copy (&data->location, location);
   return data;
 }
@@ -351,7 +351,7 @@ connect_task_data_free (gpointer ptr)
     g_signal_handler_disconnect (data->connection, data->error_handler_id);
   }
   g_clear_object (&data->connection);
-  g_slice_free (ConnectTaskData, data);
+  g_free (data);
 }
 
 static GRegex *auth_regex = NULL;
@@ -602,13 +602,6 @@ send_connect (GTask * task)
     goto out;
   }
 
-  if (!flash_ver) {
-    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_INITIALIZED,
-        "Flash version is not set");
-    g_object_unref (task);
-    goto out;
-  }
-
   if (data->auth_query) {
     const gchar *query = data->auth_query;
     appstr = g_strdup_printf ("%s?%s", app, query);
@@ -649,9 +642,11 @@ send_connect (GTask * task)
     gst_amf_node_append_field_string (node, "type", "nonprivate", -1);
   }
 
-  /* "Flash Player version. It is the same string as returned by the
-   * ApplicationScript getversion () function." */
-  gst_amf_node_append_field_string (node, "flashVer", flash_ver, -1);
+  if (flash_ver) {
+    /* "Flash Player version. It is the same string as returned by the
+     * ApplicationScript getversion () function." */
+    gst_amf_node_append_field_string (node, "flashVer", flash_ver, -1);
+  }
 
   /* "URL of the source SWF file making the connection."
    * XXX: libavformat sends "swfUrl" here, if provided. */
@@ -1074,7 +1069,7 @@ static StreamTaskData *
 stream_task_data_new (GstRtmpConnection * connection, const gchar * stream,
     gboolean publish)
 {
-  StreamTaskData *data = g_slice_new0 (StreamTaskData);
+  StreamTaskData *data = g_new0 (StreamTaskData, 1);
   data->connection = g_object_ref (connection);
   data->stream = g_strdup (stream);
   data->publish = publish;
@@ -1090,7 +1085,7 @@ stream_task_data_free (gpointer ptr)
     g_signal_handler_disconnect (data->connection, data->error_handler_id);
   }
   g_clear_object (&data->connection);
-  g_slice_free (StreamTaskData, data);
+  g_free (data);
 }
 
 static void

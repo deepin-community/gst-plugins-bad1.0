@@ -24,6 +24,7 @@
 
 #include "gstvkphysicaldevice.h"
 
+#include "gstvkphysicaldevice-private.h"
 #include "gstvkdebug.h"
 
 #include <string.h>
@@ -65,6 +66,10 @@ struct _GstVulkanPhysicalDevicePrivate
   VkPhysicalDeviceVulkan11Properties properties11;
   VkPhysicalDeviceVulkan12Features features12;
   VkPhysicalDeviceVulkan12Properties properties12;
+#endif
+#if defined (VK_API_VERSION_1_3)
+  VkPhysicalDeviceVulkan13Features features13;
+  VkPhysicalDeviceVulkan13Properties properties13;
 #endif
 };
 
@@ -187,6 +192,15 @@ gst_vulkan_physical_device_init (GstVulkanPhysicalDevice * device)
   priv->features10.pNext = &priv->features11;
   priv->features11.pNext = &priv->features12;
 #endif
+#if defined (VK_API_VERSION_1_3)
+  priv->properties13.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES;
+  priv->properties12.pNext = &priv->properties13;
+
+  priv->features13.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+  priv->features12.pNext = &priv->features13;
+#endif
 }
 
 static void
@@ -247,6 +261,7 @@ gst_vulkan_physical_device_finalize (GObject * object)
   g_free (priv->available_extensions);
   priv->available_extensions = NULL;
 
+  g_free (device->queue_family_ops);
   g_free (device->queue_family_props);
   device->queue_family_props = NULL;
 
@@ -437,6 +452,32 @@ dump_features12 (GstVulkanPhysicalDevice * device,
   /* *INDENT-ON* */
 }
 #endif
+
+#if defined (VK_API_VERSION_1_3)
+static void
+dump_features13 (GstVulkanPhysicalDevice * device,
+    VkPhysicalDeviceVulkan13Features * features)
+{
+  /* *INDENT-OFF* */
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, robustImageAccess);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, inlineUniformBlock);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, descriptorBindingInlineUniformBlockUpdateAfterBind);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, pipelineCreationCacheControl);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, privateData);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, shaderDemoteToHelperInvocation);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, shaderTerminateInvocation);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, subgroupSizeControl);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, computeFullSubgroups);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, synchronization2);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, textureCompressionASTC_HDR);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, shaderZeroInitializeWorkgroupMemory);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, dynamicRendering);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, shaderIntegerDotProduct);
+  DEBUG_BOOL_STRUCT ("support for (1.3)", features, maintenance4);
+  /* *INDENT-ON* */
+}
+#endif
+
 static gboolean
 dump_features (GstVulkanPhysicalDevice * device, GError ** error)
 {
@@ -456,6 +497,12 @@ dump_features (GstVulkanPhysicalDevice * device, GError ** error)
       else if (iter->sType ==
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
         dump_features12 (device, (VkPhysicalDeviceVulkan12Features *) iter);
+#if defined (VK_API_VERSION_1_3)
+      else if (gst_vulkan_instance_check_version (device->instance, 1, 3, 0)
+          && iter->sType ==
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES)
+        dump_features13 (device, (VkPhysicalDeviceVulkan13Features *) iter);
+#endif
     }
   } else
 #endif
@@ -514,10 +561,11 @@ dump_queue_properties (GstVulkanPhysicalDevice * device, GError ** error)
         queue_family_props[i].queueFlags);
     GST_LOG_OBJECT (device,
         "queue family at index %i supports %i queues "
-        "with flags (0x%x) \'%s\', %" G_GUINT32_FORMAT " timestamp bits and "
-        "a minimum image transfer granuality of %" GST_VULKAN_EXTENT3D_FORMAT,
-        i, device->queue_family_props[i].queueCount,
+        "with flags (0x%x) \'%s\', video operations (0x%x), %" G_GUINT32_FORMAT
+        " timestamp bits and a minimum image transfer granuality of %"
+        GST_VULKAN_EXTENT3D_FORMAT, i, device->queue_family_props[i].queueCount,
         device->queue_family_props[i].queueFlags, queue_flags_str,
+        device->queue_family_ops ? device->queue_family_ops[i].video : 0,
         device->queue_family_props[i].timestampValidBits,
         GST_VULKAN_EXTENT3D_ARGS (device->
             queue_family_props[i].minImageTransferGranularity));
@@ -748,6 +796,61 @@ dump_properties12 (GstVulkanPhysicalDevice * device,
 }
 #endif
 
+#if defined(VK_API_VERSION_1_3)
+static void
+dump_properties13 (GstVulkanPhysicalDevice * device,
+    VkPhysicalDeviceVulkan13Properties * properties)
+{
+  /* *INDENT-OFF* */
+  DEBUG_UINT32 ("properties (1.3)", properties, minSubgroupSize);
+  DEBUG_UINT32 ("properties (1.3)", properties, maxSubgroupSize);
+  DEBUG_UINT32 ("properties (1.3)", properties, maxComputeWorkgroupSubgroups);
+  /* VkShaderStageFlags    requiredSubgroupSizeStages; */
+  DEBUG_UINT32 ("properties (1.3)", properties, maxInlineUniformBlockSize);
+  DEBUG_UINT32 ("properties (1.3)", properties, maxPerStageDescriptorInlineUniformBlocks);
+  DEBUG_UINT32 ("properties (1.3)", properties, maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks);
+  DEBUG_UINT32 ("properties (1.3)", properties, maxDescriptorSetInlineUniformBlocks);
+  DEBUG_UINT32 ("properties (1.3)", properties, maxDescriptorSetUpdateAfterBindInlineUniformBlocks);
+  DEBUG_UINT32 ("properties (1.3)", properties, maxInlineUniformTotalSize);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct8BitUnsignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct8BitSignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct8BitMixedSignednessAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct4x8BitPackedUnsignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct4x8BitPackedSignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct4x8BitPackedMixedSignednessAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct16BitUnsignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct16BitSignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct16BitMixedSignednessAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct32BitUnsignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct32BitSignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct32BitMixedSignednessAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct64BitUnsignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct64BitSignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProduct64BitMixedSignednessAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating8BitUnsignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating8BitSignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating8BitMixedSignednessAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating4x8BitPackedUnsignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating4x8BitPackedSignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating4x8BitPackedMixedSignednessAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating16BitUnsignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating16BitSignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating16BitMixedSignednessAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating32BitUnsignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating32BitSignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating32BitMixedSignednessAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating64BitUnsignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating64BitSignedAccelerated);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated);
+  DEBUG_SIZE ("properties (1.3)", properties, storageTexelBufferOffsetAlignmentBytes);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, storageTexelBufferOffsetSingleTexelAlignment);
+  DEBUG_SIZE ("properties (1.3)", properties, uniformTexelBufferOffsetAlignmentBytes);
+  DEBUG_BOOL_STRUCT ("properties (1.3)", properties, uniformTexelBufferOffsetSingleTexelAlignment);
+  DEBUG_SIZE ("properties (1.3)", properties, maxBufferSize);
+  /* *INDENT-ON* */
+}
+#endif
+
 static gboolean
 physical_device_info (GstVulkanPhysicalDevice * device, GError ** error)
 {
@@ -789,6 +892,12 @@ physical_device_info (GstVulkanPhysicalDevice * device, GError ** error)
       else if (iter->sType ==
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES)
         dump_properties12 (device, (VkPhysicalDeviceVulkan12Properties *) iter);
+#if defined (VK_API_VERSION_1_3)
+      else if (gst_vulkan_instance_check_version (device->instance, 1, 3, 0)
+          && iter->sType ==
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES)
+        dump_properties13 (device, (VkPhysicalDeviceVulkan13Properties *) iter);
+#endif
     }
   }
 #endif
@@ -897,22 +1006,55 @@ gst_vulkan_physical_device_fill_info (GstVulkanPhysicalDevice * device,
     if (device->n_queue_families > 0) {
       VkQueueFamilyProperties2 *props;
       int i;
+      void *next = NULL;
+#if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
+      VkQueueFamilyVideoPropertiesKHR *queue_family_video_props;
+      VkQueueFamilyQueryResultStatusPropertiesKHR *queue_family_query_props;
 
+      queue_family_video_props =
+          g_new0 (VkQueueFamilyVideoPropertiesKHR, device->n_queue_families);
+      queue_family_query_props =
+          g_new0 (VkQueueFamilyQueryResultStatusPropertiesKHR,
+          device->n_queue_families);
+#endif
       props = g_new0 (VkQueueFamilyProperties2, device->n_queue_families);
       for (i = 0; i < device->n_queue_families; i++) {
+#if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
+        queue_family_query_props[i].sType =
+            VK_STRUCTURE_TYPE_QUEUE_FAMILY_QUERY_RESULT_STATUS_PROPERTIES_KHR;
+
+        queue_family_video_props[i].sType =
+            VK_STRUCTURE_TYPE_QUEUE_FAMILY_VIDEO_PROPERTIES_KHR;
+        queue_family_video_props[i].pNext = &queue_family_query_props[i];
+
+        next = &queue_family_video_props[i];
+#endif
         props[i].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
-        props[i].pNext = NULL;
+        props[i].pNext = next;
       }
 
       get_queue_props2 (device->device, &device->n_queue_families, props);
 
       device->queue_family_props =
           g_new0 (VkQueueFamilyProperties, device->n_queue_families);
+      device->queue_family_ops =
+          g_new0 (GstVulkanQueueFamilyOps, device->n_queue_families);
       for (i = 0; i < device->n_queue_families; i++) {
         memcpy (&device->queue_family_props[i], &props[i].queueFamilyProperties,
             sizeof (device->queue_family_props[i]));
+
+#if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
+        device->queue_family_ops[i].video =
+            queue_family_video_props[i].videoCodecOperations;
+        device->queue_family_ops[i].query =
+            queue_family_query_props[i].queryResultStatusSupport;
+#endif
       }
       g_free (props);
+#if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
+      g_free (queue_family_video_props);
+      g_free (queue_family_query_props);
+#endif
     }
   } else
 #endif
@@ -1083,4 +1225,19 @@ gst_vulkan_physical_device_get_extension_info (GstVulkanPhysicalDevice * device,
   GST_OBJECT_UNLOCK (device);
 
   return ret;
+}
+
+const VkPhysicalDeviceFeatures2 *
+gst_vulkan_physical_device_get_features (GstVulkanPhysicalDevice * device)
+{
+#if defined (VK_API_VERSION_1_2)
+  GstVulkanPhysicalDevicePrivate *priv;
+
+  g_return_val_if_fail (GST_IS_VULKAN_PHYSICAL_DEVICE (device), FALSE);
+
+  priv = GET_PRIV (device);
+  if (gst_vulkan_instance_check_version (device->instance, 1, 2, 0))
+    return &priv->features10;
+#endif
+  return NULL;
 }

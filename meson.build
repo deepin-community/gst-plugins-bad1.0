@@ -1,6 +1,6 @@
 project('gst-plugins-bad', 'c', 'cpp',
-  version : '1.22.4',
-  meson_version : '>= 0.62',
+  version : '1.24.2',
+  meson_version : '>= 1.1',
   default_options : [ 'warning_level=1',
                       'buildtype=debugoptimized' ])
 
@@ -17,7 +17,7 @@ endif
 gst_version_is_stable = gst_version_minor.is_even()
 gst_version_is_dev = gst_version_minor.is_odd() and gst_version_micro < 90
 
-glib_req = '>= 2.62.0'
+glib_req = '>= 2.64.0'
 orc_req = '>= 0.4.17'
 
 if gst_version_is_stable
@@ -83,8 +83,6 @@ if cc.get_id() == 'msvc'
       '/we4053', # one void operand for '?:'
       '/we4062', # enumerator 'identifier' in switch of enum 'enumeration' is not handled
       '/we4098', # 'function' : void function returning a value
-      '/we4101', # 'identifier' : unreferenced local variable
-      '/we4189', # 'identifier' : local variable is initialized but not referenced
     ])
   endif
   add_project_arguments(msvc_args, language: ['c', 'cpp'])
@@ -213,7 +211,7 @@ cdata.set('SIZEOF_VOIDP', cc.sizeof('void*'))
 cdata.set_quoted('VERSION', gst_version)
 cdata.set_quoted('PACKAGE', 'gst-plugins-bad')
 cdata.set_quoted('PACKAGE_VERSION', gst_version)
-cdata.set_quoted('PACKAGE_BUGREPORT', 'https://gitlab.freedesktop.org/gstreamer/gst-plugins-bad/issues/new')
+cdata.set_quoted('PACKAGE_BUGREPORT', 'https://gitlab.freedesktop.org/gstreamer/gstreamer/issues/new')
 cdata.set_quoted('PACKAGE_NAME', 'GStreamer Bad Plug-ins')
 cdata.set_quoted('GETTEXT_PACKAGE', 'gst-plugins-bad-1.0')
 cdata.set_quoted('GST_API_VERSION', api_version)
@@ -352,9 +350,12 @@ if gstgl_dep.found()
   message('GStreamer OpenGL platforms: @0@'.format(' '.join(gst_gl_platforms)))
   message('GStreamer OpenGL apis: @0@'.format(' '.join(gst_gl_apis)))
 
-  foreach ws : ['x11', 'wayland', 'android', 'cocoa', 'eagl', 'win32', 'dispmanx', 'viv_fb']
+  foreach ws : ['x11', 'wayland', 'android', 'cocoa', 'eagl', 'win32', 'dispmanx']
     set_variable('gst_gl_have_window_@0@'.format(ws), gst_gl_winsys.contains(ws))
   endforeach
+  # Handling viv-fb separately, because the winsys is called "viv-fb", but the
+  # variable suffix must be "viv_fb" (dashes are not allowed in variable names).
+  set_variable('gst_gl_have_window_viv_fb', gst_gl_winsys.contains('viv-fb'))
 
   foreach p : ['glx', 'egl', 'cgl', 'eagl', 'wgl']
     set_variable('gst_gl_have_platform_@0@'.format(p), gst_gl_platforms.contains(p))
@@ -379,6 +380,10 @@ if gstgl_dep.found()
   if gst_gl_have_platform_egl
     gstglegl_dep = dependency('gstreamer-gl-egl-1.0', version : gst_req,
         fallback : ['gst-plugins-base', 'gstglegl_dep'], required: true)
+  endif
+  if gst_gl_have_window_viv_fb
+    gstglviv_fb_dep = dependency('gstreamer-gl-viv-fb-1.0', version : gst_req,
+        fallback : ['gst-plugins-base', 'gstglviv_fb_dep'], required: true)
   endif
 endif
 
@@ -471,11 +476,6 @@ else
 endif
 cdata.set('GST_ENABLE_EXTRA_CHECKS', not get_option('extra-checks').disabled())
 
-gnustl_dep = declare_dependency()
-if host_system == 'android'
-  gnustl_dep = dependency('gnustl', required : false)
-endif
-
 # Disable compiler warnings for unused variables and args if gst debug system is disabled
 if gst_dep.type_name() == 'internal'
   gst_debug_disabled = not subproject('gstreamer').get_variable('gst_debug')
@@ -487,13 +487,28 @@ endif
 
 if gst_debug_disabled
   message('GStreamer debug system is disabled')
-  if cc.has_argument('-Wno-unused')
-    add_project_arguments('-Wno-unused', language: 'c')
-  endif
-  if cxx.has_argument ('-Wno-unused')
-    add_project_arguments('-Wno-unused', language: 'cpp')
+  if cc.get_argument_syntax() == 'msvc'
+    msvc_args = cc.get_supported_arguments([
+      '/wd4101', # 'identifier' : unreferenced local variable
+      '/wd4189', # 'identifier' : local variable is initialized but not referenced
+    ])
+    add_project_arguments(msvc_args, language: ['c', 'cpp'])
+  else
+    if cc.has_argument('-Wno-unused')
+      add_project_arguments('-Wno-unused', language: 'c')
+    endif
+    if cxx.has_argument ('-Wno-unused')
+      add_project_arguments('-Wno-unused', language: 'cpp')
+    endif
   endif
 else
+  if cc.get_argument_syntax() == 'msvc' and gst_version_is_dev
+    msvc_args = cc.get_supported_arguments([
+      '/we4101', # 'identifier' : unreferenced local variable
+      '/we4189', # 'identifier' : local variable is initialized but not referenced
+    ])
+    add_project_arguments(msvc_args, language: ['c', 'cpp'])
+  endif
   message('GStreamer debug system is enabled')
 endif
 
@@ -593,7 +608,7 @@ endif
 
 configure_file(output : 'config.h', configuration : cdata)
 
-meson.add_dist_script('scripts/gen-changelog.py', meson.project_name(), '1.20.0', meson.project_version())
+meson.add_dist_script('scripts/gen-changelog.py', meson.project_name(), '1.22.0', meson.project_version())
 
 subdir('docs')
 

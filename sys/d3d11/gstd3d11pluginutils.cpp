@@ -26,9 +26,137 @@
 
 #include <windows.h>
 #include <versionhelpers.h>
+#include <wrl.h>
+
+#include "hlsl/gstd3d11plugin-hlsl.h"
+
+/* Disable platform-specific intrinsics */
+#define _XM_NO_INTRINSICS_
+#include <DirectXMath.h>
 
 GST_DEBUG_CATEGORY_EXTERN (gst_d3d11_plugin_utils_debug);
 #define GST_CAT_DEFAULT gst_d3d11_plugin_utils_debug
+
+/* *INDENT-OFF* */
+using namespace Microsoft::WRL;
+using namespace DirectX;
+/* *INDENT-ON* */
+
+/**
+ * GstD3D11AlphaMode:
+ *
+ * Since: 1.24
+ */
+GType
+gst_d3d11_alpha_mode_get_type (void)
+{
+  static GType type = 0;
+  static const GEnumValue alpha_mode[] = {
+    /**
+     * GstD3D11AlphaMode::unspecified:
+     *
+     * Since: 1.24
+     */
+    {GST_D3D11_ALPHA_MODE_UNSPECIFIED, "Unspecified", "unspecified"},
+
+    /**
+     * GstD3D11AlphaMode::premultiplied:
+     *
+     * Since: 1.24
+     */
+    {GST_D3D11_ALPHA_MODE_PREMULTIPLIED, "Premultiplied", "premultiplied"},
+
+    /**
+     * GstD3D11AlphaMode::straight:
+     *
+     * Since: 1.24
+     */
+    {GST_D3D11_ALPHA_MODE_STRAIGHT, "Straight", "straight"},
+    {0, nullptr, nullptr},
+  };
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    type = g_enum_register_static ("GstD3D11AlphaMode", alpha_mode);
+  } GST_D3D11_CALL_ONCE_END;
+
+  return type;
+}
+
+/**
+ * GstD3D11MSAAMode:
+ *
+ * Since: 1.24
+ */
+GType
+gst_d3d11_msaa_mode_get_type (void)
+{
+  static GType type = 0;
+  static const GEnumValue msaa_mode[] = {
+    {GST_D3D11_MSAA_DISABLED, "Disabled", "disabled"},
+    {GST_D3D11_MSAA_2X, "2x MSAA", "2x"},
+    {GST_D3D11_MSAA_4X, "4x MSAA", "4x"},
+    {GST_D3D11_MSAA_8X, "8x MSAA", "8x"},
+    {0, nullptr, nullptr},
+  };
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    type = g_enum_register_static ("GstD3D11MSAAMode", msaa_mode);
+  } GST_D3D11_CALL_ONCE_END;
+
+  return type;
+}
+
+/**
+ * GstD3D11SamplingMethod:
+ *
+ * Texture sampling method
+ *
+ * Since: 1.24
+ */
+GType
+gst_d3d11_sampling_method_get_type (void)
+{
+  static GType type = 0;
+  static const GEnumValue methods[] = {
+    /**
+     * GstD3D11SamplingMethod::nearest-neighbour:
+     *
+     * Since: 1.24
+     */
+    {GST_D3D11_SAMPLING_METHOD_NEAREST,
+        "Nearest Neighbour", "nearest-neighbour"},
+
+    /**
+     * GstD3D11SamplingMethod::bilinear:
+     *
+     * Since: 1.24
+     */
+    {GST_D3D11_SAMPLING_METHOD_BILINEAR,
+        "Bilinear", "bilinear"},
+
+    /**
+     * GstD3D11SamplingMethod::linear-minification:
+     *
+     * Since: 1.24
+     */
+    {GST_D3D11_SAMPLING_METHOD_LINEAR_MINIFICATION,
+        "Linear minification, point magnification", "linear-minification"},
+
+    /**
+     * GstD3D11SamplingMethod::anisotropic:
+     *
+     * Since: 1.24
+     */
+    {GST_D3D11_SAMPLING_METHOD_ANISOTROPIC, "Anisotropic", "anisotropic"},
+    {0, nullptr, nullptr},
+  };
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    type = g_enum_register_static ("GstD3D11SamplingMethod", methods);
+  } GST_D3D11_CALL_ONCE_END;
+
+  return type;
+}
 
 /* Max Texture Dimension for feature level 11_0 ~ 12_1 */
 static guint _gst_d3d11_texture_max_dimension = 16384;
@@ -87,24 +215,11 @@ gst_d3d11_is_windows_8_or_greater (void)
 }
 
 GstD3D11DeviceVendor
-gst_d3d11_get_device_vendor (GstD3D11Device * device)
+gst_d3d11_get_device_vendor_from_id (guint vendor_id)
 {
-  guint device_id = 0;
-  guint vendor_id = 0;
-  gchar *desc = NULL;
   GstD3D11DeviceVendor vendor = GST_D3D11_DEVICE_VENDOR_UNKNOWN;
 
-  g_return_val_if_fail (GST_IS_D3D11_DEVICE (device),
-      GST_D3D11_DEVICE_VENDOR_UNKNOWN);
-
-  g_object_get (device, "device-id", &device_id, "vendor-id", &vendor_id,
-      "description", &desc, NULL);
-
   switch (vendor_id) {
-    case 0:
-      if (device_id == 0 && desc && g_strrstr (desc, "SraKmd"))
-        vendor = GST_D3D11_DEVICE_VENDOR_XBOX;
-      break;
     case 0x1002:
     case 0x1022:
       vendor = GST_D3D11_DEVICE_VENDOR_AMD;
@@ -122,9 +237,32 @@ gst_d3d11_get_device_vendor (GstD3D11Device * device)
       break;
   }
 
+  return vendor;
+}
+
+GstD3D11DeviceVendor
+gst_d3d11_get_device_vendor (GstD3D11Device * device)
+{
+  guint device_id = 0;
+  guint vendor_id = 0;
+  gchar *desc = nullptr;
+  GstD3D11DeviceVendor vendor = GST_D3D11_DEVICE_VENDOR_UNKNOWN;
+
+  g_return_val_if_fail (GST_IS_D3D11_DEVICE (device),
+      GST_D3D11_DEVICE_VENDOR_UNKNOWN);
+
+  g_object_get (device, "device-id", &device_id, "vendor-id", &vendor_id,
+      "description", &desc, nullptr);
+
+  if (device_id == 0 && desc && g_strrstr (desc, "SraKmd"))
+    vendor = GST_D3D11_DEVICE_VENDOR_XBOX;
+
   g_free (desc);
 
-  return vendor;
+  if (vendor != GST_D3D11_DEVICE_VENDOR_UNKNOWN)
+    return vendor;
+
+  return gst_d3d11_get_device_vendor_from_id (vendor_id);
 }
 
 gboolean
@@ -637,4 +775,268 @@ gst_d3d11_buffer_pool_new_with_options (GstD3D11Device * device,
   }
 
   return pool;
+}
+
+HRESULT
+gst_d3d11_get_pixel_shader_checker_luma (GstD3D11Device * device,
+    ID3D11PixelShader ** ps)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_pixel_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  return gst_d3d11_device_get_pixel_shader (device, token,
+      g_PSMain_checker_luma, sizeof (g_PSMain_checker_luma),
+      g_PSMain_checker_luma_str, sizeof (g_PSMain_checker_luma_str),
+      "PSMain_checker_luma", nullptr, ps);
+}
+
+HRESULT
+gst_d3d11_get_pixel_shader_checker_rgb (GstD3D11Device * device,
+    ID3D11PixelShader ** ps)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_pixel_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  return gst_d3d11_device_get_pixel_shader (device, token,
+      g_PSMain_checker_rgb, sizeof (g_PSMain_checker_rgb),
+      g_PSMain_checker_rgb_str, sizeof (g_PSMain_checker_rgb_str),
+      "PSMain_checker_rgb", nullptr, ps);
+}
+
+HRESULT
+gst_d3d11_get_pixel_shader_checker_vuya (GstD3D11Device * device,
+    ID3D11PixelShader ** ps)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_pixel_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  return gst_d3d11_device_get_pixel_shader (device, token,
+      g_PSMain_checker_vuya, sizeof (g_PSMain_checker_vuya),
+      g_PSMain_checker_vuya_str, sizeof (g_PSMain_checker_vuya_str),
+      "PSMain_checker_vuya", nullptr, ps);
+}
+
+HRESULT
+gst_d3d11_get_pixel_shader_checker (GstD3D11Device * device,
+    ID3D11PixelShader ** ps)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_pixel_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  return gst_d3d11_device_get_pixel_shader (device, token,
+      g_PSMain_checker, sizeof (g_PSMain_checker),
+      g_PSMain_checker_str, sizeof (g_PSMain_checker_str),
+      "PSMain_checker", nullptr, ps);
+}
+
+HRESULT
+gst_d3d11_get_pixel_shader_color (GstD3D11Device * device,
+    ID3D11PixelShader ** ps)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_pixel_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  return gst_d3d11_device_get_pixel_shader (device, token,
+      g_PSMain_color, sizeof (g_PSMain_color),
+      g_PSMain_color_str, sizeof (g_PSMain_color_str), "PSMain_color",
+      nullptr, ps);
+}
+
+HRESULT
+gst_d3d11_get_pixel_shader_sample_premul (GstD3D11Device * device,
+    ID3D11PixelShader ** ps)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_pixel_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  return gst_d3d11_device_get_pixel_shader (device, token,
+      g_PSMain_sample_premul, sizeof (g_PSMain_sample_premul),
+      g_PSMain_sample_premul_str, sizeof (g_PSMain_sample_premul_str),
+      "PSMain_sample_premul", nullptr, ps);
+}
+
+HRESULT
+gst_d3d11_get_pixel_shader_sample (GstD3D11Device * device,
+    ID3D11PixelShader ** ps)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_pixel_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  return gst_d3d11_device_get_pixel_shader (device, token,
+      g_PSMain_sample, sizeof (g_PSMain_sample),
+      g_PSMain_sample_str, sizeof (g_PSMain_sample_str), "PSMain_sample",
+      nullptr, ps);
+}
+
+HRESULT
+gst_d3d11_get_pixel_shader_snow (GstD3D11Device * device,
+    ID3D11PixelShader ** ps)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_pixel_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  return gst_d3d11_device_get_pixel_shader (device, token,
+      g_PSMain_snow, sizeof (g_PSMain_snow),
+      g_PSMain_snow_str, sizeof (g_PSMain_snow_str), "PSMain_snow",
+      nullptr, ps);
+}
+
+HRESULT
+gst_d3d11_get_vertex_shader_color (GstD3D11Device * device,
+    ID3D11VertexShader ** vs, ID3D11InputLayout ** layout)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_vertex_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  D3D11_INPUT_ELEMENT_DESC input_desc[2];
+
+  input_desc[0].SemanticName = "POSITION";
+  input_desc[0].SemanticIndex = 0;
+  input_desc[0].Format = DXGI_FORMAT_R32G32B32_FLOAT;
+  input_desc[0].InputSlot = 0;
+  input_desc[0].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+  input_desc[0].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+  input_desc[0].InstanceDataStepRate = 0;
+
+  input_desc[1].SemanticName = "COLOR";
+  input_desc[1].SemanticIndex = 0;
+  input_desc[1].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+  input_desc[1].InputSlot = 0;
+  input_desc[1].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+  input_desc[1].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+  input_desc[1].InstanceDataStepRate = 0;
+
+  return gst_d3d11_device_get_vertex_shader (device, token,
+      g_VSMain_color, sizeof (g_VSMain_color),
+      g_VSMain_color_str, sizeof (g_VSMain_color_str), "VSMain_color",
+      input_desc, G_N_ELEMENTS (input_desc), vs, layout);
+}
+
+HRESULT
+gst_d3d11_get_vertex_shader_coord (GstD3D11Device * device,
+    ID3D11VertexShader ** vs, ID3D11InputLayout ** layout)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_vertex_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  D3D11_INPUT_ELEMENT_DESC input_desc[2];
+
+  input_desc[0].SemanticName = "POSITION";
+  input_desc[0].SemanticIndex = 0;
+  input_desc[0].Format = DXGI_FORMAT_R32G32B32_FLOAT;
+  input_desc[0].InputSlot = 0;
+  input_desc[0].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+  input_desc[0].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+  input_desc[0].InstanceDataStepRate = 0;
+
+  input_desc[1].SemanticName = "TEXCOORD";
+  input_desc[1].SemanticIndex = 0;
+  input_desc[1].Format = DXGI_FORMAT_R32G32_FLOAT;
+  input_desc[1].InputSlot = 0;
+  input_desc[1].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+  input_desc[1].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+  input_desc[1].InstanceDataStepRate = 0;
+
+  return gst_d3d11_device_get_vertex_shader (device, token,
+      g_VSMain_coord, sizeof (g_VSMain_coord),
+      g_VSMain_coord_str, sizeof (g_VSMain_coord_str), "VSMain_coord",
+      input_desc, G_N_ELEMENTS (input_desc), vs, layout);
+}
+
+HRESULT
+gst_d3d11_get_vertex_shader_pos (GstD3D11Device * device,
+    ID3D11VertexShader ** vs, ID3D11InputLayout ** layout)
+{
+  static gint64 token = 0;
+
+  GST_D3D11_CALL_ONCE_BEGIN {
+    token = gst_d3d11_vertex_shader_token_new ();
+  } GST_D3D11_CALL_ONCE_END;
+
+  D3D11_INPUT_ELEMENT_DESC input_desc;
+
+  input_desc.SemanticName = "POSITION";
+  input_desc.SemanticIndex = 0;
+  input_desc.Format = DXGI_FORMAT_R32G32B32_FLOAT;
+  input_desc.InputSlot = 0;
+  input_desc.AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+  input_desc.InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+  input_desc.InstanceDataStepRate = 0;
+
+  return gst_d3d11_device_get_vertex_shader (device, token,
+      g_VSMain_pos, sizeof (g_VSMain_pos),
+      g_VSMain_pos_str, sizeof (g_VSMain_pos_str), "VSMain_pos", &input_desc, 1,
+      vs, layout);
+}
+
+gboolean
+gst_d3d11_need_transform (gfloat rotation_x, gfloat rotation_y,
+    gfloat rotation_z, gfloat scale_x, gfloat scale_y)
+{
+  const gfloat min_diff = 0.00001f;
+
+  if (!XMScalarNearEqual (rotation_x, 0.0f, min_diff) ||
+      !XMScalarNearEqual (rotation_y, 0.0f, min_diff) ||
+      !XMScalarNearEqual (rotation_z, 0.0f, min_diff) ||
+      !XMScalarNearEqual (scale_x, 1.0f, min_diff) ||
+      !XMScalarNearEqual (scale_y, 1.0f, min_diff)) {
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+struct SamplingMethodMap
+{
+  GstD3D11SamplingMethod method;
+  D3D11_FILTER filter;
+};
+
+static const SamplingMethodMap sampling_method_map[] = {
+  {GST_D3D11_SAMPLING_METHOD_NEAREST, D3D11_FILTER_MIN_MAG_MIP_POINT},
+  {GST_D3D11_SAMPLING_METHOD_BILINEAR, D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT},
+  {GST_D3D11_SAMPLING_METHOD_LINEAR_MINIFICATION,
+      D3D11_FILTER_MIN_LINEAR_MAG_MIP_POINT},
+  {GST_D3D11_SAMPLING_METHOD_ANISOTROPIC, D3D11_FILTER_ANISOTROPIC},
+};
+
+D3D11_FILTER
+gst_d3d11_sampling_method_to_native (GstD3D11SamplingMethod method)
+{
+  for (guint i = 0; i < G_N_ELEMENTS (sampling_method_map); i++) {
+    if (sampling_method_map[i].method == method)
+      return sampling_method_map[i].filter;
+  }
+
+  return D3D11_FILTER_MIN_MAG_MIP_POINT;
 }

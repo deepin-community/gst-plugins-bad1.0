@@ -1114,17 +1114,53 @@ gst_vulkan_color_convert_start (GstBaseTransform * bt)
 }
 
 static gboolean
+vulkan_color_convert_can_passthrough_info (const GstVideoInfo * in,
+    const GstVideoInfo * out)
+{
+  gint i;
+
+  if (GST_VIDEO_INFO_FORMAT (in) != GST_VIDEO_INFO_FORMAT (out))
+    return FALSE;
+  if (GST_VIDEO_INFO_WIDTH (in) != GST_VIDEO_INFO_WIDTH (out))
+    return FALSE;
+  if (GST_VIDEO_INFO_HEIGHT (in) != GST_VIDEO_INFO_HEIGHT (out))
+    return FALSE;
+  if (GST_VIDEO_INFO_SIZE (in) != GST_VIDEO_INFO_SIZE (out))
+    return FALSE;
+
+  for (i = 0; i < in->finfo->n_planes; i++) {
+    if (in->stride[i] != out->stride[i])
+      return FALSE;
+    if (in->offset[i] != out->offset[i])
+      return FALSE;
+  }
+
+  if (!gst_video_colorimetry_is_equal (&in->colorimetry, &out->colorimetry))
+    return FALSE;
+  if (in->chroma_site != out->chroma_site)
+    return FALSE;
+
+  return TRUE;
+}
+
+static gboolean
 gst_vulkan_color_convert_set_caps (GstBaseTransform * bt, GstCaps * in_caps,
     GstCaps * out_caps)
 {
   GstVulkanVideoFilter *vfilter = GST_VULKAN_VIDEO_FILTER (bt);
   GstVulkanColorConvert *conv = GST_VULKAN_COLOR_CONVERT (bt);
   GstVulkanHandle *vert, *frag;
+  gboolean passthrough;
   int i;
 
   if (!GST_BASE_TRANSFORM_CLASS (parent_class)->set_caps (bt, in_caps,
           out_caps))
     return FALSE;
+
+  passthrough =
+      vulkan_color_convert_can_passthrough_info (&vfilter->in_info,
+      &vfilter->out_info);
+  gst_base_transform_set_passthrough (bt, passthrough);
 
   if (!gst_vulkan_full_screen_quad_set_info (conv->quad, &vfilter->in_info,
           &vfilter->out_info))
@@ -1133,6 +1169,11 @@ gst_vulkan_color_convert_set_caps (GstBaseTransform * bt, GstCaps * in_caps,
   if (conv->current_shader) {
     conv->current_shader->notify (conv->current_shader);
     conv->current_shader = NULL;
+  }
+
+  if (passthrough) {
+    conv->current_shader = NULL;
+    return TRUE;
   }
 
   for (i = 0; i < G_N_ELEMENTS (shader_infos); i++) {
@@ -1211,6 +1252,7 @@ gst_vulkan_color_convert_transform (GstBaseTransform * bt, GstBuffer * inbuf,
   GError *error = NULL;
   VkResult err;
   int i;
+  guint in_n_mems, out_n_mems;
 
   fence = gst_vulkan_device_create_fence (vfilter->device, &error);
   if (!fence)
@@ -1219,7 +1261,8 @@ gst_vulkan_color_convert_transform (GstBaseTransform * bt, GstBuffer * inbuf,
   if (!gst_vulkan_full_screen_quad_set_input_buffer (conv->quad, inbuf, &error))
     goto error;
 
-  for (i = 0; i < GST_VIDEO_INFO_N_PLANES (&conv->quad->in_info); i++) {
+  in_n_mems = gst_buffer_n_memory (inbuf);
+  for (i = 0; i < in_n_mems; i++) {
     GstMemory *img_mem = gst_buffer_peek_memory (inbuf, i);
     if (!gst_is_vulkan_image_memory (img_mem)) {
       g_set_error_literal (&error, GST_VULKAN_ERROR, GST_VULKAN_FAILED,
@@ -1237,7 +1280,8 @@ gst_vulkan_color_convert_transform (GstBaseTransform * bt, GstBuffer * inbuf,
   {
     gboolean need_render_buf = FALSE;
 
-    for (i = 0; i < GST_VIDEO_INFO_N_PLANES (&conv->quad->out_info); i++) {
+    out_n_mems = gst_buffer_n_memory (outbuf);
+    for (i = 0; i < out_n_mems; i++) {
       GstMemory *mem = gst_buffer_peek_memory (outbuf, i);
       if (!gst_is_vulkan_image_memory (mem)) {
         g_set_error_literal (&error, GST_VULKAN_ERROR, GST_VULKAN_FAILED,
@@ -1279,7 +1323,7 @@ gst_vulkan_color_convert_transform (GstBaseTransform * bt, GstBuffer * inbuf,
 
     if (need_render_buf) {
       render_buf = gst_buffer_new ();
-      for (i = 0; i < GST_VIDEO_INFO_N_PLANES (&conv->quad->out_info); i++) {
+      for (i = 0; i < out_n_mems; i++) {
         gst_buffer_append_memory (render_buf,
             gst_memory_ref ((GstMemory *) render_img_mems[i]));
       }
@@ -1291,7 +1335,7 @@ gst_vulkan_color_convert_transform (GstBaseTransform * bt, GstBuffer * inbuf,
       render_buf = outbuf;
     }
 
-    for (i = 0; i < GST_VIDEO_INFO_N_PLANES (&conv->quad->out_info); i++) {
+    for (i = 0; i < out_n_mems; i++) {
       GstMemory *img_mem = gst_buffer_peek_memory (render_buf, i);
       if (!gst_is_vulkan_image_memory (img_mem)) {
         g_set_error_literal (&error, GST_VULKAN_ERROR, GST_VULKAN_FAILED,
@@ -1352,7 +1396,7 @@ gst_vulkan_color_convert_transform (GstBaseTransform * bt, GstBuffer * inbuf,
           fence, &error))
     goto unlock_error;
 
-  for (i = 0; i < GST_VIDEO_INFO_N_PLANES (&conv->quad->out_info); i++) {
+  for (i = 0; i < out_n_mems; i++) {
     if (render_img_mems[i] != out_img_mems[i]) {
       VkImageMemoryBarrier out_image_memory_barrier;
       VkImageMemoryBarrier render_image_memory_barrier;
@@ -1367,8 +1411,8 @@ gst_vulkan_color_convert_transform (GstBaseTransform * bt, GstBuffer * inbuf,
           .oldLayout = render_img_mems[i]->barrier.image_layout,
           .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
           /* FIXME: implement exclusive transfers */
-          .srcQueueFamilyIndex = 0,
-          .dstQueueFamilyIndex = 0,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
           .image = render_img_mems[i]->image,
           .subresourceRange = render_img_mems[i]->barrier.subresource_range
       };
@@ -1380,8 +1424,8 @@ gst_vulkan_color_convert_transform (GstBaseTransform * bt, GstBuffer * inbuf,
           .oldLayout = out_img_mems[i]->barrier.image_layout,
           .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
           /* FIXME: implement exclusive transfers */
-          .srcQueueFamilyIndex = 0,
-          .dstQueueFamilyIndex = 0,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
           .image = out_img_mems[i]->image,
           .subresourceRange = out_img_mems[i]->barrier.subresource_range
       };

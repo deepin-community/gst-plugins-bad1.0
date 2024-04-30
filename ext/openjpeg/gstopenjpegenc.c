@@ -939,7 +939,9 @@ gst_openjpeg_enc_fill_image (GstOpenJPEGEnc * self, GstVideoFrame * frame,
 
   for (i = 0; i < ncomps; i++) {
     comps[i].prec = GST_VIDEO_FRAME_COMP_DEPTH (frame, i);
+#if (OPJ_VERSION_MAJOR == 2 && OPJ_VERSION_MINOR < 5)
     comps[i].bpp = GST_VIDEO_FRAME_COMP_DEPTH (frame, i);
+#endif
     comps[i].sgnd = 0;
     comps[i].w = GST_VIDEO_FRAME_COMP_WIDTH (frame, i);
     comps[i].dx =
@@ -1101,7 +1103,7 @@ static GstOpenJPEGCodecMessage *
 gst_openjpeg_encode_message_new (GstOpenJPEGEnc * self,
     GstVideoCodecFrame * frame, int num_stripe)
 {
-  GstOpenJPEGCodecMessage *message = g_slice_new0 (GstOpenJPEGCodecMessage);
+  GstOpenJPEGCodecMessage *message = g_new0 (GstOpenJPEGCodecMessage, 1);
 
   message->frame = gst_video_codec_frame_ref (frame);
   message->stripe = num_stripe;
@@ -1117,7 +1119,7 @@ gst_openjpeg_encode_message_free (GstOpenJPEGCodecMessage * message)
     gst_video_codec_frame_unref (message->frame);
     if (message->output_buffer)
       gst_buffer_unref (message->output_buffer);
-    g_slice_free (GstOpenJPEGCodecMessage, message);
+    g_free (message);
   }
   return NULL;
 }

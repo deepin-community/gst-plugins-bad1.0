@@ -20,12 +20,6 @@
  * Boston, MA 02111-1307, USA.
  */
 
-/**
- * plugin-qroverlay
- *
- * Since: 1.20
- */
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -77,7 +71,7 @@ struct _GstBaseQROverlayPrivate
 #define OVERLAY_COMPOSITION_CAPS GST_VIDEO_CAPS_MAKE (GST_VIDEO_OVERLAY_COMPOSITION_BLEND_FORMATS)
 
 #define ALL_CAPS OVERLAY_COMPOSITION_CAPS ";" \
-    GST_VIDEO_CAPS_MAKE_WITH_FEATURES ("ANY", GST_VIDEO_FORMATS_ALL)
+    GST_VIDEO_CAPS_MAKE_WITH_FEATURES ("ANY", GST_VIDEO_FORMATS_ANY)
 
 static GstStaticPadTemplate sink_template = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,

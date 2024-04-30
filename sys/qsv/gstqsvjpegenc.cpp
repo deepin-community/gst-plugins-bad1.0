@@ -216,10 +216,8 @@ gst_qsv_jpeg_enc_check_update_uint (GstQsvJpegEnc * self, guint * old_val,
   if (*old_val == new_val)
     return;
 
-  g_mutex_lock (&self->prop_lock);
   *old_val = new_val;
   self->property_updated = TRUE;
-  g_mutex_unlock (&self->prop_lock);
 }
 
 static void
@@ -228,6 +226,7 @@ gst_qsv_jpeg_enc_set_property (GObject * object, guint prop_id,
 {
   GstQsvJpegEnc *self = GST_QSV_JPEG_ENC (object);
 
+  g_mutex_lock (&self->prop_lock);
   switch (prop_id) {
     case PROP_QUALITY:
       gst_qsv_jpeg_enc_check_update_uint (self, &self->quality,
@@ -237,6 +236,7 @@ gst_qsv_jpeg_enc_set_property (GObject * object, guint prop_id,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  g_mutex_unlock (&self->prop_lock);
 }
 
 static void
@@ -245,6 +245,7 @@ gst_qsv_jpeg_enc_get_property (GObject * object, guint prop_id, GValue * value,
 {
   GstQsvJpegEnc *self = GST_QSV_JPEG_ENC (object);
 
+  g_mutex_lock (&self->prop_lock);
   switch (prop_id) {
     case PROP_QUALITY:
       g_value_set_uint (value, self->quality);
@@ -253,6 +254,7 @@ gst_qsv_jpeg_enc_get_property (GObject * object, guint prop_id, GValue * value,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  g_mutex_unlock (&self->prop_lock);
 }
 
 static gboolean
@@ -263,6 +265,7 @@ gst_qsv_jpeg_enc_set_format (GstQsvEncoder * encoder,
   GstQsvJpegEncClass *klass = GST_QSV_JPEG_ENC_GET_CLASS (self);
   GstVideoInfo *info = &state->info;
   mfxFrameInfo *frame_info;
+  GstVideoFormat format;
 
   frame_info = &param->mfx.FrameInfo;
 
@@ -283,22 +286,12 @@ gst_qsv_jpeg_enc_set_format (GstQsvEncoder * encoder,
   frame_info->AspectRatioW = GST_VIDEO_INFO_PAR_N (info);
   frame_info->AspectRatioH = GST_VIDEO_INFO_PAR_D (info);
 
-  switch (GST_VIDEO_INFO_FORMAT (info)) {
+  format = GST_VIDEO_INFO_FORMAT (info);
+  switch (format) {
     case GST_VIDEO_FORMAT_NV12:
-      frame_info->ChromaFormat = MFX_CHROMAFORMAT_YUV420;
-      frame_info->FourCC = MFX_FOURCC_NV12;
-      frame_info->BitDepthLuma = 8;
-      frame_info->BitDepthChroma = 8;
-      break;
     case GST_VIDEO_FORMAT_YUY2:
-      frame_info->ChromaFormat = MFX_CHROMAFORMAT_YUV422;
-      frame_info->FourCC = MFX_FOURCC_YUY2;
-      frame_info->BitDepthLuma = 8;
-      frame_info->BitDepthChroma = 8;
-      break;
     case GST_VIDEO_FORMAT_BGRA:
-      frame_info->ChromaFormat = MFX_CHROMAFORMAT_YUV444;
-      frame_info->FourCC = MFX_FOURCC_RGB4;
+      gst_qsv_frame_info_set_format (frame_info, format);
       break;
     default:
       GST_ERROR_OBJECT (self, "Unexpected format %s",

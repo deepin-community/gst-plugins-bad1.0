@@ -98,7 +98,7 @@ G_DEFINE_TYPE (GstH264Timestamper,
     gst_h264_timestamper, GST_TYPE_CODEC_TIMESTAMPER);
 
 GST_ELEMENT_REGISTER_DEFINE (h264timestamper, "h264timestamper",
-    GST_RANK_NONE, GST_TYPE_H264_TIMESTAMPER);
+    GST_RANK_MARGINAL, GST_TYPE_H264_TIMESTAMPER);
 
 static void
 gst_h264_timestamper_class_init (GstH264TimestamperClass * klass)
@@ -111,7 +111,7 @@ gst_h264_timestamper_class_init (GstH264TimestamperClass * klass)
   gst_element_class_add_static_pad_template (element_class, &srctemplate);
 
   gst_element_class_set_static_metadata (element_class, "H.264 timestamper",
-      "Codec/Video", "Timestamp H.264 streams",
+      "Codec/Video/Timestamper", "Timestamp H.264 streams",
       "Seungha Yang <seungha@centricular.com>");
 
   timestamper_class->start = GST_DEBUG_FUNCPTR (gst_h264_timestamper_start);
@@ -194,33 +194,9 @@ gst_h264_timestamper_set_caps (GstCodecTimestamper * timestamper,
   return TRUE;
 }
 
-typedef enum
-{
-  GST_H264_LEVEL_L1 = 10,
-  GST_H264_LEVEL_L1B = 9,
-  GST_H264_LEVEL_L1_1 = 11,
-  GST_H264_LEVEL_L1_2 = 12,
-  GST_H264_LEVEL_L1_3 = 13,
-  GST_H264_LEVEL_L2_0 = 20,
-  GST_H264_LEVEL_L2_1 = 21,
-  GST_H264_LEVEL_L2_2 = 22,
-  GST_H264_LEVEL_L3 = 30,
-  GST_H264_LEVEL_L3_1 = 31,
-  GST_H264_LEVEL_L3_2 = 32,
-  GST_H264_LEVEL_L4 = 40,
-  GST_H264_LEVEL_L4_1 = 41,
-  GST_H264_LEVEL_L4_2 = 42,
-  GST_H264_LEVEL_L5 = 50,
-  GST_H264_LEVEL_L5_1 = 51,
-  GST_H264_LEVEL_L5_2 = 52,
-  GST_H264_LEVEL_L6 = 60,
-  GST_H264_LEVEL_L6_1 = 61,
-  GST_H264_LEVEL_L6_2 = 62,
-} GstH264DecoderLevel;
-
 typedef struct
 {
-  GstH264DecoderLevel level;
+  GstH264Level level;
 
   guint32 max_mbps;
   guint32 max_fs;
@@ -234,7 +210,7 @@ static const LevelLimits level_limits_map[] = {
   {GST_H264_LEVEL_L1_1, 3000, 396, 900, 192},
   {GST_H264_LEVEL_L1_2, 6000, 396, 2376, 384},
   {GST_H264_LEVEL_L1_3, 11800, 396, 2376, 768},
-  {GST_H264_LEVEL_L2_0, 11880, 396, 2376, 2000},
+  {GST_H264_LEVEL_L2, 11880, 396, 2376, 2000},
   {GST_H264_LEVEL_L2_1, 19800, 792, 4752, 4000},
   {GST_H264_LEVEL_L2_2, 20250, 1620, 8100, 4000},
   {GST_H264_LEVEL_L3, 40500, 1620, 8100, 10000},
@@ -252,7 +228,7 @@ static const LevelLimits level_limits_map[] = {
 };
 
 static guint
-h264_level_to_max_dpb_mbs (GstH264DecoderLevel level)
+h264_level_to_max_dpb_mbs (GstH264Level level)
 {
   gint i;
   for (i = 0; i < G_N_ELEMENTS (level_limits_map); i++) {
@@ -283,7 +259,7 @@ gst_h264_timestamper_process_sps (GstH264Timestamper * self, GstH264SPS * sps)
     level = 9;
   }
 
-  max_dpb_mbs = h264_level_to_max_dpb_mbs ((GstH264DecoderLevel) level);
+  max_dpb_mbs = h264_level_to_max_dpb_mbs ((GstH264Level) level);
   if (sps->vui_parameters_present_flag
       && sps->vui_parameters.bitstream_restriction_flag) {
     max_dpb_frames = MAX (1, sps->vui_parameters.max_dec_frame_buffering);

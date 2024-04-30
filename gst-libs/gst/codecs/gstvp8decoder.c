@@ -193,8 +193,8 @@ gst_vp8_decoder_check_codec_change (GstVp8Decoder * self,
     g_assert (klass->new_sequence);
 
     ret = klass->new_sequence (self, frame_hdr,
-        /* last/golden/alt 3 pictures */
-        3 + priv->preferred_output_delay);
+        /* last/golden/alt 3 reference pictures + current picture */
+        4 + priv->preferred_output_delay);
   }
 
   return ret;
@@ -375,6 +375,7 @@ gst_vp8_decoder_handle_frame (GstVideoDecoder * decoder,
   GstVp8ParserResult pres;
   GstVp8Picture *picture = NULL;
   GstFlowReturn ret = GST_FLOW_OK;
+  GstFlowReturn output_ret = GST_FLOW_OK;
   GstVp8DecoderOutputFrame output_frame;
 
   GST_LOG_OBJECT (self,
@@ -403,7 +404,7 @@ gst_vp8_decoder_handle_frame (GstVideoDecoder * decoder,
           GST_PTR_FORMAT, in_buf);
 
       gst_buffer_unmap (in_buf, &map);
-      gst_video_decoder_drop_frame (decoder, frame);
+      gst_video_decoder_release_frame (decoder, frame);
 
       return GST_FLOW_OK;
     }
@@ -421,10 +422,9 @@ gst_vp8_decoder_handle_frame (GstVideoDecoder * decoder,
 
   picture = gst_vp8_picture_new ();
   picture->frame_hdr = frame_hdr;
-  picture->pts = GST_BUFFER_PTS (in_buf);
   picture->data = map.data;
   picture->size = map.size;
-  picture->system_frame_number = frame->system_frame_number;
+  GST_CODEC_PICTURE_FRAME_NUMBER (picture) = frame->system_frame_number;
 
   if (klass->new_picture) {
     ret = klass->new_picture (self, frame, picture);
@@ -473,7 +473,7 @@ gst_vp8_decoder_handle_frame (GstVideoDecoder * decoder,
     /* If subclass didn't update output state at this point,
      * marking this picture as a discont and stores current input state */
     if (priv->input_state_changed) {
-      picture->discont_state = gst_video_codec_state_ref (self->input_state);
+      gst_vp8_picture_set_discont_state (picture, self->input_state);
       priv->input_state_changed = FALSE;
     }
 
@@ -483,7 +483,13 @@ gst_vp8_decoder_handle_frame (GstVideoDecoder * decoder,
     gst_queue_array_push_tail_struct (priv->output_queue, &output_frame);
   }
 
-  gst_vp8_decoder_drain_output_queue (self, priv->preferred_output_delay, &ret);
+  gst_vp8_decoder_drain_output_queue (self, priv->preferred_output_delay,
+      &output_ret);
+  if (output_ret != GST_FLOW_OK) {
+    GST_DEBUG_OBJECT (self,
+        "Output returned %s", gst_flow_get_name (output_ret));
+    return output_ret;
+  }
 
   if (ret == GST_FLOW_ERROR) {
     GST_VIDEO_DECODER_ERROR (self, 1, STREAM, DECODE,
@@ -509,7 +515,7 @@ error:
           ("Failed to decode data"), (NULL), ret);
     }
 
-    gst_video_decoder_drop_frame (decoder, frame);
+    gst_video_decoder_release_frame (decoder, frame);
 
     return ret;
   }

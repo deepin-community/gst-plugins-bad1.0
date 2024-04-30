@@ -65,6 +65,7 @@
 #define __TSMUXSTREAM_H__
 
 #include <glib.h>
+#include <gst/mpegts/mpegts.h>
 
 #include "tsmuxcommon.h"
 
@@ -75,7 +76,7 @@ typedef enum TsMuxStreamState TsMuxStreamState;
 typedef struct TsMuxStreamBuffer TsMuxStreamBuffer;
 
 typedef void (*TsMuxStreamBufferReleaseFunc) (guint8 *data, void *user_data);
-typedef void (*TsMuxStreamGetESDescriptorsFunc) (TsMuxStream *stream, GstMpegtsPMTStream *pmt_stream, void *user_data);
+typedef void (*TsMuxStreamGetESDescriptorsFunc) (TsMuxStream *stream, GstMpegtsPMTStream *pmt_stream, gpointer user_data);
 
 /* Stream type assignments
  *
@@ -150,6 +151,9 @@ struct TsMuxStream {
   guint8 id;
   /* extended stream id (13818-1 Amdt 2) */
   guint8 id_extended;
+
+  struct TsMuxProgram *program;
+
   /* requested index in the PMT */
   gint pmt_index;
 
@@ -209,7 +213,9 @@ struct TsMuxStream {
 
   /* Opus */
   gboolean is_opus;
-  guint8 opus_channel_config_code;
+  guint8 opus_channel_config[1 + 2 + 1 + 1 + 255];
+  gsize opus_channel_config_len;
+
   /* Jpeg2000 */
   gint32 horizontal_size;
   gint32 vertical_size;
@@ -223,7 +229,7 @@ struct TsMuxStream {
 };
 
 /* stream management */
-TsMuxStream *	tsmux_stream_new 		(guint16 pid, guint stream_type);
+TsMuxStream *	tsmux_stream_new 		(guint16 pid, guint stream_type, guint stream_number);
 void 		tsmux_stream_free 		(TsMuxStream *stream);
 
 guint16         tsmux_stream_get_pid            (TsMuxStream *stream);

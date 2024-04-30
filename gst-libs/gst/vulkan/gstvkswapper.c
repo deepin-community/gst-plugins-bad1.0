@@ -177,24 +177,6 @@ _get_function_table (GstVulkanSwapper * swapper)
 #undef GET_PROC_ADDRESS_REQUIRED
 }
 
-static GstVideoFormat
-_vk_format_to_video_format (VkFormat format)
-{
-  switch (format) {
-      /* double check endianness */
-    case VK_FORMAT_R8G8B8A8_UNORM:
-      return GST_VIDEO_FORMAT_RGBA;
-    case VK_FORMAT_R8G8B8_UNORM:
-      return GST_VIDEO_FORMAT_RGB;
-    case VK_FORMAT_B8G8R8A8_UNORM:
-      return GST_VIDEO_FORMAT_BGRA;
-    case VK_FORMAT_B8G8R8_UNORM:
-      return GST_VIDEO_FORMAT_BGR;
-    default:
-      return GST_VIDEO_FORMAT_UNKNOWN;
-  }
-}
-
 static VkColorSpaceKHR
 _vk_color_space_from_video_info (GstVideoInfo * v_info)
 {
@@ -206,7 +188,7 @@ _add_vk_format_to_list (GValue * list, VkFormat format)
 {
   GstVideoFormat v_format;
 
-  v_format = _vk_format_to_video_format (format);
+  v_format = gst_vulkan_format_to_video_format (format);
   if (v_format) {
     const gchar *format_str = gst_video_format_to_string (v_format);
     GValue item = G_VALUE_INIT;
@@ -1077,8 +1059,8 @@ _build_render_buffer_cmd (GstVulkanSwapper * swapper, guint32 swap_idx,
         .oldLayout = swap_img->barrier.image_layout,
         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         /* FIXME: implement exclusive transfers */
-        .srcQueueFamilyIndex = 0,
-        .dstQueueFamilyIndex = 0,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = swap_img->image,
         .subresourceRange = swap_img->barrier.subresource_range
     };
@@ -1149,8 +1131,8 @@ _build_render_buffer_cmd (GstVulkanSwapper * swapper, guint32 swap_idx,
         .oldLayout = img_mem->barrier.image_layout,
         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         /* FIXME: implement exclusive transfers */
-        .srcQueueFamilyIndex = 0,
-        .dstQueueFamilyIndex = 0,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = img_mem->image,
         .subresourceRange = img_mem->barrier.subresource_range
     };
@@ -1174,6 +1156,32 @@ _build_render_buffer_cmd (GstVulkanSwapper * swapper, guint32 swap_idx,
 
     vkCmdClearColorImage (cmd_buf->cmd, swap_img->image,
         swap_img->barrier.image_layout, &clear, 1, &clear_range);
+
+    /* *INDENT-OFF* */
+    image_memory_barrier = (VkImageMemoryBarrier) {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = NULL,
+        .srcAccessMask = swap_img->barrier.parent.access_flags,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = swap_img->barrier.image_layout,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        /* FIXME: implement exclusive transfers */
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = swap_img->image,
+        .subresourceRange = swap_img->barrier.subresource_range
+    };
+    /* *INDENT-ON* */
+
+    vkCmdPipelineBarrier (cmd_buf->cmd,
+        swap_img->barrier.parent.pipeline_stages,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1,
+        &image_memory_barrier);
+
+    swap_img->barrier.parent.pipeline_stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    swap_img->barrier.parent.access_flags = image_memory_barrier.dstAccessMask;
+    swap_img->barrier.image_layout = image_memory_barrier.newLayout;
+
     vkCmdBlitImage (cmd_buf->cmd, img_mem->image, img_mem->barrier.image_layout,
         swap_img->image, swap_img->barrier.image_layout, 1, &blit,
         VK_FILTER_LINEAR);
@@ -1188,8 +1196,8 @@ _build_render_buffer_cmd (GstVulkanSwapper * swapper, guint32 swap_idx,
         .oldLayout = swap_img->barrier.image_layout,
         .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         /* FIXME: implement exclusive transfers */
-        .srcQueueFamilyIndex = 0,
-        .dstQueueFamilyIndex = 0,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = swap_img->image,
         .subresourceRange = swap_img->barrier.subresource_range
     };

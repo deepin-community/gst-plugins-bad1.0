@@ -123,6 +123,16 @@ static guint8 h265_sei_user_data_registered[] = {
   0xa6, 0xae, 0x5c, 0x83, 0x50, 0xdd, 0xf9, 0x8e, 0xc7, 0xbd, 0x00, 0x80
 };
 
+static guint8 h265_sei_user_data_unregistered[] = {
+  0x00, 0x00, 0x00, 0x01, 0x4e, 0x01,
+  0x05,                         // Payload type.
+  0x18,                         // Payload size.
+  0x4D, 0x49, 0x53, 0x50, 0x6D, 0x69, 0x63, 0x72, 0x6F, 0x73, 0x65, 0x63,
+  0x74, 0x69, 0x6D, 0x65,       // UUID.
+  0x70, 0x69, 0x67, 0x73, 0x20, 0x66, 0x6c, 0x79,       // Payload data
+  0x80
+};
+
 static guint8 h265_sei_time_code[] = {
   0x00, 0x00, 0x00, 0x01, 0x4e, 0x01, 0x88, 0x06, 0x60, 0x40, 0x00, 0x00, 0x03,
   0x00, 0x10, 0x80
@@ -973,6 +983,15 @@ check_sei_user_data_registered (const GstH265RegisteredUserData * a,
 }
 
 static gboolean
+check_sei_user_data_unregistered (const GstH265UserDataUnregistered * a,
+    const GstH265UserDataUnregistered * b)
+{
+  return a->size == b->size &&
+      !memcmp (a->uuid, b->uuid, sizeof (a->uuid)) &&
+      !memcmp (a->data, b->data, a->size);
+}
+
+static gboolean
 check_sei_time_code (const GstH265TimeCode * a, const GstH265TimeCode * b)
 {
   gint i;
@@ -1076,6 +1095,9 @@ GST_START_TEST (test_h265_create_sei)
     {h265_sei_user_data_registered, G_N_ELEMENTS (h265_sei_user_data_registered),
         GST_H265_SEI_REGISTERED_USER_DATA, {0,},
         (SEICheckFunc) check_sei_user_data_registered},
+    {h265_sei_user_data_unregistered, G_N_ELEMENTS (h265_sei_user_data_unregistered),
+        GST_H265_SEI_USER_DATA_UNREGISTERED, {0,},
+        (SEICheckFunc) check_sei_user_data_unregistered},
     {h265_sei_time_code, G_N_ELEMENTS (h265_sei_time_code),
         GST_H265_SEI_TIME_CODE, {0,}, (
         SEICheckFunc) check_sei_time_code},
@@ -1372,6 +1394,104 @@ GST_START_TEST (test_h265_split_hevc)
 
 GST_END_TEST;
 
+/* Captured from Apple's HLS test stream
+ * http://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hevc/v14/prog_index.m3u8
+ */
+static const guint8 h265_codec_data[] = {
+  0x01, 0x02, 0x00, 0x00, 0x00, 0x04, 0xb0, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x7b, 0xf0, 0x00, 0xfc, 0xfd, 0xfa, 0xfa, 0x00, 0x00, 0x0f, 0x03, 0xa0,
+  0x00, 0x01, 0x00, 0x18, 0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x02, 0x20,
+  0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+  0x7b, 0x18, 0xb0, 0x24, 0xa1, 0x00, 0x01, 0x00, 0x3c, 0x42, 0x01, 0x01,
+  0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00,
+  0x03, 0x00, 0x7b, 0xa0, 0x07, 0x82, 0x00, 0x88, 0x7d, 0xb6, 0x71, 0x8b,
+  0x92, 0x44, 0x80, 0x53, 0x88, 0x88, 0x92, 0xcf, 0x24, 0xa6, 0x92, 0x72,
+  0xc9, 0x12, 0x49, 0x22, 0xdc, 0x91, 0xaa, 0x48, 0xfc, 0xa2, 0x23, 0xff,
+  0x00, 0x01, 0x00, 0x01, 0x6a, 0x02, 0x02, 0x02, 0x01, 0xa2, 0x00, 0x01,
+  0x00, 0x08, 0x44, 0x01, 0xc0, 0x25, 0x2f, 0x05, 0x32, 0x40
+};
+
+GST_START_TEST (test_h265_decoder_config_record)
+{
+  GstH265Parser *parser;
+  GstH265ParserResult ret;
+  GstH265DecoderConfigRecord *config = NULL;
+  GstH265VPS vps;
+  GstH265SPS sps;
+  GstH265PPS pps;
+  GstH265DecoderConfigRecordNalUnitArray *nalu_array;
+  GstH265NalUnit *nalu;
+
+  parser = gst_h265_parser_new ();
+
+  ret = gst_h265_parser_parse_decoder_config_record (parser,
+      h265_codec_data, sizeof (h265_codec_data), &config);
+  assert_equals_int (ret, GST_H265_PARSER_OK);
+  fail_unless (config != NULL);
+
+  assert_equals_int (config->length_size_minus_one, 3);
+  fail_unless (config->nalu_array != NULL);
+  assert_equals_int (config->nalu_array->len, 3);
+
+  /* VPS */
+  nalu_array = &g_array_index (config->nalu_array,
+      GstH265DecoderConfigRecordNalUnitArray, 0);
+  fail_unless (nalu_array->nalu != NULL);
+  assert_equals_int (nalu_array->nalu->len, 1);
+
+  nalu = &g_array_index (nalu_array->nalu, GstH265NalUnit, 0);
+  assert_equals_int (nalu->type, GST_H265_NAL_VPS);
+  ret = gst_h265_parser_parse_vps (parser, nalu, &vps);
+  assert_equals_int (ret, GST_H265_PARSER_OK);
+
+  /* SPS */
+  nalu_array = &g_array_index (config->nalu_array,
+      GstH265DecoderConfigRecordNalUnitArray, 1);
+  fail_unless (nalu_array->nalu != NULL);
+  assert_equals_int (nalu_array->nalu->len, 1);
+
+  nalu = &g_array_index (nalu_array->nalu, GstH265NalUnit, 0);
+  assert_equals_int (nalu->type, GST_H265_NAL_SPS);
+  ret = gst_h265_parser_parse_sps (parser, nalu, &sps, TRUE);
+  assert_equals_int (ret, GST_H265_PARSER_OK);
+
+  /* PPS */
+  nalu_array = &g_array_index (config->nalu_array,
+      GstH265DecoderConfigRecordNalUnitArray, 2);
+  fail_unless (nalu_array->nalu != NULL);
+  assert_equals_int (nalu_array->nalu->len, 1);
+
+  nalu = &g_array_index (nalu_array->nalu, GstH265NalUnit, 0);
+  assert_equals_int (nalu->type, GST_H265_NAL_PPS);
+  ret = gst_h265_parser_parse_pps (parser, nalu, &pps);
+  assert_equals_int (ret, GST_H265_PARSER_OK);
+
+  gst_h265_decoder_config_record_free (config);
+  gst_h265_parser_free (parser);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_h265_parse_partial_nal)
+{
+  GstH265ParserResult res;
+  GstH265NalUnit nalu;
+  GstH265Parser *parser = gst_h265_parser_new ();
+  const guint8 *buf = slice_eos_slice_eob;
+  const guint buf_size = 5;
+
+  res = gst_h265_parser_identify_nalu (parser, buf, 0, buf_size, &nalu);
+
+  /* H.265 parser is a bit different then H.264 one, and will return
+   * NO_NAL if there is a start code but not enough bytes to hold the
+   * header. */
+  assert_equals_int (res, GST_H265_PARSER_NO_NAL);
+
+  gst_h265_parser_free (parser);
+}
+
+GST_END_TEST;
+
 static Suite *
 h265parser_suite (void)
 {
@@ -1395,6 +1515,8 @@ h265parser_suite (void)
   tcase_add_test (tc_chain, test_h265_sei_registered_user_data);
   tcase_add_test (tc_chain, test_h265_create_sei);
   tcase_add_test (tc_chain, test_h265_split_hevc);
+  tcase_add_test (tc_chain, test_h265_decoder_config_record);
+  tcase_add_test (tc_chain, test_h265_parse_partial_nal);
 
   return s;
 }

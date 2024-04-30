@@ -37,12 +37,18 @@
 
 #include "gstvaallocator.h"
 
+#ifndef G_OS_WIN32
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 #include "gstvasurfacecopy.h"
 #include "gstvavideoformat.h"
 #include "vasurfaceimage.h"
+
+#ifndef DRM_FORMAT_INVALID
+#define DRM_FORMAT_INVALID    0
+#endif
 
 #define GST_CAT_DEFAULT gst_va_memory_debug
 GST_DEBUG_CATEGORY (gst_va_memory_debug);
@@ -73,19 +79,6 @@ gst_va_buffer_surface_quark (void)
   }
 
   return surface_quark;
-}
-
-static GQuark
-gst_va_drm_mod_quark (void)
-{
-  static gsize drm_mod_quark = 0;
-
-  if (g_once_init_enter (&drm_mod_quark)) {
-    GQuark quark = g_quark_from_string ("DRMModifier");
-    g_once_init_leave (&drm_mod_quark, quark);
-  }
-
-  return drm_mod_quark;
 }
 
 static GQuark
@@ -125,15 +118,14 @@ gst_va_buffer_surface_unref (gpointer data)
     GST_LOG_OBJECT (buf->display, "Destroying surface %#x", buf->surface);
     va_destroy_surfaces (buf->display, &buf->surface, 1);
     gst_clear_object (&buf->display);
-    g_slice_free (GstVaBufferSurface, buf);
+    g_free (buf);
   }
 }
 
 static GstVaBufferSurface *
-gst_va_buffer_surface_new (VASurfaceID surface, GstVideoFormat format,
-    gint width, gint height)
+gst_va_buffer_surface_new (VASurfaceID surface)
 {
-  GstVaBufferSurface *buf = g_slice_new (GstVaBufferSurface);
+  GstVaBufferSurface *buf = g_new (GstVaBufferSurface, 1);
 
   g_atomic_int_set (&buf->ref_count, 0);
   g_atomic_int_set (&buf->ref_mems_count, 0);
@@ -194,7 +186,7 @@ gst_va_memory_pool_flush_unlocked (GstVaMemoryPool * self,
         GST_LOG ("Destroying surface %#x", buf->surface);
         va_destroy_surfaces (display, &buf->surface, 1);
         self->surface_count -= 1;       /* GstVaDmabufAllocator */
-        g_slice_free (GstVaBufferSurface, buf);
+        g_free (buf);
       }
     } else {
       self->surface_count -= 1; /* GstVaAllocator */
@@ -270,7 +262,7 @@ struct _GstVaDmabufAllocator
   GstMemoryMapFunction parent_map;
   GstMemoryCopyFunction parent_copy;
 
-  GstVideoInfo info;
+  GstVideoInfoDmaDrm info;
   guint usage_hint;
 
   GstVaSurfaceCopy *copy;
@@ -318,19 +310,14 @@ gst_va_dmabuf_mem_copy (GstMemory * gmem, gssize offset, gssize size)
 {
   GstVaDmabufAllocator *self = GST_VA_DMABUF_ALLOCATOR (gmem->allocator);
   GstVaBufferSurface *buf;
-  guint64 *drm_mod;
   gsize mem_size;
 
   buf = gst_mini_object_get_qdata (GST_MINI_OBJECT (gmem),
       gst_va_buffer_surface_quark ());
 
-  drm_mod = gst_mini_object_get_qdata (GST_MINI_OBJECT (gmem),
-      gst_va_drm_mod_quark ());
-
-  /* 0 is DRM_FORMAT_MOD_LINEAR, we do not include its header now. */
-  if (buf->n_mems > 1 && *drm_mod != 0) {
+  if (buf->n_mems > 1 && self->info.drm_modifier != DRM_FORMAT_MOD_LINEAR) {
     GST_ERROR_OBJECT (self, "Failed to copy multi-dmabuf because non-linear "
-        "modifier: %#" G_GINT64_MODIFIER "x.", *drm_mod);
+        "modifier: %#" G_GINT64_MODIFIER "x.", self->info.drm_modifier);
     return NULL;
   }
 
@@ -376,9 +363,10 @@ gst_va_dmabuf_mem_copy (GstMemory * gmem, gssize offset, gssize size)
 
     g_assert (buf_copy->n_mems == 1);
 
-    copy_func = _ensure_surface_copy (&self->copy, self->display, &self->info);
-    if (copy_func && gst_va_surface_copy (copy_func, buf_copy->surface,
-            buf->surface))
+    copy_func =
+        _ensure_surface_copy (&self->copy, self->display, &self->info.vinfo);
+    if (copy_func
+        && gst_va_surface_copy (copy_func, buf_copy->surface, buf->surface))
       return copy;
 
     gst_memory_unref (copy);
@@ -386,9 +374,9 @@ gst_va_dmabuf_mem_copy (GstMemory * gmem, gssize offset, gssize size)
     /* try system memory */
   }
 
-  if (*drm_mod != 0) {
+  if (self->info.drm_modifier != DRM_FORMAT_MOD_LINEAR) {
     GST_ERROR_OBJECT (self, "Failed to copy dmabuf because non-linear "
-        "modifier: %#" G_GINT64_MODIFIER "x.", *drm_mod);
+        "modifier: %#" G_GINT64_MODIFIER "x.", self->info.drm_modifier);
     return NULL;
   }
 
@@ -402,20 +390,18 @@ gst_va_dmabuf_mem_map (GstMemory * gmem, gsize maxsize, GstMapFlags flags)
 {
   GstVaDmabufAllocator *self = GST_VA_DMABUF_ALLOCATOR (gmem->allocator);
   VASurfaceID surface = gst_va_memory_get_surface (gmem);
-  guint64 *drm_mod;
 
-  drm_mod = gst_mini_object_get_qdata (GST_MINI_OBJECT (gmem),
-      gst_va_drm_mod_quark ());
+  if (flags & GST_MAP_READWRITE) {
+    if (self->info.drm_modifier != DRM_FORMAT_MOD_LINEAR) {
+      GST_ERROR_OBJECT (self, "Failed to map the dmabuf because the modifier "
+          "is: %#" G_GINT64_MODIFIER "x, which is not linear.",
+          self->info.drm_modifier);
+      return NULL;
+    }
 
-  /* 0 is DRM_FORMAT_MOD_LINEAR, we do not include its header now. */
-  if (*drm_mod != 0) {
-    GST_ERROR_OBJECT (self, "Failed to map the dmabuf because the modifier "
-        "is: %#" G_GINT64_MODIFIER "x, which is not linear.", *drm_mod);
-    return NULL;
+    if (!va_sync_surface (self->display, surface))
+      return NULL;
   }
-
-  if (!va_sync_surface (self->display, surface))
-    return NULL;
 
   return self->parent_map (gmem, maxsize, flags);
 }
@@ -465,6 +451,8 @@ gst_va_dmabuf_allocator_init (GstVaDmabufAllocator * self)
   self->parent_copy = allocator->mem_copy;
   allocator->mem_copy = gst_va_dmabuf_mem_copy;
 
+  gst_video_info_dma_drm_init (&self->info);
+
   gst_va_memory_pool_init (&self->pool);
 }
 
@@ -496,7 +484,11 @@ gst_va_dmabuf_allocator_new (GstVaDisplay * display)
 static inline goffset
 _get_fd_size (gint fd)
 {
+#ifndef G_OS_WIN32
   return lseek (fd, 0, SEEK_END);
+#else
+  return 0;
+#endif
 }
 
 static gboolean
@@ -536,60 +528,49 @@ gst_va_dmabuf_memory_release (GstMiniObject * mini_object)
   return FALSE;
 }
 
-/* Creates an exported VASurfaceID and adds it as @buffer's memories
- * qdata
- *
- * If @info is not NULL, a dummy (non-pooled) buffer is created to
- * update offsets and strides, and it has to be unrefed immediately.
- */
 static gboolean
-gst_va_dmabuf_allocator_setup_buffer_full (GstAllocator * allocator,
-    GstBuffer * buffer, GstVideoInfo * info)
+_modifier_found (guint64 modifier, guint64 * modifiers, guint num_modifiers)
 {
-  GstVaBufferSurface *buf;
-  GstVaDmabufAllocator *self = GST_VA_DMABUF_ALLOCATOR (allocator);
-  GstVideoFormat format;
+  guint i;
+
+  /* user doesn't care the returned modifier */
+  if (num_modifiers == 0)
+    return TRUE;
+
+  for (i = 0; i < num_modifiers; i++)
+    if (modifier == modifiers[i])
+      return TRUE;
+  return FALSE;
+}
+
+static gboolean
+_va_create_surface_and_export_to_dmabuf (GstVaDisplay * display,
+    guint usage_hint, guint64 * modifiers, guint num_modifiers,
+    GstVideoInfo * info, VASurfaceID * ret_surface,
+    VADRMPRIMESurfaceDescriptor * ret_desc)
+{
   VADRMPRIMESurfaceDescriptor desc = { 0, };
-  VASurfaceAttribExternalBuffers *extbuf = NULL, ext_buf;
-  VASurfaceID surface;
   guint32 i, fourcc, rt_format, export_flags;
-  GDestroyNotify buffer_destroy = NULL;
-  gsize object_offset[4];
+  GstVideoFormat format;
+  VASurfaceID surface;
+  guint64 prev_modifier = DRM_FORMAT_MOD_INVALID;
 
-  g_return_val_if_fail (GST_IS_VA_DMABUF_ALLOCATOR (allocator), FALSE);
+  _init_debug_category ();
 
-  format = GST_VIDEO_INFO_FORMAT (&self->info);
+  format = GST_VIDEO_INFO_FORMAT (info);
+
   fourcc = gst_va_fourcc_from_video_format (format);
   rt_format = gst_va_chroma_from_video_format (format);
-  if (fourcc == 0 || rt_format == 0) {
-    GST_ERROR_OBJECT (allocator, "Unsupported format: %s",
-        gst_video_format_to_string (GST_VIDEO_INFO_FORMAT (&self->info)));
+  if (fourcc == 0 || rt_format == 0)
     return FALSE;
-  }
 
-  /* HACK(victor): disable tiling for i965 driver for RGB formats */
-  if (GST_VA_DISPLAY_IS_IMPLEMENTATION (self->display, INTEL_I965)
-      && GST_VIDEO_INFO_IS_RGB (&self->info)) {
-    /* *INDENT-OFF* */
-    ext_buf = (VASurfaceAttribExternalBuffers) {
-      .width = GST_VIDEO_INFO_WIDTH (&self->info),
-      .height = GST_VIDEO_INFO_HEIGHT (&self->info),
-      .num_planes = GST_VIDEO_INFO_N_PLANES (&self->info),
-      .pixel_format = fourcc,
-    };
-    /* *INDENT-ON* */
-
-    extbuf = &ext_buf;
-  }
-
-  if (!va_create_surfaces (self->display, rt_format, fourcc,
-          GST_VIDEO_INFO_WIDTH (&self->info),
-          GST_VIDEO_INFO_HEIGHT (&self->info), self->usage_hint, extbuf,
-          &surface, 1))
+  if (!va_create_surfaces (display, rt_format, fourcc,
+          GST_VIDEO_INFO_WIDTH (info), GST_VIDEO_INFO_HEIGHT (info),
+          usage_hint, modifiers, num_modifiers, NULL, &surface, 1))
     return FALSE;
 
   /* workaround for missing layered dmabuf formats in i965 */
-  if (GST_VA_DISPLAY_IS_IMPLEMENTATION (self->display, INTEL_I965)
+  if (GST_VA_DISPLAY_IS_IMPLEMENTATION (display, INTEL_I965)
       && (fourcc == VA_FOURCC_YUY2 || fourcc == VA_FOURCC_UYVY)) {
     /* These are not representable as separate planes */
     export_flags = VA_EXPORT_SURFACE_COMPOSED_LAYERS;
@@ -601,16 +582,19 @@ gst_va_dmabuf_allocator_setup_buffer_full (GstAllocator * allocator,
 
   export_flags |= VA_EXPORT_SURFACE_READ_WRITE;
 
-  if (!va_export_surface_to_dmabuf (self->display, surface, export_flags,
-          &desc))
+  if (!va_export_surface_to_dmabuf (display, surface, export_flags, &desc))
     goto failed;
 
-  g_assert (GST_VIDEO_INFO_N_PLANES (&self->info) == desc.num_layers);
+  if (GST_VIDEO_INFO_N_PLANES (info) != desc.num_layers)
+    goto failed;
 
+  /* YUY2 and YUYV are the same. radeonsi returns always YUYV.
+   * There's no reason to fail if the different fourcc if there're dups.
+   * https://fourcc.org/pixel-format/yuv-yuy2/ */
   if (fourcc != desc.fourcc) {
-    GST_ERROR ("Unsupported fourcc: %" GST_FOURCC_FORMAT,
+    GST_INFO ("Different fourcc: requested %" GST_FOURCC_FORMAT " - returned %"
+        GST_FOURCC_FORMAT, GST_FOURCC_ARGS (fourcc),
         GST_FOURCC_ARGS (desc.fourcc));
-    goto failed;
   }
 
   if (desc.num_objects == 0) {
@@ -618,25 +602,109 @@ gst_va_dmabuf_allocator_setup_buffer_full (GstAllocator * allocator,
     goto failed;
   }
 
-  buf = gst_va_buffer_surface_new (surface, format, desc.width, desc.height);
-  if (G_UNLIKELY (info)) {
-    *info = self->info;
-    GST_VIDEO_INFO_SIZE (info) = 0;
+  for (i = 0; i < desc.num_objects; i++) {
+    guint64 modifier = desc.objects[i].drm_format_modifier;
+
+    if (!_modifier_found (modifier, modifiers, num_modifiers)) {
+      GST_ERROR ("driver set a modifier different from allowed list: "
+          "0x%016" G_GINT64_MODIFIER "x", modifier);
+      goto failed;
+    }
+    /* XXX: all dmabufs in buffer have to have the same modifier, otherwise the
+     * drm-format field in caps is ill-designed */
+    if (i > 0 && modifier != prev_modifier) {
+      GST_ERROR ("Different objects have different modifier");
+      goto failed;
+    }
+
+    prev_modifier = modifier;
   }
+
+  *ret_surface = surface;
+  if (ret_desc)
+    *ret_desc = desc;
+
+  return TRUE;
+
+failed:
+  {
+    va_destroy_surfaces (display, &surface, 1);
+    return FALSE;
+  }
+}
+
+/**
+ * gst_va_dmabuf_get_modifier_for_format:
+ * @display: a #GstVaDisplay
+ * @format: a #GstVideoFormat
+ * @usage_hint: VA usage hint
+ *
+ * Get the underlying modifier for specified @format and @usage_hint.
+ *
+ * Returns: the underlying modifier.
+ *
+ * Since: 1.24
+ */
+guint64
+gst_va_dmabuf_get_modifier_for_format (GstVaDisplay * display,
+    GstVideoFormat format, guint usage_hint)
+{
+  VADRMPRIMESurfaceDescriptor desc = { 0, };
+  VASurfaceID surface;
+  GstVideoInfo info;
+
+  gst_video_info_init (&info);
+  gst_video_info_set_format (&info, format, 64, 64);
+
+  if (!_va_create_surface_and_export_to_dmabuf (display, usage_hint,
+          NULL, 0, &info, &surface, &desc))
+    return DRM_FORMAT_MOD_INVALID;
+
+  va_destroy_surfaces (display, &surface, 1);
+
+  return desc.objects[0].drm_format_modifier;
+}
+
+/* Creates an exported VASurfaceID and adds it as @buffer's memories
+ * qdata
+ *
+ * If @info is not NULL, a dummy (non-pooled) buffer is created to
+ * update offsets and strides, and it has to be unrefed immediately.
+ */
+static gboolean
+gst_va_dmabuf_allocator_setup_buffer_full (GstAllocator * allocator,
+    GstBuffer * buffer, GstVideoInfoDmaDrm * info)
+{
+  GstVaBufferSurface *buf;
+  GstVaDmabufAllocator *self = GST_VA_DMABUF_ALLOCATOR (allocator);
+  VADRMPRIMESurfaceDescriptor desc = { 0, };
+  VASurfaceID surface;
+  guint32 i;
+  GDestroyNotify buffer_destroy = NULL;
+  gsize object_offset[4];
+
+  g_return_val_if_fail (GST_IS_VA_DMABUF_ALLOCATOR (allocator), FALSE);
+
+  if (!_va_create_surface_and_export_to_dmabuf (self->display, self->usage_hint,
+          &self->info.drm_modifier, 1, &self->info.vinfo, &surface, &desc))
+    return FALSE;
+
+  buf = gst_va_buffer_surface_new (surface);
+  if (G_UNLIKELY (info))
+    *info = self->info;
 
   buf->n_mems = desc.num_objects;
 
   for (i = 0; i < desc.num_objects; i++) {
     gint fd = desc.objects[i].fd;
-    /* don't rely on prime descriptor reported size since gallium drivers report
-     * different values */
+    /* prime descriptor reports the total size of the object, including regions
+     * which aren't part surface's space. Let's just grab the surface's size: */
     gsize size = _get_fd_size (fd);
     GstMemory *mem = gst_dmabuf_allocator_alloc (allocator, fd, size);
-    guint64 *drm_mod = g_new (guint64, 1);
 
-    if (size != desc.objects[i].size) {
+    if (desc.objects[i].size < size) {
       GST_WARNING_OBJECT (self, "driver bug: fd size (%" G_GSIZE_FORMAT
-          ") differs from object descriptor size (%" G_GUINT32_FORMAT ")",
+          ") is bigger than object descriptor size (%" G_GUINT32_FORMAT ")",
           size, desc.objects[i].size);
     }
 
@@ -658,41 +726,40 @@ gst_va_dmabuf_allocator_setup_buffer_full (GstAllocator * allocator,
     gst_mini_object_set_qdata (GST_MINI_OBJECT (mem),
         gst_va_buffer_surface_quark (), buf, buffer_destroy);
 
-    *drm_mod = desc.objects[i].drm_format_modifier;
-    gst_mini_object_set_qdata (GST_MINI_OBJECT (mem), gst_va_drm_mod_quark (),
-        drm_mod, g_free);
-
-    if (G_UNLIKELY (info))
-      GST_VIDEO_INFO_PLANE_OFFSET (info, i) = GST_VIDEO_INFO_SIZE (info);
+    if (G_UNLIKELY (info)) {
+      GST_VIDEO_INFO_PLANE_OFFSET (&info->vinfo, i) =
+          GST_VIDEO_INFO_SIZE (&info->vinfo);
+    }
 
     GST_LOG_OBJECT (self, "buffer %p: new dmabuf %d / surface %#x [%dx%d] "
         "size %" G_GSIZE_FORMAT " drm mod %#" G_GINT64_MODIFIER "x",
-        buffer, fd, surface,
-        GST_VIDEO_INFO_WIDTH (&self->info), GST_VIDEO_INFO_HEIGHT (&self->info),
-        size, *drm_mod);
+        buffer, fd, surface, GST_VIDEO_INFO_WIDTH (&self->info.vinfo),
+        GST_VIDEO_INFO_HEIGHT (&self->info.vinfo), size,
+        self->info.drm_modifier);
   }
 
   if (G_UNLIKELY (info)) {
-    GST_VIDEO_INFO_SIZE (info) = gst_buffer_get_size (buffer);
+    if (desc.num_objects > 0) {
+      /* update drm modifier and format */
+      info->drm_modifier = desc.objects[0].drm_format_modifier;
+      info->drm_fourcc = gst_va_drm_fourcc_from_video_format
+          (GST_VIDEO_INFO_FORMAT (&self->info.vinfo));
+    }
+
+    GST_VIDEO_INFO_SIZE (&info->vinfo) = gst_buffer_get_size (buffer);
 
     for (i = 0; i < desc.num_layers; i++) {
       g_assert (desc.layers[i].num_planes == 1);
-      GST_VIDEO_INFO_PLANE_OFFSET (info, i) =
+      GST_VIDEO_INFO_PLANE_OFFSET (&info->vinfo, i) =
           object_offset[desc.layers[i].object_index[0]] +
           desc.layers[i].offset[0];
-      GST_VIDEO_INFO_PLANE_STRIDE (info, i) = desc.layers[i].pitch[0];
+      GST_VIDEO_INFO_PLANE_STRIDE (&info->vinfo, i) = desc.layers[i].pitch[0];
     }
   } else {
     gst_va_memory_pool_surface_inc (&self->pool);
   }
 
   return TRUE;
-
-failed:
-  {
-    va_destroy_surfaces (self->display, &surface, 1);
-    return FALSE;
-  }
 }
 
 /**
@@ -700,7 +767,7 @@ failed:
  * @allocator: a #GstAllocator
  * @buffer: an empty #GstBuffer
  *
- * This funciton creates a new VASurfaceID and exposes its DMABufs,
+ * This function creates a new VASurfaceID and exposes its DMABufs,
  * later it populates the @buffer with those DMABufs.
  *
  * Return: %TRUE if @buffer is populated correctly; %FALSE otherwise.
@@ -863,7 +930,7 @@ gst_va_dmabuf_allocator_try (GstAllocator * allocator)
 {
   GstBuffer *buffer;
   GstVaDmabufAllocator *self;
-  GstVideoInfo info;
+  GstVideoInfoDmaDrm info;
   gboolean ret;
 
   g_return_val_if_fail (GST_IS_VA_DMABUF_ALLOCATOR (allocator), FALSE);
@@ -884,16 +951,16 @@ gst_va_dmabuf_allocator_try (GstAllocator * allocator)
 /**
  * gst_va_dmabuf_allocator_set_format:
  * @allocator: a #GstAllocator
- * @info: a #GstVideoInfo
+ * @info: (in) (out caller-allocates) (not nullable): a #GstVideoInfoDmaDrm
  * @usage_hint: VA usage hint
  *
  * Sets the configuration defined by @info and @usage_hint for
  * @allocator, and it tries the configuration, if @allocator has not
  * allocated memories yet.
  *
- * If @allocator has memory allocated already, and frame size and
- * format in @info are the same as currently configured in @allocator,
- * the rest of @info parameters are updated internally.
+ * If @allocator has memory allocated already, and frame size, format
+ * and modifier in @info are the same as currently configured in
+ * @allocator, the rest of @info parameters are updated internally.
  *
  * Returns: %TRUE if the configuration is valid or updated; %FALSE if
  * configuration is not valid or not updated.
@@ -902,7 +969,7 @@ gst_va_dmabuf_allocator_try (GstAllocator * allocator)
  */
 gboolean
 gst_va_dmabuf_allocator_set_format (GstAllocator * allocator,
-    GstVideoInfo * info, guint usage_hint)
+    GstVideoInfoDmaDrm * info, guint usage_hint)
 {
   GstVaDmabufAllocator *self;
   gboolean ret;
@@ -913,9 +980,13 @@ gst_va_dmabuf_allocator_set_format (GstAllocator * allocator,
   self = GST_VA_DMABUF_ALLOCATOR (allocator);
 
   if (gst_va_memory_pool_surface_count (&self->pool) != 0) {
-    if (GST_VIDEO_INFO_FORMAT (info) == GST_VIDEO_INFO_FORMAT (&self->info)
-        && GST_VIDEO_INFO_WIDTH (info) == GST_VIDEO_INFO_WIDTH (&self->info)
-        && GST_VIDEO_INFO_HEIGHT (info) == GST_VIDEO_INFO_HEIGHT (&self->info)
+    if (info->drm_modifier == self->info.drm_modifier
+        && GST_VIDEO_INFO_FORMAT (&info->vinfo)
+        == GST_VIDEO_INFO_FORMAT (&self->info.vinfo)
+        && GST_VIDEO_INFO_WIDTH (&info->vinfo)
+        == GST_VIDEO_INFO_WIDTH (&self->info.vinfo)
+        && GST_VIDEO_INFO_HEIGHT (&info->vinfo)
+        == GST_VIDEO_INFO_HEIGHT (&self->info.vinfo)
         && usage_hint == self->usage_hint) {
       *info = self->info;       /* update callee info (offset & stride) */
       return TRUE;
@@ -939,7 +1010,7 @@ gst_va_dmabuf_allocator_set_format (GstAllocator * allocator,
 /**
  * gst_va_dmabuf_allocator_get_format:
  * @allocator: a #GstAllocator
- * @info: (out) (optional): a #GstVideoInfo
+ * @info: (out) (optional): a #GstVideoInfoDmaDrm
  * @usage_hint: (out) (optional): VA usage hint
  *
  * Gets current internal configuration of @allocator.
@@ -951,11 +1022,11 @@ gst_va_dmabuf_allocator_set_format (GstAllocator * allocator,
  */
 gboolean
 gst_va_dmabuf_allocator_get_format (GstAllocator * allocator,
-    GstVideoInfo * info, guint * usage_hint)
+    GstVideoInfoDmaDrm * info, guint * usage_hint)
 {
   GstVaDmabufAllocator *self = GST_VA_DMABUF_ALLOCATOR (allocator);
 
-  if (GST_VIDEO_INFO_FORMAT (&self->info) == GST_VIDEO_FORMAT_UNKNOWN)
+  if (GST_VIDEO_INFO_FORMAT (&self->info.vinfo) == GST_VIDEO_FORMAT_UNKNOWN)
     return FALSE;
 
   if (info)
@@ -966,14 +1037,33 @@ gst_va_dmabuf_allocator_get_format (GstAllocator * allocator,
   return TRUE;
 }
 
+static gboolean
+_is_fd_repeated (uintptr_t fds[GST_VIDEO_MAX_PLANES], guint cur, guint * prev)
+{
+  guint i;
+
+  g_assert (cur <= GST_VIDEO_MAX_PLANES);
+
+  if (cur == 0)
+    return FALSE;
+
+  for (i = 0; i < cur; i++) {
+    if (fds[i] == fds[cur]) {
+      if (prev)
+        *prev = i;
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
 /**
  * gst_va_dmabuf_memories_setup:
  * @display: a #GstVaDisplay
- * @info: a #GstVideoInfo
- * @n_planes: number of planes
+ * @drm_info: a #GstVideoInfoDmaDrm
  * @mem: (array fixed-size=4) (element-type GstMemory): Memories. One
  *     per plane.
- * @fds: (array length=n_planes) (element-type uintptr_t): array of
+ * @fds: (array fixed-size=4) (element-type uintptr_t): array of
  *     DMABuf file descriptors.
  * @offset: (array fixed-size=4) (element-type gsize): array of memory
  *     offsets.
@@ -988,35 +1078,42 @@ gst_va_dmabuf_allocator_get_format (GstAllocator * allocator,
  * Since: 1.22
  */
 /* XXX: use a surface pool to control the created surfaces */
-/* XXX: remove n_planes argument and use GST_VIDEO_INFO_N_PLANES (info) */
 gboolean
-gst_va_dmabuf_memories_setup (GstVaDisplay * display, GstVideoInfo * info,
-    guint n_planes, GstMemory * mem[GST_VIDEO_MAX_PLANES],
-    uintptr_t * fds, gsize offset[GST_VIDEO_MAX_PLANES], guint usage_hint)
+gst_va_dmabuf_memories_setup (GstVaDisplay * display,
+    GstVideoInfoDmaDrm * drm_info, GstMemory * mem[GST_VIDEO_MAX_PLANES],
+    uintptr_t fds[GST_VIDEO_MAX_PLANES], gsize offset[GST_VIDEO_MAX_PLANES],
+    guint usage_hint)
 {
   GstVideoFormat format;
   GstVaBufferSurface *buf;
+  GstVideoInfo *info = &drm_info->vinfo;
   /* *INDENT-OFF* */
-  VASurfaceAttribExternalBuffers ext_buf = {
+  VADRMPRIMESurfaceDescriptor desc = {
     .width = GST_VIDEO_INFO_WIDTH (info),
     .height = GST_VIDEO_INFO_HEIGHT (info),
-    .data_size = GST_VIDEO_INFO_SIZE (info),
-    .num_planes = GST_VIDEO_INFO_N_PLANES (info),
-    .buffers = fds,
-    .num_buffers = GST_VIDEO_INFO_N_PLANES (info),
+    /* GStreamer can only describe one PRIME layer */
+    .num_layers = 1,
   };
   /* *INDENT-ON* */
   VASurfaceID surface;
-  guint32 fourcc, rt_format;
-  guint i;
+  guint32 fourcc, rt_format, drm_fourcc;
+  guint64 drm_modifier;
+  guint i, j, prev, n_planes;
   gboolean ret;
 
   g_return_val_if_fail (GST_IS_VA_DISPLAY (display), FALSE);
-  g_return_val_if_fail (n_planes > 0
-      && n_planes <= GST_VIDEO_MAX_PLANES, FALSE);
 
-  format = GST_VIDEO_INFO_FORMAT (info);
+  n_planes = GST_VIDEO_INFO_N_PLANES (info);
+
+  format = (drm_info->drm_fourcc == DRM_FORMAT_INVALID) ?
+      GST_VIDEO_INFO_FORMAT (info) :
+      gst_va_video_format_from_drm_fourcc (drm_info->drm_fourcc);
   if (format == GST_VIDEO_FORMAT_UNKNOWN)
+    return FALSE;
+
+  drm_fourcc = (drm_info->drm_fourcc == DRM_FORMAT_INVALID) ?
+      gst_va_drm_fourcc_from_video_format (format) : drm_info->drm_fourcc;
+  if (drm_fourcc == 0)
     return FALSE;
 
   rt_format = gst_va_chroma_from_video_format (format);
@@ -1027,23 +1124,41 @@ gst_va_dmabuf_memories_setup (GstVaDisplay * display, GstVideoInfo * info,
   if (fourcc == 0)
     return FALSE;
 
-  ext_buf.pixel_format = fourcc;
+  drm_modifier = (drm_info->drm_modifier == DRM_FORMAT_MOD_INVALID) ?
+      DRM_FORMAT_MOD_LINEAR : drm_info->drm_modifier;
 
-  for (i = 0; i < n_planes; i++) {
-    ext_buf.pitches[i] = GST_VIDEO_INFO_PLANE_STRIDE (info, i);
-    ext_buf.offsets[i] = offset[i];
+  desc.fourcc = fourcc;
+  desc.layers[0].num_planes = n_planes;
+  desc.layers[0].drm_format = drm_fourcc;
+
+  for (i = j = 0; i < n_planes; i++) {
+    desc.layers[0].pitch[i] = GST_VIDEO_INFO_PLANE_STRIDE (info, i);
+    desc.layers[0].offset[i] = offset[i];
+
+    if (_is_fd_repeated (fds, i, &prev)) {
+      desc.layers[0].object_index[i] = prev;
+      continue;
+    }
+
+    desc.objects[j].fd = fds[i];
+    desc.objects[j].size = _get_fd_size (fds[i]);
+    desc.objects[j].drm_format_modifier = drm_modifier;
+
+    desc.layers[0].object_index[i] = j;
+    j++;
   }
 
-  ret = va_create_surfaces (display, rt_format, ext_buf.pixel_format,
-      ext_buf.width, ext_buf.height, usage_hint, &ext_buf, &surface, 1);
+  desc.num_objects = j;
+
+  ret = va_create_surfaces (display, rt_format, fourcc, desc.width, desc.height,
+      usage_hint, NULL, 0, &desc, &surface, 1);
   if (!ret)
     return FALSE;
 
-  GST_LOG_OBJECT (display, "Created surface %#x [%dx%d]", surface,
-      ext_buf.width, ext_buf.height);
+  GST_LOG_OBJECT (display, "Created surface %#x [%dx%d]", surface, desc.width,
+      desc.height);
 
-  buf = gst_va_buffer_surface_new (surface, rt_format, ext_buf.width,
-      ext_buf.height);
+  buf = gst_va_buffer_surface_new (surface);
   buf->display = gst_object_ref (display);
   buf->n_mems = n_planes;
   memcpy (buf->mems, mem, sizeof (buf->mems));
@@ -1077,7 +1192,6 @@ struct _GstVaAllocator
 
   GstVaDisplay *display;
 
-  GstVaFeature feat_use_derived;
   gboolean use_derived;
   GArray *surface_formats;
 
@@ -1086,7 +1200,6 @@ struct _GstVaAllocator
   guint32 fourcc;
   guint32 rt_format;
 
-  GstVideoInfo derived_info;
   GstVideoInfo info;
   guint usage_hint;
 
@@ -1171,7 +1284,7 @@ _va_free (GstAllocator * allocator, GstMemory * mem)
 
   g_mutex_clear (&va_mem->lock);
 
-  g_slice_free (GstVaMemory, va_mem);
+  g_free (va_mem);
 }
 
 static void
@@ -1192,7 +1305,7 @@ _clean_mem (GstVaMemory * mem)
   mem->image.image_id = VA_INVALID_ID;
   mem->image.buf = VA_INVALID_ID;
 
-  mem->is_derived = TRUE;
+  mem->is_derived = FALSE;
   mem->is_dirty = FALSE;
   mem->prev_mapflags = 0;
   mem->mapped_data = NULL;
@@ -1209,6 +1322,15 @@ _reset_mem (GstVaMemory * mem, GstAllocator * allocator, gsize size)
       0 /* align */ , 0 /* offset */ , size);
 }
 
+#ifndef G_OS_WIN32
+static inline gboolean
+_is_old_mesa (GstVaAllocator * va_allocator)
+{
+  return GST_VA_DISPLAY_IS_IMPLEMENTATION (va_allocator->display, MESA_GALLIUM)
+      && !gst_va_display_check_version (va_allocator->display, 23, 2);
+}
+#endif /* G_OS_WIN32 */
+
 static inline void
 _update_info (GstVideoInfo * info, const VAImage * image)
 {
@@ -1219,11 +1341,16 @@ _update_info (GstVideoInfo * info, const VAImage * image)
     GST_VIDEO_INFO_PLANE_STRIDE (info, i) = image->pitches[i];
   }
 
-  GST_VIDEO_INFO_SIZE (info) = image->data_size;
+  /* Don't update image size for one planed images since drivers might add extra
+   * bits which will drop wrong raw images with filesink, for example. Multiple
+   * plane images require video meta */
+  if (image->num_planes > 1)
+    GST_VIDEO_INFO_SIZE (info) = image->data_size;
 }
 
 static inline gboolean
-_update_image_info (GstVaAllocator * va_allocator)
+_update_image_info (GstVaAllocator * va_allocator,
+    GstVaFeature feat_use_derived)
 {
   VASurfaceID surface;
   VAImage image = {.image_id = VA_INVALID_ID, };
@@ -1232,7 +1359,7 @@ _update_image_info (GstVaAllocator * va_allocator)
   if (!va_create_surfaces (va_allocator->display, va_allocator->rt_format,
           va_allocator->fourcc, GST_VIDEO_INFO_WIDTH (&va_allocator->info),
           GST_VIDEO_INFO_HEIGHT (&va_allocator->info), va_allocator->usage_hint,
-          NULL, &surface, 1)) {
+          NULL, 0, NULL, &surface, 1)) {
     GST_ERROR_OBJECT (va_allocator, "Failed to create a test surface");
     return FALSE;
   }
@@ -1241,23 +1368,38 @@ _update_image_info (GstVaAllocator * va_allocator)
       GST_VIDEO_INFO_WIDTH (&va_allocator->info),
       GST_VIDEO_INFO_HEIGHT (&va_allocator->info));
 
-  /* Try derived first, but different formats can never derive */
-  if (va_allocator->feat_use_derived != GST_VA_FEATURE_DISABLED
-      && va_allocator->surface_format == va_allocator->img_format) {
-    if (va_get_derive_image (va_allocator->display, surface, &image)) {
-      va_allocator->use_derived = TRUE;
-      va_allocator->derived_info = va_allocator->info;
-      _update_info (&va_allocator->derived_info, &image);
-      va_destroy_image (va_allocator->display, image.image_id);
+#ifdef G_OS_WIN32
+  /* XXX: Derived image is problematic for D3D backend */
+  if (feat_use_derived != GST_VA_FEATURE_DISABLED) {
+    GST_INFO_OBJECT (va_allocator, "Disable image derive on Windows.");
+    feat_use_derived = GST_VA_FEATURE_DISABLED;
+  }
+  va_allocator->use_derived = FALSE;
+#else
+  /* XXX: Derived in Mesa <23.3 can't use derived images for P010 format
+   * https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/24381
+   */
+  if (va_allocator->img_format == GST_VIDEO_FORMAT_P010_10LE
+      && _is_old_mesa (va_allocator)) {
+    if (feat_use_derived != GST_VA_FEATURE_DISABLED) {
+      GST_INFO_OBJECT (va_allocator, "Disable image derive on old Mesa.");
+      feat_use_derived = GST_VA_FEATURE_DISABLED;
     }
+    va_allocator->use_derived = FALSE;
+  }
+#endif
+  /* Try derived first, but different formats can never derive */
+  if (feat_use_derived != GST_VA_FEATURE_DISABLED
+      && va_allocator->surface_format == va_allocator->img_format) {
+    va_allocator->use_derived =
+        va_get_derive_image (va_allocator->display, surface, &image);
+    if (va_allocator->use_derived)
+      goto done;
     image.image_id = VA_INVALID_ID;     /* reset it */
   }
 
-  if (va_allocator->feat_use_derived == GST_VA_FEATURE_ENABLED
-      && !va_allocator->use_derived) {
+  if (feat_use_derived == GST_VA_FEATURE_ENABLED && !va_allocator->use_derived)
     GST_WARNING_OBJECT (va_allocator, "Derived images are disabled.");
-    va_allocator->feat_use_derived = GST_VA_FEATURE_DISABLED;
-  }
 
   /* Then we try to create a image. */
   if (!va_create_image (va_allocator->display, va_allocator->img_format,
@@ -1267,7 +1409,13 @@ _update_image_info (GstVaAllocator * va_allocator)
     return FALSE;
   }
 
+done:
   _update_info (&va_allocator->info, &image);
+  if (GST_VIDEO_INFO_SIZE (&va_allocator->info) > image.data_size) {
+    GST_WARNING_OBJECT (va_allocator,
+        "image size is lesser than the minimum required");
+  }
+
   va_destroy_image (va_allocator->display, image.image_id);
   va_destroy_surfaces (va_allocator->display, &surface, 1);
 
@@ -1278,10 +1426,8 @@ static gpointer
 _va_map_unlocked (GstVaMemory * mem, GstMapFlags flags)
 {
   GstAllocator *allocator = GST_MEMORY_CAST (mem)->allocator;
-  GstVideoInfo *info;
   GstVaAllocator *va_allocator;
   GstVaDisplay *display;
-  gboolean use_derived;
 
   g_return_val_if_fail (mem->surface != VA_INVALID_ID, NULL);
   g_return_val_if_fail (GST_IS_VA_ALLOCATOR (allocator), NULL);
@@ -1307,53 +1453,18 @@ _va_map_unlocked (GstVaMemory * mem, GstMapFlags flags)
     goto success;
   }
 
-  if (va_allocator->feat_use_derived == GST_VA_FEATURE_ENABLED) {
-    use_derived = TRUE;
-  } else if (va_allocator->feat_use_derived == GST_VA_FEATURE_DISABLED) {
-    use_derived = FALSE;
-  } else {
-    switch (gst_va_display_get_implementation (display)) {
-      case GST_VA_IMPLEMENTATION_INTEL_IHD:
-        /* On Gen7+ Intel graphics the memory is mappable but not
-         * cached, so normal memcpy() access is very slow to read, but
-         * it's ok for writing. So let's assume that users won't prefer
-         * direct-mapped memory if they request read access. */
-        use_derived = va_allocator->use_derived && !(flags & GST_MAP_READ);
-        break;
-      case GST_VA_IMPLEMENTATION_INTEL_I965:
-        /* YUV derived images are tiled, so writing them is also
-         * problematic */
-        use_derived = va_allocator->use_derived && !((flags & GST_MAP_READ)
-            || ((flags & GST_MAP_WRITE)
-                && GST_VIDEO_INFO_IS_YUV (&va_allocator->derived_info)));
-        break;
-      case GST_VA_IMPLEMENTATION_MESA_GALLIUM:
-        /* Reading RGB derived images, with non-standard resolutions,
-         * looks like tiled too. TODO(victor): fill a bug in Mesa. */
-        use_derived = va_allocator->use_derived && !((flags & GST_MAP_READ)
-            && GST_VIDEO_INFO_IS_RGB (&va_allocator->derived_info));
-        break;
-      default:
-        use_derived = va_allocator->use_derived;
-        break;
-    }
-  }
-  if (use_derived)
-    info = &va_allocator->derived_info;
-  else
-    info = &va_allocator->info;
+  mem->is_derived = va_allocator->use_derived;
 
-  if (!va_ensure_image (display, mem->surface, info, &mem->image, use_derived))
+  if (!va_ensure_image (display, mem->surface, &va_allocator->info, &mem->image,
+          va_allocator->use_derived))
     return NULL;
-
-  mem->is_derived = use_derived;
 
   if (!mem->is_derived) {
     if (!va_get_image (display, mem->surface, &mem->image))
       goto fail;
   }
 
-  if (!va_map_buffer (display, mem->image.buf, &mem->mapped_data))
+  if (!va_map_buffer (display, mem->image.buf, flags, &mem->mapped_data))
     goto fail;
 
 success:
@@ -1445,7 +1556,7 @@ _va_share (GstMemory * mem, gssize offset, gssize size)
   if (size == -1)
     size = mem->maxsize - offset;
 
-  sub = g_slice_new (GstVaMemory);
+  sub = g_new (GstVaMemory, 1);
 
   /* the shared memory is alwyas readonly */
   gst_memory_init (GST_MEMORY_CAST (sub), GST_MINI_OBJECT_FLAGS (parent) |
@@ -1540,8 +1651,6 @@ gst_va_allocator_init (GstVaAllocator * self)
 
   gst_va_memory_pool_init (&self->pool);
 
-  self->feat_use_derived = GST_VA_FEATURE_AUTO;
-
   GST_OBJECT_FLAG_SET (self, GST_ALLOCATOR_FLAG_CUSTOM_ALLOC);
 }
 
@@ -1590,11 +1699,11 @@ gst_va_allocator_alloc (GstAllocator * allocator)
 
   if (!va_create_surfaces (self->display, self->rt_format, self->fourcc,
           GST_VIDEO_INFO_WIDTH (&self->info),
-          GST_VIDEO_INFO_HEIGHT (&self->info), self->usage_hint, NULL,
+          GST_VIDEO_INFO_HEIGHT (&self->info), self->usage_hint, NULL, 0, NULL,
           &surface, 1))
     return NULL;
 
-  mem = g_slice_new (GstVaMemory);
+  mem = g_new (GstVaMemory, 1);
 
   mem->surface = surface;
   mem->surface_format = self->surface_format;
@@ -1741,7 +1850,7 @@ gst_va_allocator_flush (GstAllocator * allocator)
  * Since: 1.22
  */
 static gboolean
-gst_va_allocator_try (GstAllocator * allocator)
+gst_va_allocator_try (GstAllocator * allocator, GstVaFeature feat_use_derived)
 {
   GstVaAllocator *self;
 
@@ -1773,7 +1882,7 @@ gst_va_allocator_try (GstAllocator * allocator)
     return FALSE;
   }
 
-  if (!_update_image_info (self)) {
+  if (!_update_image_info (self, feat_use_derived)) {
     GST_ERROR_OBJECT (allocator, "Failed to update allocator info");
     return FALSE;
   }
@@ -1794,7 +1903,7 @@ gst_va_allocator_try (GstAllocator * allocator)
  * @allocator: a #GstAllocator
  * @info: (inout): a #GstVideoInfo
  * @usage_hint: VA usage hint
- * @use_derived: a #GstVaFeature
+ * @feat_use_derived: a #GstVaFeature
  *
  * Sets the configuration defined by @info, @usage_hint and
  * @use_derived for @allocator, and it tries the configuration, if
@@ -1811,9 +1920,10 @@ gst_va_allocator_try (GstAllocator * allocator)
  */
 gboolean
 gst_va_allocator_set_format (GstAllocator * allocator, GstVideoInfo * info,
-    guint usage_hint, GstVaFeature use_derived)
+    guint usage_hint, GstVaFeature feat_use_derived)
 {
   GstVaAllocator *self;
+  gboolean use_derived;
   gboolean ret;
 
   g_return_val_if_fail (GST_IS_VA_ALLOCATOR (allocator), FALSE);
@@ -1821,12 +1931,14 @@ gst_va_allocator_set_format (GstAllocator * allocator, GstVideoInfo * info,
 
   self = GST_VA_ALLOCATOR (allocator);
 
+  use_derived = feat_use_derived == GST_VA_FEATURE_AUTO ? self->use_derived
+      : feat_use_derived == GST_VA_FEATURE_DISABLED ? FALSE : TRUE;
+
   if (gst_va_memory_pool_surface_count (&self->pool) != 0) {
     if (GST_VIDEO_INFO_FORMAT (info) == GST_VIDEO_INFO_FORMAT (&self->info)
         && GST_VIDEO_INFO_WIDTH (info) == GST_VIDEO_INFO_WIDTH (&self->info)
         && GST_VIDEO_INFO_HEIGHT (info) == GST_VIDEO_INFO_HEIGHT (&self->info)
-        && usage_hint == self->usage_hint
-        && use_derived == self->feat_use_derived) {
+        && usage_hint == self->usage_hint && use_derived == self->use_derived) {
       *info = self->info;       /* update callee info (offset & stride) */
       return TRUE;
     }
@@ -1834,12 +1946,11 @@ gst_va_allocator_set_format (GstAllocator * allocator, GstVideoInfo * info,
   }
 
   self->usage_hint = usage_hint;
-  self->feat_use_derived = use_derived;
   self->info = *info;
 
   g_clear_pointer (&self->copy, gst_va_surface_copy_free);
 
-  ret = gst_va_allocator_try (allocator);
+  ret = gst_va_allocator_try (allocator, feat_use_derived);
   if (ret)
     *info = self->info;
 
@@ -1851,8 +1962,8 @@ gst_va_allocator_set_format (GstAllocator * allocator, GstVideoInfo * info,
  * @allocator: a #GstAllocator
  * @info: (out) (optional): a #GstVideoInfo
  * @usage_hint: (out) (optional): VA usage hint
- * @use_derived: (out) (optional): a #GstVaFeature if derived images
- *     are used for buffer mapping.
+ * @use_derived: (out) (optional): whether derived images are used for buffer
+ *     mapping.
  *
  * Gets current internal configuration of @allocator.
  *
@@ -1863,7 +1974,7 @@ gst_va_allocator_set_format (GstAllocator * allocator, GstVideoInfo * info,
  */
 gboolean
 gst_va_allocator_get_format (GstAllocator * allocator, GstVideoInfo * info,
-    guint * usage_hint, GstVaFeature * use_derived)
+    guint * usage_hint, gboolean * use_derived)
 {
   GstVaAllocator *self;
 
@@ -1878,7 +1989,7 @@ gst_va_allocator_get_format (GstAllocator * allocator, GstVideoInfo * info,
   if (usage_hint)
     *usage_hint = self->usage_hint;
   if (use_derived)
-    *use_derived = self->feat_use_derived;
+    *use_derived = self->use_derived;
 
   return TRUE;
 }
@@ -2026,7 +2137,6 @@ gst_va_buffer_create_aux_surface (GstBuffer * buffer)
   VASurfaceID surface = VA_INVALID_ID;
   GstVaDisplay *display = NULL;
   GstVideoFormat format;
-  gint width, height;
   GstVaBufferSurface *surface_buffer;
 
   mem = gst_buffer_peek_memory (buffer, 0);
@@ -2046,22 +2156,20 @@ gst_va_buffer_create_aux_surface (GstBuffer * buffer)
     GstVaDmabufAllocator *self = GST_VA_DMABUF_ALLOCATOR (mem->allocator);
     guint32 fourcc, rt_format;
 
-    format = GST_VIDEO_INFO_FORMAT (&self->info);
+    format = GST_VIDEO_INFO_FORMAT (&self->info.vinfo);
     fourcc = gst_va_fourcc_from_video_format (format);
     rt_format = gst_va_chroma_from_video_format (format);
     if (fourcc == 0 || rt_format == 0) {
       GST_ERROR_OBJECT (self, "Unsupported format: %s",
-          gst_video_format_to_string (GST_VIDEO_INFO_FORMAT (&self->info)));
+          gst_video_format_to_string (format));
       return FALSE;
     }
 
     display = self->display;
-    width = GST_VIDEO_INFO_WIDTH (&self->info);
-    height = GST_VIDEO_INFO_HEIGHT (&self->info);
     if (!va_create_surfaces (self->display, rt_format, fourcc,
-            GST_VIDEO_INFO_WIDTH (&self->info),
-            GST_VIDEO_INFO_HEIGHT (&self->info), self->usage_hint, NULL,
-            &surface, 1))
+            GST_VIDEO_INFO_WIDTH (&self->info.vinfo),
+            GST_VIDEO_INFO_HEIGHT (&self->info.vinfo), self->usage_hint, NULL,
+            0, NULL, &surface, 1))
       return FALSE;
   } else if (GST_IS_VA_ALLOCATOR (mem->allocator)) {
     GstVaAllocator *self = GST_VA_ALLOCATOR (mem->allocator);
@@ -2072,13 +2180,11 @@ gst_va_buffer_create_aux_surface (GstBuffer * buffer)
     }
 
     display = self->display;
-    width = GST_VIDEO_INFO_WIDTH (&self->info);
-    height = GST_VIDEO_INFO_HEIGHT (&self->info);
     format = GST_VIDEO_INFO_FORMAT (&self->info);
     if (!va_create_surfaces (self->display, self->rt_format, self->fourcc,
             GST_VIDEO_INFO_WIDTH (&self->info),
-            GST_VIDEO_INFO_HEIGHT (&self->info), self->usage_hint, NULL,
-            &surface, 1))
+            GST_VIDEO_INFO_HEIGHT (&self->info), self->usage_hint, NULL, 0,
+            NULL, &surface, 1))
       return FALSE;
   } else {
     g_assert_not_reached ();
@@ -2087,7 +2193,7 @@ gst_va_buffer_create_aux_surface (GstBuffer * buffer)
   if (!display || surface == VA_INVALID_ID)
     return FALSE;
 
-  surface_buffer = gst_va_buffer_surface_new (surface, format, width, height);
+  surface_buffer = gst_va_buffer_surface_new (surface);
   surface_buffer->display = gst_object_ref (display);
   g_atomic_int_add (&surface_buffer->ref_count, 1);
 

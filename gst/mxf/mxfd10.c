@@ -43,32 +43,14 @@ typedef struct
 } MXFD10AudioMappingData;
 
 static gboolean
-mxf_is_d10_essence_track (const MXFMetadataTimelineTrack * track)
+mxf_is_d10_essence_track (const MXFMetadataFileDescriptor * d)
 {
-  guint i;
-
-  g_return_val_if_fail (track != NULL, FALSE);
-
-  if (track->parent.descriptor == NULL)
-    return FALSE;
-
-  for (i = 0; i < track->parent.n_descriptor; i++) {
-    MXFMetadataFileDescriptor *d = track->parent.descriptor[i];
-    MXFUL *key;
-
-    if (!d)
-      continue;
-
-    key = &d->essence_container;
-    /* SMPTE 386M 5.1 */
-    if (mxf_is_generic_container_essence_container_label (key) &&
-        key->u[12] == 0x02 && key->u[13] == 0x01 &&
-        (key->u[14] >= 0x01 && key->u[14] <= 0x06) &&
-        (key->u[15] == 0x01 || key->u[15] == 0x02 || key->u[15] == 0x7f))
-      return TRUE;
-  }
-
-  return FALSE;
+  const MXFUL *key = &d->essence_container;
+  /* SMPTE 386M 5.1 */
+  return (mxf_is_generic_container_essence_container_label (key) &&
+      key->u[12] == 0x02 && key->u[13] == 0x01 &&
+      (key->u[14] >= 0x01 && key->u[14] <= 0x06) &&
+      (key->u[15] == 0x01 || key->u[15] == 0x02 || key->u[15] == 0x7f));
 }
 
 static GstFlowReturn
@@ -119,7 +101,7 @@ mxf_d10_sound_handle_essence_element (const MXFUL * key, GstBuffer * buffer,
   gst_buffer_map (buffer, &map, GST_MAP_READ);
 
   /* Now transform raw AES3 into raw audio, see SMPTE 331M */
-  if ((map.size - 4) % 32 != 0) {
+  if (map.size < 4 || (map.size - 4) % 32 != 0) {
     gst_buffer_unmap (buffer, &map);
     GST_ERROR ("Invalid D10 sound essence buffer size");
     return GST_FLOW_ERROR;
@@ -219,6 +201,7 @@ mxf_d10_create_caps (MXFMetadataTimelineTrack * track, GstTagList ** tags,
     GstAudioFormat audio_format;
 
     if (s->channel_count == 0 ||
+        s->channel_count > 8 ||
         s->quantization_bits == 0 ||
         s->audio_sampling_rate.n == 0 || s->audio_sampling_rate.d == 0) {
       GST_ERROR ("Invalid descriptor");

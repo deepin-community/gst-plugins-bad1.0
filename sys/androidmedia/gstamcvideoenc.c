@@ -157,13 +157,15 @@ create_amc_format (GstAmcVideoEnc * encoder, GstVideoCodecState * input_state,
     const gchar *key;
     gint id;
   } amc_profile = {
-  NULL, -1};
+    NULL, -1
+  };
   struct
   {
     const gchar *key;
     gint id;
   } amc_level = {
-  NULL, -1};
+    NULL, -1
+  };
   gint color_format;
   gint stride, slice_height;
   GstAmcFormat *format = NULL;
@@ -232,6 +234,8 @@ create_amc_format (GstAmcVideoEnc * encoder, GstVideoCodecState * input_state,
     mime = "video/x-vnd.on2.vp8";
   } else if (strcmp (name, "video/x-vp9") == 0) {
     mime = "video/x-vnd.on2.vp9";
+  } else if (strcmp (name, "video/x-av1") == 0) {
+    mime = "video/av01";
   } else {
     GST_ERROR_OBJECT (encoder, "Failed to convert caps(%s/...) to any mime",
         name);
@@ -459,6 +463,10 @@ caps_from_amc_format (GstAmcFormat * amc_format)
     caps = gst_caps_new_empty_simple ("video/x-vp8");
   } else if (strcmp (mime, "video/x-vnd.on2.vp9") == 0) {
     caps = gst_caps_new_empty_simple ("video/x-vp9");
+  } else if (strcmp (mime, "video/av01") == 0) {
+    caps = gst_caps_new_simple ("video/x-av1",
+        "stream-format", G_TYPE_STRING, "obu-stream",
+        "alignment", G_TYPE_STRING, "tu", NULL);
   }
 
   gst_caps_set_simple (caps, "width", G_TYPE_INT, width,
@@ -877,6 +885,16 @@ _find_nearest_frame (GstAmcVideoEnc * self, GstClockTime reference_timestamp)
   if (best)
     gst_video_codec_frame_ref (best);
 
+  GST_DEBUG_OBJECT (self, "found best %p from %u frames", best,
+      g_list_length (frames));
+  if (best) {
+    GST_LOG_OBJECT (self, "best %p (input pts %" GST_TIME_FORMAT " dts %"
+        GST_TIME_FORMAT " frame no %" G_GUINT32_FORMAT " buffer %"
+        GST_PTR_FORMAT, best, GST_TIME_ARGS (best->pts),
+        GST_TIME_ARGS (best->dts), best->system_frame_number,
+        best->input_buffer);
+  }
+
   g_list_foreach (frames, (GFunc) gst_video_codec_frame_unref, NULL);
   g_list_free (frames);
 
@@ -954,55 +972,13 @@ gst_amc_video_enc_handle_output_frame (GstAmcVideoEnc * self,
   GstFlowReturn flow_ret = GST_FLOW_OK;
   GstVideoEncoder *encoder = GST_VIDEO_ENCODER_CAST (self);
 
-  /* The BUFFER_FLAG_CODEC_CONFIG logic is borrowed from
-   * gst-omx. see *_handle_output_frame in
-   * gstomxvideoenc.c and gstomxh264enc.c */
-  if ((buffer_info->flags & BUFFER_FLAG_CODEC_CONFIG)
-      && buffer_info->size > 0) {
-
-    if (self->codec_data_in_bytestream) {
-      if (buffer_info->size > 4 &&
-          GST_READ_UINT32_BE (buf->data + buffer_info->offset) == 0x00000001) {
-        GList *l = NULL;
-        GstBuffer *hdrs;
-
-        GST_DEBUG_OBJECT (self, "got codecconfig in byte-stream format");
-
-        hdrs = gst_buffer_new_and_alloc (buffer_info->size);
-        gst_buffer_fill (hdrs, 0, buf->data + buffer_info->offset,
-            buffer_info->size);
-        GST_BUFFER_PTS (hdrs) =
-            gst_util_uint64_scale (buffer_info->presentation_time_us,
-            GST_USECOND, 1);
-
-        l = g_list_append (l, hdrs);
-        gst_video_encoder_set_headers (encoder, l);
-      }
-    } else {
-      GstBuffer *codec_data;
-      GstVideoCodecState *output_state =
-          gst_video_encoder_get_output_state (GST_VIDEO_ENCODER (self));
-
-      GST_DEBUG_OBJECT (self, "Handling codec data");
-
-      codec_data = gst_buffer_new_and_alloc (buffer_info->size);
-      gst_buffer_fill (codec_data, 0, buf->data + buffer_info->offset,
-          buffer_info->size);
-      output_state->codec_data = codec_data;
-      gst_video_codec_state_unref (output_state);
-
-      if (!gst_video_encoder_negotiate (encoder)) {
-        gst_video_codec_frame_unref (frame);
-        return GST_FLOW_NOT_NEGOTIATED;
-      }
-
-      return GST_FLOW_OK;
-    }
-  }
-
   if (buffer_info->size > 0) {
     GstBuffer *out_buf;
     GstPad *srcpad;
+
+    if (buffer_info->flags & BUFFER_FLAG_PARTIAL_FRAME) {
+      GST_FIXME_OBJECT (self, "partial frames are currently not handled");
+    }
 
     srcpad = GST_VIDEO_ENCODER_SRC_PAD (encoder);
     out_buf =
@@ -1023,7 +999,10 @@ gst_amc_video_enc_handle_output_frame (GstAmcVideoEnc * self,
        * caps and filling it
        */
 
-      GST_ERROR_OBJECT (self, "No corresponding frame found");
+      GST_ERROR_OBJECT (self, "No corresponding frame found: buffer pts: %"
+          GST_TIME_FORMAT " presentation_time_us %" G_GUINT64_FORMAT,
+          GST_TIME_ARGS (GST_BUFFER_PTS (out_buf)),
+          (guint64) buffer_info->presentation_time_us);
       flow_ret = gst_pad_push (srcpad, out_buf);
     }
   } else if (frame) {
@@ -1036,9 +1015,10 @@ gst_amc_video_enc_handle_output_frame (GstAmcVideoEnc * self,
 static void
 gst_amc_video_enc_loop (GstAmcVideoEnc * self)
 {
+  GstVideoEncoder *encoder = GST_VIDEO_ENCODER_CAST (self);
   GstVideoCodecFrame *frame;
   GstFlowReturn flow_ret = GST_FLOW_OK;
-  gboolean is_eos;
+  gboolean is_eos, is_codec_data;
   GstAmcBufferInfo buffer_info;
   GstAmcBuffer *buf;
   gint idx;
@@ -1148,14 +1128,62 @@ process_buffer:
     goto got_null_output_buffer;
   }
 
-  frame =
-      _find_nearest_frame (self,
-      gst_util_uint64_scale (buffer_info.presentation_time_us, GST_USECOND, 1));
+  is_codec_data = FALSE;
+  /* The BUFFER_FLAG_CODEC_CONFIG logic is borrowed from
+   * gst-omx. see *_handle_output_frame in
+   * gstomxvideoenc.c and gstomxh264enc.c */
+  if ((buffer_info.flags & BUFFER_FLAG_CODEC_CONFIG)
+      && buffer_info.size > 0) {
 
-  is_eos = ! !(buffer_info.flags & BUFFER_FLAG_END_OF_STREAM);
+    if (self->codec_data_in_bytestream) {
+      if (buffer_info.size > 4 &&
+          GST_READ_UINT32_BE (buf->data + buffer_info.offset) == 0x00000001) {
+        GList *l = NULL;
+        GstBuffer *hdrs;
 
-  flow_ret =
-      gst_amc_video_enc_handle_output_frame (self, buf, &buffer_info, frame);
+        GST_DEBUG_OBJECT (self, "got codecconfig in byte-stream format");
+
+        hdrs = gst_buffer_new_and_alloc (buffer_info.size);
+        gst_buffer_fill (hdrs, 0, buf->data + buffer_info.offset,
+            buffer_info.size);
+        GST_BUFFER_PTS (hdrs) =
+            gst_util_uint64_scale (buffer_info.presentation_time_us,
+            GST_USECOND, 1);
+
+        l = g_list_append (l, hdrs);
+        gst_video_encoder_set_headers (encoder, l);
+        is_codec_data = TRUE;
+      }
+    } else {
+      GstBuffer *codec_data;
+      GstVideoCodecState *output_state =
+          gst_video_encoder_get_output_state (GST_VIDEO_ENCODER (self));
+
+      GST_DEBUG_OBJECT (self, "Handling codec data");
+
+      codec_data = gst_buffer_new_and_alloc (buffer_info.size);
+      gst_buffer_fill (codec_data, 0, buf->data + buffer_info.offset,
+          buffer_info.size);
+      output_state->codec_data = codec_data;
+      gst_video_codec_state_unref (output_state);
+      is_codec_data = TRUE;
+
+      if (!gst_video_encoder_negotiate (encoder))
+        flow_ret = GST_FLOW_NOT_NEGOTIATED;
+    }
+  }
+
+  is_eos = !!(buffer_info.flags & BUFFER_FLAG_END_OF_STREAM);
+
+  if (flow_ret == GST_FLOW_OK && !is_codec_data) {
+    frame =
+        _find_nearest_frame (self,
+        gst_util_uint64_scale (buffer_info.presentation_time_us, GST_USECOND,
+            1));
+
+    flow_ret =
+        gst_amc_video_enc_handle_output_frame (self, buf, &buffer_info, frame);
+  }
 
   gst_amc_buffer_free (buf);
   buf = NULL;

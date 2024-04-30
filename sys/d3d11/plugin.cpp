@@ -75,6 +75,10 @@
 #include "gstd3d11av1dec.h"
 #include "gstd3d11deinterlace.h"
 #include "gstd3d11testsrc.h"
+#include "gstd3d11overlay.h"
+#include "gstd3d11ipcsink.h"
+#include "gstd3d11ipcsrc.h"
+#include "gstd3d11ipcclient.h"
 
 #if !GST_D3D11_WINAPI_ONLY_APP
 #include "gstd3d11screencapturesrc.h"
@@ -109,6 +113,12 @@ GST_DEBUG_CATEGORY (gst_d3d11_screen_capture_device_debug);
 #endif
 
 #define GST_CAT_DEFAULT gst_d3d11_debug
+
+static void
+plugin_deinit (gpointer data)
+{
+  gst_d3d11_ipc_client_deinit ();
+}
 
 static gboolean
 plugin_init (GstPlugin * plugin)
@@ -194,7 +204,8 @@ plugin_init (GstPlugin * plugin)
         gst_d3d11_vp8_dec_register (plugin, device, GST_RANK_PRIMARY);
         /* rust dav1ddec has "primary" rank */
         gst_d3d11_av1_dec_register (plugin, device, GST_RANK_PRIMARY + 1);
-        gst_d3d11_mpeg2_dec_register (plugin, device, GST_RANK_SECONDARY);
+        /* avdec_mpeg2video has primary rank */
+        gst_d3d11_mpeg2_dec_register (plugin, device, GST_RANK_PRIMARY + 1);
       }
 
       gst_d3d11_deinterlace_register (plugin, device, GST_RANK_MARGINAL);
@@ -203,17 +214,9 @@ plugin_init (GstPlugin * plugin)
     gst_object_unref (device);
   }
 
-  /* FIXME: Our shader code is not compatible with D3D_FEATURE_LEVEL_9_3
-   * or lower. So HLSL compiler cannot understand our shader code and
-   * therefore d3d11colorconverter cannot be configured.
-   *
-   * Known D3D_FEATURE_LEVEL_9_3 driver is
-   * "VirtualBox Graphics Adapter (WDDM)"
-   * ... and there might be some more old physical devices which don't support
-   * D3D_FEATURE_LEVEL_10_0.
-   */
+  /* We don't support legacy Direct9.x level GPU */
   if (max_feature_level < D3D_FEATURE_LEVEL_10_0)
-    video_sink_rank = GST_RANK_NONE;
+    return TRUE;
 
   gst_d3d11_plugin_utils_init (max_feature_level);
 
@@ -234,6 +237,12 @@ plugin_init (GstPlugin * plugin)
       "d3d11compositor", GST_RANK_SECONDARY, GST_TYPE_D3D11_COMPOSITOR);
   gst_element_register (plugin,
       "d3d11testsrc", GST_RANK_NONE, GST_TYPE_D3D11_TEST_SRC);
+  gst_element_register (plugin,
+      "d3d11overlay", GST_RANK_NONE, GST_TYPE_D3D11_OVERLAY);
+  gst_element_register (plugin,
+      "d3d11ipcsink", GST_RANK_NONE, GST_TYPE_D3D11_IPC_SINK);
+  gst_element_register (plugin,
+      "d3d11ipcsrc", GST_RANK_NONE, GST_TYPE_D3D11_IPC_SRC);
 
 #if !GST_D3D11_WINAPI_ONLY_APP
   if (gst_d3d11_is_windows_8_or_greater ()) {
@@ -250,6 +259,10 @@ plugin_init (GstPlugin * plugin)
         GST_TYPE_D3D11_SCREEN_CAPTURE_DEVICE_PROVIDER);
   }
 #endif
+
+  g_object_set_data_full (G_OBJECT (plugin),
+      "plugin-d3d11-shutdown", (gpointer) "shutdown-data",
+      (GDestroyNotify) plugin_deinit);
 
   return TRUE;
 }

@@ -37,17 +37,6 @@
 
 G_BEGIN_DECLS
 
-#define GST_TYPE_MSDKH265ENC \
-  (gst_msdkh265enc_get_type())
-#define GST_MSDKH265ENC(obj) \
-  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_MSDKH265ENC,GstMsdkH265Enc))
-#define GST_MSDKH265ENC_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_MSDKH265ENC,GstMsdkH265EncClass))
-#define GST_IS_MSDKH265ENC(obj) \
-  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_MSDKH265ENC))
-#define GST_IS_MSDKH265ENC_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_MSDKH265ENC))
-
 typedef struct _GstMsdkH265Enc GstMsdkH265Enc;
 typedef struct _GstMsdkH265EncClass GstMsdkH265EncClass;
 
@@ -66,12 +55,19 @@ struct _GstMsdkH265Enc
   guint b_pyramid;
   guint p_pyramid;
   guint min_qp;
+  guint min_qp_i;
+  guint min_qp_p;
+  guint min_qp_b;
   guint max_qp;
+  guint max_qp_i;
+  guint max_qp_p;
+  guint max_qp_b;
   guint intra_refresh_type;
   guint intra_refresh_cycle_size;
   gint intra_refresh_qp_delta;
   guint intra_refresh_cycle_dist;
   guint dblk_idc;
+  gboolean pic_timing_sei;
 
   mfxExtHEVCTiles ext_tiles;
   mfxExtHEVCParam ext_param;
@@ -79,6 +75,12 @@ struct _GstMsdkH265Enc
   mfxExtCodingOption option;
   /* roi[0] for current ROI and roi[1] for previous ROI */
   mfxExtEncoderROI roi[2];
+
+  /* HDR SEI */
+  mfxExtMasteringDisplayColourVolume mdcv;
+  mfxExtContentLightLevelInfo cll;
+  gboolean have_mdcv;
+  gboolean have_cll;
 
   GstH265Parser *parser;
   GArray *cc_sei_array;
@@ -89,7 +91,10 @@ struct _GstMsdkH265EncClass
   GstMsdkEncClass parent_class;
 };
 
-GType gst_msdkh265enc_get_type (void);
+gboolean
+gst_msdkh265enc_register (GstPlugin * plugin,
+    GstMsdkContext * context, GstCaps * sink_caps,
+    GstCaps * src_caps, guint rank);
 
 G_END_DECLS
 
