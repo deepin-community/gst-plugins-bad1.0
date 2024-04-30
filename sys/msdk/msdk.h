@@ -65,6 +65,11 @@ static const char MFX_PLUGINID_VP9D_HW;
 #define MFX_API_SDK  "Intel(R) Media SDK"
 #endif
 
+
+#define MFX_RUNTIME_VERSION_ATLEAST(MFX_VERSION, MAJOR, MINOR) \
+    ((MFX_VERSION.Major > (MAJOR)) ||                           \
+    (MFX_VERSION.Major == (MAJOR) && MFX_VERSION.Minor >= (MINOR)))
+
 G_BEGIN_DECLS
 
 #define GST_MSDK_CAPS_MAKE(format) \
@@ -103,19 +108,17 @@ void GstMFXUnload (mfxLoader loader);
 #endif
 
 typedef struct _MsdkSession MsdkSession;
-typedef struct _GstMsdkSurface GstMsdkSurface;
 
 struct _MsdkSession
 {
+  mfxU32 impl_idx;
   mfxSession session;
   mfxLoader loader;
 };
 
-MsdkSession msdk_open_session (mfxIMPL impl);
+MsdkSession msdk_open_session (mfxHDL handle, mfxIMPL impl);
 void msdk_close_mfx_session (mfxSession session);
 void msdk_close_session (MsdkSession * session);
-
-gboolean msdk_is_available (void);
 
 mfxFrameSurface1 *msdk_get_free_surface (mfxFrameSurface1 * surfaces,
     guint size);
@@ -130,19 +133,16 @@ void gst_msdk_set_video_alignment (GstVideoInfo * info, guint alloc_w, guint all
 gint gst_msdk_get_mfx_chroma_from_format (GstVideoFormat format);
 gint gst_msdk_get_mfx_fourcc_from_format (GstVideoFormat format);
 void gst_msdk_set_mfx_frame_info_from_video_info (mfxFrameInfo * mfx_info,
-    GstVideoInfo * info);
-
-gboolean
-gst_msdk_is_msdk_buffer (GstBuffer * buf);
+    const GstVideoInfo * info);
 
 gboolean
 gst_msdk_is_va_mem (GstMemory * mem);
 
-mfxFrameSurface1 *
-gst_msdk_get_surface_from_buffer (GstBuffer * buf);
-
 GstVideoFormat
 gst_msdk_get_video_format_from_mfx_fourcc (mfxU32 fourcc);
+
+void
+gst_msdk_get_video_format_list (GValue * formats);
 
 void
 gst_msdk_update_mfx_frame_info_from_mfx_video_param (mfxFrameInfo * mfx_info,
@@ -160,8 +160,13 @@ mfxU16
 msdk_get_platform_codename (mfxSession session);
 
 mfxStatus
-msdk_init_msdk_session (mfxIMPL impl, mfxVersion * pver,
+msdk_init_msdk_session (mfxHDL handle, mfxIMPL impl, mfxVersion * pver,
     MsdkSession * msdk_session);
+
+gpointer
+msdk_get_impl_description (const mfxLoader * loader, mfxU32 impl_idx);
+gboolean
+msdk_release_impl_description (const mfxLoader * loader, gpointer impl_desc);
 
 G_END_DECLS
 

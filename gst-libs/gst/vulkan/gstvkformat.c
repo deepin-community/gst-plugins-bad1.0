@@ -126,82 +126,55 @@
 #define SUB4204           { 0, 1, 1, 0 }, { 0, 1, 1, 0 }
 #define SUB4224           { 0, 1, 1, 0 }, { 0, 0, 0, 0 }
 
-static GstVulkanFormatInfo formats[] = {
-  {FORMAT (R8G8B8A8, UNORM), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444,
-      PLANE0, OFFS0123, SUB444},
-  {FORMAT (R8G8B8A8, SNORM), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444,
-      PLANE0, OFFS0123, SUB444},
-  {FORMAT (R8G8B8A8, USCALED), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888,
-      PSTR4444, PLANE0, OFFS0123, SUB444},
-  {FORMAT (R8G8B8A8, SSCALED), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888,
-      PSTR4444, PLANE0, OFFS0123, SUB444},
-  {FORMAT (R8G8B8A8, UINT), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444,
-      PLANE0, OFFS0123, SUB444},
-  {FORMAT (R8G8B8A8, SINT), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444,
-      PLANE0, OFFS0123, SUB444},
-  {FORMAT (R8G8B8A8, SRGB), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444,
-      PLANE0, OFFS0123, SUB444},
-  {FORMAT (B8G8R8A8, UNORM), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444,
-      PLANE0, OFFS2103, SUB444},
-  {FORMAT (B8G8R8A8, SNORM), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444,
-      PLANE0, OFFS2103, SUB444},
-  {FORMAT (B8G8R8A8, USCALED), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888,
-      PSTR4444, PLANE0, OFFS2103, SUB444},
-  {FORMAT (B8G8R8A8, SSCALED), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888,
-      PSTR4444, PLANE0, OFFS2103, SUB444},
-  {FORMAT (B8G8R8A8, UINT), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444,
-      PLANE0, OFFS2103, SUB444},
-  {FORMAT (B8G8R8A8, SINT), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444,
-      PLANE0, OFFS2103, SUB444},
-  {FORMAT (B8G8R8A8, SRGB), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444,
-      PLANE0, OFFS2103, SUB444},
-  {FORMAT (R8G8B8, UNORM), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012,
-      SUB444},
-  {FORMAT (R8G8B8, SNORM), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012,
-      SUB444},
-  {FORMAT (R8G8B8, USCALED), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012,
-      SUB444},
-  {FORMAT (R8G8B8, SSCALED), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012,
-      SUB444},
-  {FORMAT (R8G8B8, UINT), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012,
-      SUB444},
-  {FORMAT (R8G8B8, SINT), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012,
-      SUB444},
-  {FORMAT (R8G8B8, SRGB), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012,
-      SUB444},
-  {FORMAT (B8G8R8, UNORM), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210,
-      SUB444},
-  {FORMAT (B8G8R8, SNORM), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210,
-      SUB444},
-  {FORMAT (B8G8R8, USCALED), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210,
-      SUB444},
-  {FORMAT (B8G8R8, SSCALED), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210,
-      SUB444},
-  {FORMAT (B8G8R8, UINT), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210,
-      SUB444},
-  {FORMAT (B8G8R8, SINT), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210,
-      SUB444},
-  {FORMAT (B8G8R8, SRGB), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210,
-      SUB444},
-  {FORMAT (R8G8, UNORM), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01,
-      SUB44},
-  {FORMAT (R8G8, SNORM), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01,
-      SUB44},
-  {FORMAT (R8G8, USCALED), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01,
-      SUB44},
-  {FORMAT (R8G8, SSCALED), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01,
-      SUB44},
-  {FORMAT (R8G8, UINT), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01, SUB44},
-  {FORMAT (R8G8, SINT), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01, SUB44},
-  {FORMAT (R8G8, SRGB), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01, SUB44},
-  {FORMAT (R8, UNORM), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4},
-  {FORMAT (R8, SNORM), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4},
-  {FORMAT (R8, USCALED), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4},
-  {FORMAT (R8, SSCALED), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4},
-  {FORMAT (R8, UINT), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4},
-  {FORMAT (R8, SINT), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4},
-  {FORMAT (R8, SRGB), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4},
+#define ASPECT_2PLANE (VK_IMAGE_ASPECT_PLANE_0_BIT | VK_IMAGE_ASPECT_PLANE_1_BIT)
 
+/* *INDENT-OFF* */
+static GstVulkanFormatInfo formats[] = {
+  {FORMAT (R8G8B8A8, UNORM), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS0123, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8A8, SNORM), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS0123, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8A8, USCALED), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS0123, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8A8, SSCALED), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS0123, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8A8, UINT), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS0123, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8A8, SINT), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS0123, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8A8, SRGB), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS0123, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8A8, UNORM), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS2103, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8A8, SNORM), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS2103, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8A8, USCALED), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS2103, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8A8, SSCALED), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS2103, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8A8, UINT), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS2103, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8A8, SINT), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS2103, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8A8, SRGB), FLAG (RGB) | FLAG (ALPHA) | NE, DPTH8888, PSTR4444, PLANE0, OFFS2103, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8, UNORM), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8, SNORM), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8, USCALED), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8, SSCALED), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8, UINT), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8, SINT), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8B8, SRGB), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS012, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8, UNORM), FLAG (RGB) | NE,  DPTH888, PSTR444, PLANE0, OFFS210, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8, SNORM), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8, USCALED), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8, SSCALED), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8, UINT), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8, SINT), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (B8G8R8, SRGB), FLAG (RGB) | NE, DPTH888, PSTR444, PLANE0, OFFS210, SUB444, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8, UNORM), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01, SUB44, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8, SNORM), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01, SUB44, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8, USCALED), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01, SUB44, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8, SSCALED), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01, SUB44, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8, UINT), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01, SUB44, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8, SINT), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01, SUB44, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8G8, SRGB), FLAG (RGB) | NE, DPTH88, PSTR44, PLANE0, OFFS01, SUB44, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8, UNORM), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8, SNORM), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8, USCALED), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8, SSCALED), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8, UINT), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8, SINT), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4, VK_IMAGE_ASPECT_COLOR_BIT},
+  {FORMAT (R8, SRGB), FLAG (RGB) | NE, DPTH8, PSTR4, PLANE0, OFFS0, SUB4, VK_IMAGE_ASPECT_COLOR_BIT},
+#if (defined(VK_VERSION_1_3) || defined(VK_VERSION_1_2) && VK_HEADER_VERSION >= 199)
+  {FORMAT (G8_B8R8_2PLANE_420, UNORM), FLAG (YUV), DPTH888, PSTR122, PLANE011, OFFS001, SUB420, ASPECT_2PLANE},
+#endif
 #if 0
 FIXME: implement:
   {VK_FORMAT_R4G4_UNORM_PACK8, {0, 1, -1, -1}},
@@ -373,7 +346,6 @@ FIXME: implement:
   VK_FORMAT_G8B8G8R8_422_UNORM = 1000156000,
   VK_FORMAT_B8G8R8G8_422_UNORM = 1000156001,
   VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM = 1000156002,
-  VK_FORMAT_G8_B8R8_2PLANE_420_UNORM = 1000156003,
   VK_FORMAT_G8_B8_R8_3PLANE_422_UNORM = 1000156004,
   VK_FORMAT_G8_B8R8_2PLANE_422_UNORM = 1000156005,
   VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM = 1000156006,
@@ -414,6 +386,7 @@ FIXME: implement:
   VK_FORMAT_PVRTC2_4BPP_SRGB_BLOCK_IMG = 1000054007,
 #endif
 };
+/* *INDENT-ON* */
 
 /**
  * gst_vulkan_format_get_info:
@@ -435,4 +408,335 @@ gst_vulkan_format_get_info (VkFormat format)
   }
 
   return NULL;
+}
+
+/**
+ * gst_vulkan_format_get_aspect:
+ * @format: Vulkan Format
+ *
+ * Returns: the @format aspect
+ *
+ * Since: 1.24
+ */
+guint
+gst_vulkan_format_get_aspect (VkFormat format)
+{
+  int i;
+
+  for (i = 0; i < G_N_ELEMENTS (formats); i++) {
+    if (formats[i].format == format) {
+      return formats[i].aspect;
+    }
+  }
+
+  return 0;                     /* VK_IMAGE_ASPECT_NONE */
+}
+
+/* *INDENT-OFF* */
+const static struct {
+  GstVideoFormat format;
+  VkFormat vkfrmt;
+  VkFormat vkfrmts[GST_VIDEO_MAX_PLANES];
+} vk_formats_map[] = {
+  /* RGB                                                     transfer sRGB */
+  { GST_VIDEO_FORMAT_RGBA,  VK_FORMAT_R8G8B8A8_SRGB,       { VK_FORMAT_R8G8B8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_RGBx,  VK_FORMAT_R8G8B8A8_SRGB,       { VK_FORMAT_R8G8B8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_BGRA,  VK_FORMAT_B8G8R8A8_SRGB,       { VK_FORMAT_B8G8R8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_BGRx,  VK_FORMAT_B8G8R8A8_SRGB,       { VK_FORMAT_B8G8R8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_ARGB,  VK_FORMAT_UNDEFINED,           { VK_FORMAT_R8G8B8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_xRGB,  VK_FORMAT_UNDEFINED,           { VK_FORMAT_R8G8B8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_ABGR,  VK_FORMAT_UNDEFINED,           { VK_FORMAT_R8G8B8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_xBGR,  VK_FORMAT_UNDEFINED,           { VK_FORMAT_R8G8B8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_RGB,   VK_FORMAT_R8G8B8_UNORM,        { VK_FORMAT_UNDEFINED, } },
+  { GST_VIDEO_FORMAT_BGR,   VK_FORMAT_B8G8R8_UNORM,        { VK_FORMAT_UNDEFINED, } },
+  { GST_VIDEO_FORMAT_RGB16, VK_FORMAT_R5G6B5_UNORM_PACK16, { VK_FORMAT_UNDEFINED, } },
+  { GST_VIDEO_FORMAT_BGR16, VK_FORMAT_B5G6R5_UNORM_PACK16, { VK_FORMAT_UNDEFINED, } },
+  /* Gray */
+  { GST_VIDEO_FORMAT_GRAY16_BE, VK_FORMAT_R8G8_UNORM, { VK_FORMAT_UNDEFINED, } },
+  { GST_VIDEO_FORMAT_GRAY16_LE, VK_FORMAT_R8G8_UNORM, { VK_FORMAT_UNDEFINED, } },
+  { GST_VIDEO_FORMAT_GRAY8,     VK_FORMAT_R8_UNORM,   { VK_FORMAT_UNDEFINED, } },
+  /* YUV                                               planes */
+  { GST_VIDEO_FORMAT_AYUV, VK_FORMAT_UNDEFINED, { VK_FORMAT_R8G8B8A8_UNORM, } },
+  { GST_VIDEO_FORMAT_YUY2, VK_FORMAT_UNDEFINED, { VK_FORMAT_R8G8_UNORM, } },
+  { GST_VIDEO_FORMAT_UYVY, VK_FORMAT_UNDEFINED, { VK_FORMAT_R8G8_UNORM, } },
+  { GST_VIDEO_FORMAT_NV12,
+#if (defined(VK_VERSION_1_3) || defined(VK_VERSION_1_2) && VK_HEADER_VERSION >= 199)
+    VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
+#else
+    VK_FORMAT_UNDEFINED,
+#endif
+    { VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM } },
+  { GST_VIDEO_FORMAT_NV21, VK_FORMAT_UNDEFINED, { VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM } },
+  { GST_VIDEO_FORMAT_Y444, VK_FORMAT_UNDEFINED, { VK_FORMAT_R8_UNORM,  } },
+  { GST_VIDEO_FORMAT_Y42B, VK_FORMAT_UNDEFINED, { VK_FORMAT_R8_UNORM, } },
+  { GST_VIDEO_FORMAT_Y41B, VK_FORMAT_UNDEFINED, { VK_FORMAT_R8_UNORM, } },
+  { GST_VIDEO_FORMAT_I420, VK_FORMAT_UNDEFINED, { VK_FORMAT_R8_UNORM, } },
+  { GST_VIDEO_FORMAT_YV12, VK_FORMAT_UNDEFINED, { VK_FORMAT_R8_UNORM, } },
+};
+/* *INDENT-ON* */
+
+/**
+ * gst_vulkan_format_from_video_info: (skip)
+ * @v_info: the #GstVideoInfo
+ * @plane: the plane
+ *
+ * Returns: the VkFormat to use for @v_format and @plane
+ *
+ * Since: 1.18
+ */
+VkFormat
+gst_vulkan_format_from_video_info (GstVideoInfo * v_info, guint plane)
+{
+  guint i;
+
+  for (i = 0; i < G_N_ELEMENTS (vk_formats_map); i++) {
+    if (vk_formats_map[i].format != GST_VIDEO_INFO_FORMAT (v_info))
+      continue;
+
+    if (GST_VIDEO_INFO_IS_RGB (v_info)) {
+      if (GST_VIDEO_INFO_COLORIMETRY (v_info).transfer ==
+          GST_VIDEO_TRANSFER_SRGB) {
+        return vk_formats_map[i].vkfrmt;
+      } else {
+        return vk_formats_map[i].vkfrmts[0];
+      }
+    } else if (GST_VIDEO_INFO_IS_YUV (v_info) &&
+        GST_VIDEO_INFO_N_PLANES (v_info) > plane) {
+      return vk_formats_map[i].vkfrmts[plane];
+    }
+
+    return vk_formats_map[i].vkfrmt;
+  }
+
+  return VK_FORMAT_UNDEFINED;
+}
+
+struct vkUsage
+{
+#if defined (VK_KHR_format_feature_flags2)
+  const VkFormatFeatureFlagBits2KHR feature;
+#else
+  const VkFormatFeatureFlagBits feature;
+#endif
+  VkImageUsageFlags usage;
+};
+
+static VkImageUsageFlags
+_get_usage (guint64 feature)
+{
+  int i;
+  VkImageUsageFlags usage = 0;
+  /* *INDENT-OFF* */
+  const struct vkUsage vk_usage_map[] = {
+    {VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT, VK_IMAGE_USAGE_SAMPLED_BIT},
+    {VK_FORMAT_FEATURE_TRANSFER_SRC_BIT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT},
+    {VK_FORMAT_FEATURE_TRANSFER_DST_BIT, VK_IMAGE_USAGE_TRANSFER_DST_BIT},
+    {VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT, VK_IMAGE_USAGE_STORAGE_BIT},
+    {VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT},
+#if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
+    {VK_FORMAT_FEATURE_2_VIDEO_DECODE_OUTPUT_BIT_KHR,
+          VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR},
+    {VK_FORMAT_FEATURE_2_VIDEO_DECODE_DPB_BIT_KHR,
+          VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR},
+#ifdef VK_ENABLE_BETA_EXTENSIONS
+    {VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR,
+          VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR},
+    {VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR,
+          VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR},
+#endif
+#endif
+  };
+  /* *INDENT-ON* */
+
+  for (i = 0; i < G_N_ELEMENTS (vk_usage_map); i++) {
+    if (vk_usage_map[i].feature & feature)
+      usage |= vk_usage_map[i].usage;
+  }
+
+  return usage;
+}
+
+static guint64
+_get_feature_flags (VkPhysicalDevice gpu, gpointer func, VkFormat format,
+    VkImageTiling tiling)
+{
+  VkFormatProperties prop = { 0 };
+#if defined (VK_KHR_get_physical_device_properties2)
+#if defined (VK_KHR_format_feature_flags2)
+  VkFormatProperties3KHR prop3 = {
+    .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3_KHR,
+  };
+#endif
+  VkFormatProperties2KHR prop2 = {
+    .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2_KHR,
+#if defined (VK_KHR_format_feature_flags2)
+    .pNext = &prop3,
+#endif
+  };
+
+  if (func) {
+    PFN_vkGetPhysicalDeviceFormatProperties2KHR
+        gst_vkGetPhysicalDeviceFormatProperties2 = func;
+
+    gst_vkGetPhysicalDeviceFormatProperties2 (gpu, format, &prop2);
+#if defined (VK_KHR_format_feature_flags2)
+    return tiling == VK_IMAGE_TILING_LINEAR ?
+        prop3.linearTilingFeatures : prop3.optimalTilingFeatures;
+#else
+    return tiling == VK_IMAGE_TILING_LINEAR ?
+        prop2.formatProperties.linearTilingFeatures :
+        prop2.formatProperties.optimalTilingFeatures;
+#endif
+  }
+#endif /* defined (VK_KHR_get_physical_device_properties2) */
+
+  /* fallback */
+  vkGetPhysicalDeviceFormatProperties (gpu, format, &prop);
+  return tiling == VK_IMAGE_TILING_LINEAR ?
+      prop.linearTilingFeatures : prop.optimalTilingFeatures;
+}
+
+/**
+ * gst_vulkan_format_from_video_info_2: (skip)
+ * @physical_device: a #GstVulkanPhysicalDevice
+ * @info: the #GstVideoInfo
+ * @tiling: the tiling to use
+ * @no_multiplane: query for vulkan formats without multiple images
+ * @fmts: (out) (array fixed-size=4): Vulkan formats per image/plane
+ * @n_imgs: (out): number of images/planes used by the Vulkan format
+ * @usage: (out): The potential usage of the format
+ *
+ * Returns: %TRUE if requested GStreamer format maps to a Vulkan format and its
+ * properties.
+ *
+ * Since: 1.24
+ */
+gboolean
+gst_vulkan_format_from_video_info_2 (GstVulkanPhysicalDevice * physical_device,
+    GstVideoInfo * info, VkImageTiling tiling, gboolean no_multiplane,
+    VkImageUsageFlags requested_usage, VkFormat fmts[GST_VIDEO_MAX_PLANES],
+    int *n_imgs, VkImageUsageFlags * usage_ret)
+{
+  int i;
+  VkPhysicalDevice gpu;
+#if defined (VK_KHR_get_physical_device_properties2)
+  PFN_vkGetPhysicalDeviceFormatProperties2KHR
+      gst_vkGetPhysicalDeviceFormatProperties2 = NULL;
+
+  gst_vkGetPhysicalDeviceFormatProperties2 =
+      gst_vulkan_instance_get_proc_address (physical_device->instance,
+      "vkGetPhysicalDeviceFormatProperties2");
+  if (!gst_vkGetPhysicalDeviceFormatProperties2)
+    gst_vkGetPhysicalDeviceFormatProperties2 =
+        gst_vulkan_instance_get_proc_address (physical_device->instance,
+        "vkGetPhysicalDeviceFormatProperties2KHR");
+#else
+  gpointer gst_vkGetPhysicalDeviceFormatProperties2 = NULL;
+#endif
+
+  gpu = gst_vulkan_physical_device_get_handle (physical_device);
+
+  for (i = 0; i < G_N_ELEMENTS (vk_formats_map); i++) {
+    guint64 feats_primary, feats_secondary = 0;
+    VkImageUsageFlags usage = 0;
+
+    if (vk_formats_map[i].format != GST_VIDEO_INFO_FORMAT (info))
+      continue;
+
+    feats_primary = _get_feature_flags (gpu,
+        gst_vkGetPhysicalDeviceFormatProperties2, vk_formats_map[i].vkfrmt,
+        tiling);
+
+    if (vk_formats_map[i].vkfrmt != vk_formats_map[i].vkfrmts[0]) {
+      feats_secondary = _get_feature_flags (gpu,
+          gst_vkGetPhysicalDeviceFormatProperties2,
+          vk_formats_map[i].vkfrmts[0], tiling);
+    }
+
+    if (GST_VIDEO_INFO_IS_RGB (info)) {
+      if ((GST_VIDEO_INFO_COLORIMETRY (info).transfer ==
+              GST_VIDEO_TRANSFER_SRGB
+              || GST_VIDEO_INFO_COLORIMETRY (info).transfer ==
+              GST_VIDEO_TRANSFER_UNKNOWN)) {
+        usage = _get_usage (feats_primary);
+        if ((requested_usage & usage) == requested_usage) {
+          if (fmts)
+            fmts[0] = vk_formats_map[i].vkfrmt;
+          if (n_imgs)
+            *n_imgs = 1;
+          if (usage_ret)
+            *usage_ret = usage;
+          return TRUE;
+        }
+      }
+
+      if (GST_VIDEO_INFO_COLORIMETRY (info).transfer != GST_VIDEO_TRANSFER_SRGB) {
+        usage = _get_usage (feats_secondary);
+        if ((requested_usage & usage) == requested_usage) {
+          if (fmts)
+            fmts[0] = vk_formats_map[i].vkfrmts[0];
+          if (n_imgs)
+            *n_imgs = 1;
+          if (usage_ret)
+            *usage_ret = usage;
+          return TRUE;
+        }
+      }
+      return FALSE;
+    } else {
+      if (!no_multiplane && GST_VIDEO_INFO_N_PLANES (info) > 1) {
+        usage = _get_usage (feats_primary);
+        if ((requested_usage & usage) == requested_usage) {
+          if (fmts)
+            fmts[0] = vk_formats_map[i].vkfrmt;
+          if (n_imgs)
+            *n_imgs = 1;
+          if (usage_ret)
+            *usage_ret = usage;
+          return TRUE;
+        }
+      }
+
+      usage = _get_usage (feats_secondary);
+      if ((requested_usage & usage) == requested_usage) {
+        if (fmts) {
+          memcpy (fmts, vk_formats_map[i].vkfrmts,
+              GST_VIDEO_MAX_PLANES * sizeof (VkFormat));
+        }
+        if (n_imgs)
+          *n_imgs = GST_VIDEO_INFO_N_PLANES (info);
+        if (usage_ret)
+          *usage_ret = usage;
+
+        return TRUE;
+      }
+      return FALSE;
+    }
+  }
+
+  return FALSE;
+}
+
+/**
+ * gst_vulkan_format_to_video_format:
+ * @vk_format: the Vulkan format to convert
+ *
+ * Returns: the #GstVideoFormat that maps to @vk_format
+ *
+ * Since: 1.24
+ */
+GstVideoFormat
+gst_vulkan_format_to_video_format (VkFormat vk_format)
+{
+  int i;
+
+  for (i = 0; i < G_N_ELEMENTS (vk_formats_map); i++) {
+    if (vk_formats_map[i].vkfrmt != vk_format)
+      continue;
+
+    return vk_formats_map[i].format;
+  }
+
+  return GST_VIDEO_FORMAT_UNKNOWN;
 }

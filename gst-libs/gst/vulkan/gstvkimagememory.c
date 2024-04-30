@@ -39,93 +39,6 @@ GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFUALT);
 
 static GstAllocator *_vulkan_image_memory_allocator;
 
-/**
- * gst_vulkan_format_from_video_info: (skip)
- * @v_info: the #GstVideoInfo
- * @plane: the plane
- *
- * Returns: the VkFormat to use for @v_format and @plane
- *
- * Since: 1.18
- */
-VkFormat
-gst_vulkan_format_from_video_info (GstVideoInfo * v_info, guint plane)
-{
-  guint n_plane_components;
-
-  switch (GST_VIDEO_INFO_FORMAT (v_info)) {
-    case GST_VIDEO_FORMAT_RGBx:
-    case GST_VIDEO_FORMAT_RGBA:
-      if (GST_VIDEO_INFO_COLORIMETRY (v_info).transfer ==
-          GST_VIDEO_TRANSFER_SRGB)
-        return VK_FORMAT_R8G8B8A8_UNORM;
-      else
-        return VK_FORMAT_R8G8B8A8_SRGB;
-    case GST_VIDEO_FORMAT_BGRx:
-    case GST_VIDEO_FORMAT_BGRA:
-      if (GST_VIDEO_INFO_COLORIMETRY (v_info).transfer ==
-          GST_VIDEO_TRANSFER_SRGB)
-        return VK_FORMAT_B8G8R8A8_UNORM;
-      else
-        return VK_FORMAT_B8G8R8A8_SRGB;
-    case GST_VIDEO_FORMAT_xRGB:
-    case GST_VIDEO_FORMAT_ARGB:
-    case GST_VIDEO_FORMAT_xBGR:
-    case GST_VIDEO_FORMAT_ABGR:
-      if (GST_VIDEO_INFO_COLORIMETRY (v_info).transfer ==
-          GST_VIDEO_TRANSFER_SRGB)
-        n_plane_components = 4;
-      else
-        return VK_FORMAT_UNDEFINED;
-    case GST_VIDEO_FORMAT_AYUV:
-      n_plane_components = 4;
-      break;
-    case GST_VIDEO_FORMAT_RGB:
-      return VK_FORMAT_R8G8B8_UNORM;
-    case GST_VIDEO_FORMAT_BGR:
-      return VK_FORMAT_B8G8R8_UNORM;
-      break;
-    case GST_VIDEO_FORMAT_RGB16:
-      return VK_FORMAT_R5G6B5_UNORM_PACK16;
-    case GST_VIDEO_FORMAT_BGR16:
-      return VK_FORMAT_B5G6R5_UNORM_PACK16;
-    case GST_VIDEO_FORMAT_GRAY16_BE:
-    case GST_VIDEO_FORMAT_GRAY16_LE:
-    case GST_VIDEO_FORMAT_YUY2:
-    case GST_VIDEO_FORMAT_UYVY:
-      n_plane_components = 2;
-      break;
-    case GST_VIDEO_FORMAT_NV12:
-    case GST_VIDEO_FORMAT_NV21:
-      n_plane_components = plane == 0 ? 1 : 2;
-      break;
-    case GST_VIDEO_FORMAT_GRAY8:
-    case GST_VIDEO_FORMAT_Y444:
-    case GST_VIDEO_FORMAT_Y42B:
-    case GST_VIDEO_FORMAT_Y41B:
-    case GST_VIDEO_FORMAT_I420:
-    case GST_VIDEO_FORMAT_YV12:
-      n_plane_components = 1;
-      break;
-    default:
-      n_plane_components = 4;
-      g_assert_not_reached ();
-      break;
-  }
-
-  switch (n_plane_components) {
-    case 4:
-      return VK_FORMAT_R8G8B8A8_UNORM;
-    case 2:
-      return VK_FORMAT_R8G8_UNORM;
-    case 1:
-      return VK_FORMAT_R8_UNORM;
-    default:
-      g_assert_not_reached ();
-      return VK_FORMAT_R8G8B8A8_UNORM;
-  }
-}
-
 static gboolean
 _create_info_from_args (VkImageCreateInfo * info, VkFormat format, gsize width,
     gsize height, VkImageTiling tiling, VkImageUsageFlags usage)
@@ -158,8 +71,9 @@ _create_info_from_args (VkImageCreateInfo * info, VkFormat format, gsize width,
 gboolean
 gst_vulkan_image_memory_init (GstVulkanImageMemory * mem,
     GstAllocator * allocator, GstMemory * parent, GstVulkanDevice * device,
-    VkImageUsageFlags usage, GstAllocationParams * params, gsize size,
-    gpointer user_data, GDestroyNotify notify)
+    VkFormat format, VkImageUsageFlags usage, VkImageLayout layout,
+    GstAllocationParams * params, gsize size, gpointer user_data,
+    GDestroyNotify notify)
 {
   gsize align = gst_memory_alignment, offset = 0, maxsize = size;
   GstMemoryFlags flags = 0;
@@ -178,10 +92,12 @@ gst_vulkan_image_memory_init (GstVulkanImageMemory * mem,
   mem->barrier.parent.type = GST_VULKAN_BARRIER_TYPE_IMAGE;
   mem->barrier.parent.pipeline_stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
   mem->barrier.parent.access_flags = 0;
-  mem->barrier.image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  mem->barrier.parent.semaphore = VK_NULL_HANDLE;
+  mem->barrier.parent.semaphore_value = 0;
+  mem->barrier.image_layout = layout;
   /* *INDENT-OFF* */
   mem->barrier.subresource_range = (VkImageSubresourceRange) {
-          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+          .aspectMask = gst_vulkan_format_get_aspect (format),
           .baseMipLevel = 0,
           .levelCount = 1,
           .baseArrayLayer = 0,
@@ -205,29 +121,36 @@ gst_vulkan_image_memory_init (GstVulkanImageMemory * mem,
 }
 
 static GstVulkanImageMemory *
-_vk_image_mem_new_alloc (GstAllocator * allocator, GstMemory * parent,
-    GstVulkanDevice * device, VkFormat format, gsize width, gsize height,
-    VkImageTiling tiling, VkImageUsageFlags usage,
-    VkMemoryPropertyFlags mem_prop_flags, gpointer user_data,
-    GDestroyNotify notify)
+_vk_image_mem_new_alloc_with_image_info (GstAllocator * allocator,
+    GstMemory * parent, GstVulkanDevice * device,
+    VkImageCreateInfo * image_info, VkMemoryPropertyFlags mem_prop_flags,
+    gpointer user_data, GDestroyNotify notify)
 {
   GstVulkanImageMemory *mem = NULL;
   GstAllocationParams params = { 0, };
-  VkImageCreateInfo image_info;
   VkPhysicalDevice gpu;
   GError *error = NULL;
+  GArray *qfi = NULL;
   guint32 type_idx;
   VkImage image;
   VkResult err;
 
   gpu = gst_vulkan_device_get_physical_device (device);
-  if (!_create_info_from_args (&image_info, format, width, height, tiling,
-          usage)) {
-    GST_CAT_ERROR (GST_CAT_VULKAN_IMAGE_MEMORY, "Incorrect image parameters");
-    goto error;
+
+  if (!image_info->pQueueFamilyIndices) {
+    /* XXX: overwrite the queue indices part of the structure */
+    qfi = gst_vulkan_device_queue_family_indices (device);
+    image_info->pQueueFamilyIndices = (uint32_t *) qfi->data;
+    image_info->queueFamilyIndexCount = qfi->len;
+    image_info->sharingMode = qfi->len > 1 ? VK_SHARING_MODE_CONCURRENT :
+        VK_SHARING_MODE_EXCLUSIVE;
   }
 
-  err = vkCreateImage (device->device, &image_info, NULL, &image);
+  err = vkCreateImage (device->device, image_info, NULL, &image);
+
+  if (qfi)
+    g_array_unref (qfi);
+
   if (gst_vulkan_error_to_g_error (err, &error, "vkCreateImage") < 0)
     goto vk_error;
 
@@ -235,19 +158,44 @@ _vk_image_mem_new_alloc (GstAllocator * allocator, GstMemory * parent,
 
   vkGetImageMemoryRequirements (device->device, image, &mem->requirements);
 
-  gst_vulkan_image_memory_init (mem, allocator, parent, device, usage, &params,
+  gst_vulkan_image_memory_init (mem, allocator, parent, device,
+      image_info->format, image_info->usage, image_info->initialLayout, &params,
       mem->requirements.size, user_data, notify);
-  mem->create_info = image_info;
+  mem->create_info = *image_info;
+  /* XXX: to avoid handling pNext lifetime  */
+  mem->create_info.pNext = NULL;
   mem->image = image;
 
-  err = vkGetPhysicalDeviceImageFormatProperties (gpu, format, VK_IMAGE_TYPE_2D,
-      tiling, usage, 0, &mem->format_properties);
+#if defined(VK_KHR_timeline_semaphore)
+  if (gst_vulkan_device_is_extension_enabled (device,
+          VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME)) {
+    VkSemaphoreTypeCreateInfo semaphore_type_info = {
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+      .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+      .initialValue = 0,
+    };
+    VkSemaphoreCreateInfo semaphore_create_info = {
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      .pNext = &semaphore_type_info,
+    };
+
+    err = vkCreateSemaphore (device->device, &semaphore_create_info, NULL,
+        &mem->barrier.parent.semaphore);
+    if (gst_vulkan_error_to_g_error (err, &error, "vkCreateSemaphore") < 0)
+      goto vk_error;
+  }
+#endif
+
+
+  err = vkGetPhysicalDeviceImageFormatProperties (gpu, image_info->format,
+      VK_IMAGE_TYPE_2D, image_info->tiling, image_info->usage, 0,
+      &mem->format_properties);
   if (gst_vulkan_error_to_g_error (err, &error,
           "vkGetPhysicalDeviceImageFormatProperties") < 0)
     goto vk_error;
 
-  if (!gst_vulkan_memory_find_memory_type_index_with_type_properties (device,
-          mem->requirements.memoryTypeBits, mem_prop_flags, &type_idx))
+  if (!gst_vulkan_memory_find_memory_type_index_with_requirements (device,
+          &mem->requirements, mem_prop_flags, &type_idx))
     goto error;
 
   if ((mem->requirements.alignment & (mem->requirements.alignment - 1)) != 0) {
@@ -284,6 +232,25 @@ error:
 }
 
 static GstVulkanImageMemory *
+_vk_image_mem_new_alloc (GstAllocator * allocator, GstMemory * parent,
+    GstVulkanDevice * device, VkFormat format, gsize width, gsize height,
+    VkImageTiling tiling, VkImageUsageFlags usage,
+    VkMemoryPropertyFlags mem_prop_flags, gpointer user_data,
+    GDestroyNotify notify)
+{
+  VkImageCreateInfo image_info;
+
+  if (!_create_info_from_args (&image_info, format, width, height, tiling,
+          usage)) {
+    GST_CAT_ERROR (GST_CAT_VULKAN_IMAGE_MEMORY, "Incorrect image parameters");
+    return NULL;
+  }
+
+  return _vk_image_mem_new_alloc_with_image_info (allocator, parent, device,
+      &image_info, mem_prop_flags, user_data, notify);
+}
+
+static GstVulkanImageMemory *
 _vk_image_mem_new_wrapped (GstAllocator * allocator, GstMemory * parent,
     GstVulkanDevice * device, VkImage image, VkFormat format, gsize width,
     gsize height, VkImageTiling tiling, VkImageUsageFlags usage,
@@ -303,8 +270,9 @@ _vk_image_mem_new_wrapped (GstAllocator * allocator, GstMemory * parent,
   /* XXX: assumes alignment is a power of 2 */
   params.align = mem->requirements.alignment - 1;
   params.flags = GST_MEMORY_FLAG_NOT_MAPPABLE;
-  gst_vulkan_image_memory_init (mem, allocator, parent, device, usage, &params,
-      mem->requirements.size, user_data, notify);
+  gst_vulkan_image_memory_init (mem, allocator, parent, device, format, usage,
+      VK_IMAGE_LAYOUT_UNDEFINED, &params, mem->requirements.size, user_data,
+      notify);
   mem->wrapped = TRUE;
 
   if (!_create_info_from_args (&mem->create_info, format, width, height, tiling,
@@ -423,8 +391,15 @@ _vk_image_mem_free (GstAllocator * allocator, GstMemory * memory)
   if (mem->image && !mem->wrapped)
     vkDestroyImage (mem->device->device, mem->image, NULL);
 
+  gst_clear_object (&mem->barrier.parent.queue);
+
   if (mem->vk_mem)
     gst_memory_unref ((GstMemory *) mem->vk_mem);
+
+  if (mem->barrier.parent.semaphore) {
+    vkDestroySemaphore (mem->device->device, mem->barrier.parent.semaphore,
+        NULL);
+  }
 
   if (mem->notify)
     mem->notify (mem->user_data);
@@ -432,6 +407,31 @@ _vk_image_mem_free (GstAllocator * allocator, GstMemory * memory)
   gst_object_unref (mem->device);
 
   g_free (mem);
+}
+
+/**
+ * gst_vulkan_image_memory_alloc_with_image_info:
+ * @device: a #GstVulkanDevice
+ * @image_info: VkImageCreateInfo structure
+ * @mem_prop_flags: VkMemoryPropertyFlags flags
+ *
+ * Returns: a #GstMemory object backed by a vulkan device memory
+ *
+ * Since: 1.24
+ */
+GstMemory *
+gst_vulkan_image_memory_alloc_with_image_info (GstVulkanDevice * device,
+    VkImageCreateInfo * image_info, VkMemoryPropertyFlags mem_prop_flags)
+{
+  GstVulkanImageMemory *mem;
+
+  g_return_val_if_fail (image_info
+      && image_info->sType == VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL);
+
+  mem = _vk_image_mem_new_alloc_with_image_info (_vulkan_image_memory_allocator,
+      NULL, device, image_info, mem_prop_flags, NULL, NULL);
+
+  return (GstMemory *) mem;
 }
 
 /**
@@ -555,8 +555,7 @@ gst_vulkan_image_memory_release_view (GstVulkanImageMemory * image,
   GST_CAT_TRACE (GST_CAT_VULKAN_IMAGE_MEMORY, "image %p removing view %p",
       image, view);
   if (g_ptr_array_find (image->outstanding_views, view, &index)) {
-    /* really g_ptr_array_steal_index_fast() but that requires glib 2.58 */
-    g_ptr_array_remove_index_fast (image->outstanding_views, index);
+    g_ptr_array_steal_index_fast (image->outstanding_views, index);
     g_ptr_array_add (image->views, view);
   } else {
     g_warning ("GstVulkanImageMemory:%p attempt to remove a view %p "
@@ -654,8 +653,7 @@ gst_vulkan_image_memory_find_view (GstVulkanImageMemory * image,
             index));
   } else if (g_ptr_array_find_with_equal_func (image->views, &view,
           (GEqualFunc) find_view_func, &index)) {
-    /* really g_ptr_array_steal_index_fast() but that requires glib 2.58 */
-    ret = g_ptr_array_remove_index_fast (image->views, index);
+    ret = g_ptr_array_steal_index_fast (image->views, index);
     g_ptr_array_add (image->outstanding_views, ret);
     ret->image = (GstVulkanImageMemory *) gst_memory_ref ((GstMemory *) image);
   }

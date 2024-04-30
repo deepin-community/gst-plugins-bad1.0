@@ -39,8 +39,10 @@ GST_DEBUG_CATEGORY_EXTERN (gst_d3d11_screen_capture_device_debug);
 
 static GstStaticCaps template_caps =
     GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE_WITH_FEATURES
-    (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY, "BGRA") ", pixel-aspect-ratio = 1/1;"
-    GST_VIDEO_CAPS_MAKE ("BGRA") ", pixel-aspect-ratio = 1/1");
+    (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY,
+        "BGRA") ", pixel-aspect-ratio = 1/1, colorimetry = (string) sRGB; "
+    GST_VIDEO_CAPS_MAKE ("BGRA") ", pixel-aspect-ratio = 1/1, "
+    "colorimetry = (string) sRGB");
 
 enum
 {
@@ -157,8 +159,8 @@ static void
       GST_DEBUG_FUNCPTR (gst_d3d11_screen_capture_device_provider_probe);
 
   gst_device_provider_class_set_static_metadata (provider_class,
-      "Direct3D11 Desktop Capture Device Provider",
-      "Source/Monitor", "List Direct3D11 desktop capture source devices",
+      "Direct3D11 Screen Capture Device Provider",
+      "Source/Monitor", "List Direct3D11 screen capture source devices",
       "Seungha Yang <seungha@centricular.com>");
 }
 
@@ -175,6 +177,9 @@ get_monitor_name (const MONITORINFOEXW * info,
   UINT32 num_path = 0;
   UINT32 num_mode = 0;
   LONG query_ret;
+  DISPLAYCONFIG_PATH_INFO *path_infos = nullptr;
+  DISPLAYCONFIG_MODE_INFO *mode_infos = nullptr;
+  gboolean ret = FALSE;
 
   memset (target, 0, sizeof (DISPLAYCONFIG_TARGET_DEVICE_NAME));
 
@@ -183,15 +188,13 @@ get_monitor_name (const MONITORINFOEXW * info,
   if (query_ret != ERROR_SUCCESS || num_path == 0 || num_mode == 0)
     return FALSE;
 
-  DISPLAYCONFIG_PATH_INFO *path_infos = (DISPLAYCONFIG_PATH_INFO *)
-      g_alloca (num_path * sizeof (DISPLAYCONFIG_PATH_INFO));
-  DISPLAYCONFIG_MODE_INFO *mode_infos = (DISPLAYCONFIG_MODE_INFO *)
-      g_alloca (num_mode * sizeof (DISPLAYCONFIG_MODE_INFO));
+  path_infos = g_new0 (DISPLAYCONFIG_PATH_INFO, num_path);
+  mode_infos = g_new0 (DISPLAYCONFIG_MODE_INFO, num_mode);
 
   query_ret = QueryDisplayConfig (QDC_ONLY_ACTIVE_PATHS, &num_path,
       path_infos, &num_mode, mode_infos, nullptr);
   if (query_ret != ERROR_SUCCESS)
-    return FALSE;
+    goto out;
 
   for (UINT32 i = 0; i < num_path; i++) {
     DISPLAYCONFIG_PATH_INFO *p = &path_infos[i];
@@ -226,10 +229,15 @@ get_monitor_name (const MONITORINFOEXW * info,
 
     memcpy (target, &tmp, sizeof (DISPLAYCONFIG_TARGET_DEVICE_NAME));
 
-    return TRUE;
+    ret = TRUE;
+    break;
   }
 
-  return FALSE;
+out:
+  g_free (path_infos);
+  g_free (mode_infos);
+
+  return ret;
 }
 
 /* XXX: please bump MinGW toolchain version,
@@ -312,7 +320,9 @@ create_device (const DXGI_ADAPTER_DESC * adapter_desc,
   GstCaps *caps;
   gint width, height, left, top, right, bottom;
   GstStructure *props;
-  std::wstring_convert < std::codecvt_utf8 < wchar_t >, wchar_t >converter;
+  /* *INDENT-OFF* */
+  std::wstring_convert < std::codecvt_utf8 < wchar_t >, wchar_t > converter;
+  /* *INDENT-ON* */
   std::string device_name;
   std::string display_name;
   std::string device_path;

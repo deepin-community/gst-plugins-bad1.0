@@ -65,11 +65,13 @@
 #include <gst/va/gstva.h>
 #include <gst/video/video.h>
 #include <va/va_drmcommon.h>
+#include <gst/va/gstvavideoformat.h>
 
 #include "gstvabasetransform.h"
 #include "gstvacaps.h"
 #include "gstvadisplay_priv.h"
 #include "gstvafilter.h"
+#include "gstvapluginutils.h"
 
 GST_DEBUG_CATEGORY_STATIC (gst_va_vpp_debug);
 #define GST_CAT_DEFAULT gst_va_vpp_debug
@@ -122,6 +124,8 @@ struct _GstVaVpp
   gboolean hdr_mapping;
   gboolean has_hdr_meta;
   VAHdrMetaDataHDR10 hdr_meta;
+
+  gboolean pseudo_passthrough;
 
   GList *channels;
 };
@@ -812,8 +816,28 @@ gst_va_vpp_before_transform (GstBaseTransform * trans, GstBuffer * inbuf)
     self->op_flags &= ~VPP_CONVERT_CROP;
   }
   gst_va_filter_enable_cropping (btrans->filter,
-      (self->op_flags & VPP_CONVERT_CROP));
+      (self->op_flags & VPP_CONVERT_CROP) == VPP_CONVERT_CROP);
   GST_OBJECT_UNLOCK (self);
+}
+
+static GstFlowReturn
+gst_va_vpp_prepare_output_buffer (GstBaseTransform * trans, GstBuffer * inbuf,
+    GstBuffer ** outbuf)
+{
+  GstVaVpp *self = GST_VA_VPP (trans);
+  GstVaBaseTransform *btrans = GST_VA_BASE_TRANSFORM (self);
+
+  if (((self->op_flags & VPP_CONVERT_FEATURE) == self->op_flags)
+      && gst_caps_is_vamemory (btrans->in_caps)
+      && gst_caps_is_raw (btrans->out_caps)) {
+    self->pseudo_passthrough = TRUE;
+    *outbuf = inbuf;
+    return GST_FLOW_OK;
+  }
+
+  self->pseudo_passthrough = FALSE;
+  return GST_BASE_TRANSFORM_CLASS (parent_class)->prepare_output_buffer (trans,
+      inbuf, outbuf);
 }
 
 static GstFlowReturn
@@ -832,6 +856,9 @@ gst_va_vpp_transform (GstBaseTransform * trans, GstBuffer * inbuf,
   res = gst_va_base_transform_import_buffer (btrans, inbuf, &buf);
   if (res != GST_FLOW_OK)
     return res;
+
+  if (self->pseudo_passthrough && (inbuf == buf))
+    goto bail;
 
   /* *INDENT-OFF* */
   src = (GstVaSample) {
@@ -852,6 +879,7 @@ gst_va_vpp_transform (GstBaseTransform * trans, GstBuffer * inbuf,
     res = GST_BASE_TRANSFORM_FLOW_DROPPED;
   }
 
+bail:
   gst_buffer_unref (buf);
 
   return res;
@@ -878,13 +906,13 @@ gst_va_vpp_transform_meta (GstBaseTransform * trans, GstBuffer * inbuf,
     return TRUE;
 
   /* don't copy colorspace/size/orientation specific metadata */
-  if ((self->op_flags & VPP_CONVERT_FORMAT)
+  if ((self->op_flags & VPP_CONVERT_FORMAT) == VPP_CONVERT_FORMAT
       && gst_meta_api_type_has_tag (info->api, META_TAG_COLORSPACE))
     return FALSE;
-  else if ((self->op_flags & (VPP_CONVERT_SIZE | VPP_CONVERT_CROP))
+  else if ((self->op_flags & (VPP_CONVERT_SIZE | VPP_CONVERT_CROP)) != 0
       && gst_meta_api_type_has_tag (info->api, META_TAG_SIZE))
     return FALSE;
-  else if ((self->op_flags & VPP_CONVERT_DIRECTION)
+  else if ((self->op_flags & VPP_CONVERT_DIRECTION) == VPP_CONVERT_DIRECTION
       && gst_meta_api_type_has_tag (info->api, META_TAG_ORIENTATION))
     return FALSE;
   else if (gst_meta_api_type_has_tag (info->api, META_TAG_VIDEO))
@@ -941,8 +969,8 @@ gst_va_vpp_caps_remove_fields (GstCaps * caps)
         }
 
         /* remove format-related fields */
-        gst_structure_remove_fields (structure, "format", "colorimetry",
-            "chroma-site", NULL);
+        gst_structure_remove_fields (structure, "format", "drm-format",
+            "colorimetry", "chroma-site", NULL);
 
         break;
       }
@@ -1189,33 +1217,62 @@ gst_va_vpp_fixate_format (GstVaVpp * self, GstCaps * caps, GstCaps * result)
   GstVideoFormat fmt;
   gint min_loss = G_MAXINT;
   guint i, best_i, capslen;
+  guint64 best_modifier;
 
   ins = gst_caps_get_structure (caps, 0);
-  in_format = gst_structure_get_string (ins, "format");
-  if (!in_format)
+
+  if (gst_video_is_dma_drm_caps (caps)) {
+    guint32 fourcc;
+    GstVideoFormat video_format;
+
+    in_format = gst_structure_get_string (ins, "drm-format");
+    if (!in_format)
+      return NULL;
+
+    fourcc = gst_video_dma_drm_fourcc_from_string (in_format, NULL);
+    video_format = gst_va_video_format_from_drm_fourcc (fourcc);
+    if (video_format == GST_VIDEO_FORMAT_UNKNOWN)
+      return NULL;
+
+    in_info = gst_video_format_get_info (video_format);
+  } else {
+    in_format = gst_structure_get_string (ins, "format");
+    if (!in_format)
+      return NULL;
+
+    in_info =
+        gst_video_format_get_info (gst_video_format_from_string (in_format));
+  }
+
+  if (!in_info)
     return NULL;
 
   GST_DEBUG_OBJECT (self, "source format %s", in_format);
 
-  in_info =
-      gst_video_format_get_info (gst_video_format_from_string (in_format));
-  if (!in_info)
-    return NULL;
-
   best_i = 0;
+  best_modifier = DRM_FORMAT_MOD_INVALID;
   capslen = gst_caps_get_size (result);
   GST_DEBUG_OBJECT (self, "iterate %d structures", capslen);
   for (i = 0; i < capslen; i++) {
+    gboolean is_dma;
     GstStructure *tests;
     const GValue *format;
+    guint64 modifier;
+    guint32 fourcc;
 
+    features = gst_caps_get_features (result, i);
     tests = gst_caps_get_structure (result, i);
-    format = gst_structure_get_value (tests, "format");
+
+    if (gst_caps_features_contains (features, GST_CAPS_FEATURE_MEMORY_DMABUF)) {
+      format = gst_structure_get_value (tests, "drm-format");
+      is_dma = TRUE;
+    } else {
+      format = gst_structure_get_value (tests, "format");
+      is_dma = FALSE;
+    }
     /* should not happen */
     if (format == NULL)
       continue;
-
-    features = gst_caps_get_features (result, i);
 
     if (GST_VALUE_HOLDS_LIST (format)) {
       gint j, len;
@@ -1225,23 +1282,52 @@ gst_va_vpp_fixate_format (GstVaVpp * self, GstCaps * caps, GstCaps * result)
       for (j = 0; j < len; j++) {
         const GValue *val;
 
+        modifier = DRM_FORMAT_MOD_INVALID;
+
         val = gst_value_list_get_value (format, j);
         if (G_VALUE_HOLDS_STRING (val)) {
-          fmt = gst_video_format_from_string (g_value_get_string (val));
+          if (is_dma) {
+            fourcc = gst_video_dma_drm_fourcc_from_string
+                (g_value_get_string (val), &modifier);
+            fmt = gst_va_video_format_from_drm_fourcc (fourcc);
+          } else {
+            fmt = gst_video_format_from_string (g_value_get_string (val));
+          }
+          if (fmt == GST_VIDEO_FORMAT_UNKNOWN)
+            continue;
+
           if (!gst_va_filter_has_video_format (btrans->filter, fmt, features))
             continue;
-          if (score_value (self, in_info, fmt, &min_loss, &out_info))
+
+          if (score_value (self, in_info, fmt, &min_loss, &out_info)) {
             best_i = i;
+            best_modifier = modifier;
+          }
+
           if (min_loss == 0)
             break;
         }
       }
     } else if (G_VALUE_HOLDS_STRING (format)) {
-      fmt = gst_video_format_from_string (g_value_get_string (format));
+      modifier = DRM_FORMAT_MOD_INVALID;
+
+      if (is_dma) {
+        fourcc = gst_video_dma_drm_fourcc_from_string
+            (g_value_get_string (format), &modifier);
+        fmt = gst_va_video_format_from_drm_fourcc (fourcc);
+      } else {
+        fmt = gst_video_format_from_string (g_value_get_string (format));
+      }
+      if (fmt == GST_VIDEO_FORMAT_UNKNOWN)
+        continue;
+
       if (!gst_va_filter_has_video_format (btrans->filter, fmt, features))
         continue;
-      if (score_value (self, in_info, fmt, &min_loss, &out_info))
+
+      if (score_value (self, in_info, fmt, &min_loss, &out_info)) {
         best_i = i;
+        best_modifier = modifier;
+      }
     }
 
     if (min_loss == 0)
@@ -1254,8 +1340,21 @@ gst_va_vpp_fixate_format (GstVaVpp * self, GstCaps * caps, GstCaps * result)
 
     features = gst_caps_features_copy (gst_caps_get_features (result, best_i));
     out = gst_structure_copy (gst_caps_get_structure (result, best_i));
-    gst_structure_set (out, "format", G_TYPE_STRING,
-        GST_VIDEO_FORMAT_INFO_NAME (out_info), NULL);
+
+    if (gst_caps_features_contains (features, GST_CAPS_FEATURE_MEMORY_DMABUF)) {
+      gchar *drm_fmt_name;
+
+      g_assert (best_modifier != DRM_FORMAT_MOD_INVALID);
+
+      drm_fmt_name = gst_video_dma_drm_fourcc_to_string
+          (gst_va_drm_fourcc_from_video_format (out_info->format),
+          best_modifier);
+      gst_structure_set (out, "drm-format", G_TYPE_STRING, drm_fmt_name, NULL);
+      g_free (drm_fmt_name);
+    } else {
+      gst_structure_set (out, "format", G_TYPE_STRING,
+          GST_VIDEO_FORMAT_INFO_NAME (out_info), NULL);
+    }
     ret = gst_caps_new_full (out, NULL);
     gst_caps_set_features_simple (ret, features);
     return ret;
@@ -1756,12 +1855,13 @@ transfer_colorimetry_from_input (GstVaVpp * self, GstCaps * in_caps,
     const GValue *in_colorimetry =
         gst_structure_get_value (in_caps_s, "colorimetry");
 
-    if (!gst_video_info_from_caps (&in_info, in_caps)) {
+    if (!gst_va_video_info_from_caps (&in_info, NULL, in_caps)) {
       GST_WARNING_OBJECT (self,
           "Failed to convert sink pad caps to video info");
       return;
     }
-    if (!gst_video_info_from_caps (&out_info, out_caps)) {
+
+    if (!gst_va_video_info_from_caps (&out_info, NULL, out_caps)) {
       GST_WARNING_OBJECT (self, "Failed to convert src pad caps to video info");
       return;
     }
@@ -1843,7 +1943,7 @@ update_hdr_fields (GstVaVpp * self, GstCaps * result)
 
   have_colorimetry = gst_structure_has_field (s, "colorimetry");
   if (!have_colorimetry) {
-    if (gst_video_info_from_caps (&out_info, result)) {
+    if (gst_va_video_info_from_caps (&out_info, NULL, result)) {
       gchar *colorimetry_str =
           gst_video_colorimetry_to_string (&out_info.colorimetry);
       gst_caps_set_simple (result, "colorimetry", G_TYPE_STRING,
@@ -2114,7 +2214,7 @@ gst_va_vpp_class_init (gpointer g_class, gpointer class_data)
 
   klass = g_string_new ("Converter/Filter/Colorspace/Scaler/Video/Hardware");
 
-  display = gst_va_display_drm_new_from_path (btrans_class->render_device_path);
+  display = gst_va_display_platform_new (btrans_class->render_device_path);
   filter = gst_va_filter_new (display);
 
   if (gst_va_filter_open (filter)) {
@@ -2183,6 +2283,8 @@ gst_va_vpp_class_init (gpointer g_class, gpointer class_data)
   trans_class->transform_meta = GST_DEBUG_FUNCPTR (gst_va_vpp_transform_meta);
   trans_class->src_event = GST_DEBUG_FUNCPTR (gst_va_vpp_src_event);
   trans_class->sink_event = GST_DEBUG_FUNCPTR (gst_va_vpp_sink_event);
+  trans_class->prepare_output_buffer =
+      GST_DEBUG_FUNCPTR (gst_va_vpp_prepare_output_buffer);
 
   trans_class->transform_ip_on_passthrough = FALSE;
 
@@ -2320,24 +2422,9 @@ gst_va_vpp_register (GstPlugin * plugin, GstVaDevice * device,
 
   type_info.class_data = cdata;
 
-  type_name = g_strdup ("GstVaPostProc");
-  feature_name = g_strdup ("vapostproc");
-
-  /* The first postprocessor to be registered should use a constant
-   * name, like vapostproc, for any additional postprocessors, we
-   * create unique names, using inserting the render device name. */
-  if (g_type_from_name (type_name)) {
-    gchar *basename = g_path_get_basename (device->render_device_path);
-    g_free (type_name);
-    g_free (feature_name);
-    type_name = g_strdup_printf ("GstVa%sPostProc", basename);
-    feature_name = g_strdup_printf ("va%spostproc", basename);
-    cdata->description = basename;
-
-    /* lower rank for non-first device */
-    if (rank > 0)
-      rank--;
-  }
+  gst_va_create_feature_name (device, "GstVaPostProc", "GstVa%sPostProc",
+      &type_name, "vapostproc", "va%spostproc", &feature_name,
+      &cdata->description, &rank);
 
   g_once (&debug_once, _register_debug_category, NULL);
 

@@ -171,9 +171,14 @@ gst_va_filter_init (GstVaFilter * self)
 GstVaFilter *
 gst_va_filter_new (GstVaDisplay * display)
 {
+  GstVaFilter *self;
+
   g_return_val_if_fail (GST_IS_VA_DISPLAY (display), NULL);
 
-  return g_object_new (GST_TYPE_VA_FILTER, "display", display, NULL);
+  self = g_object_new (GST_TYPE_VA_FILTER, "display", display, NULL);
+  gst_object_ref_sink (self);
+
+  return self;
 }
 
 gboolean
@@ -446,9 +451,7 @@ static const struct VaFilterCapMap {
   F(TotalColorCorrection, VAProcTotalColorCorrectionCount),
   F(HVSNoiseReduction, 0),
   F(HighDynamicRangeToneMapping, VAProcHighDynamicRangeMetadataTypeCount),
-#if VA_CHECK_VERSION (1, 12, 0)
   F(3DLUT, 16),
-#endif
 #undef F
 };
 /* *INDENT-ON* */
@@ -485,9 +488,7 @@ struct VaFilter
     VAProcFilterCapTotalColorCorrection cc[VAProcTotalColorCorrectionCount];
       VAProcFilterCapHighDynamicRange
         hdr[VAProcHighDynamicRangeMetadataTypeCount];
-#if VA_CHECK_VERSION (1, 12, 0)
     VAProcFilterCap3DLUT lut[16];
-#endif
   } caps;
 };
 
@@ -1075,10 +1076,11 @@ gst_va_filter_get_caps (GstVaFilter * self)
   }
   if (mem_types & VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME
       || mem_types & VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
-    feature_caps = gst_caps_copy (base_caps);
-    features = gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_DMABUF);
-    gst_caps_set_features_simple (feature_caps, features);
-    caps = gst_caps_merge (caps, feature_caps);
+    feature_caps = gst_va_create_dma_caps (self->display,
+        VAEntrypointVideoProc, surface_formats,
+        self->min_width, self->max_width, self->min_height, self->max_height);
+    if (feature_caps)
+      caps = gst_caps_merge (caps, feature_caps);
   }
 
   gst_caps_unref (base_caps);

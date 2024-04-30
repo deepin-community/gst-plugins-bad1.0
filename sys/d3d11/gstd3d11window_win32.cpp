@@ -78,11 +78,11 @@ struct _GstD3D11WindowWin32
 
   GThread *internal_hwnd_thread;
 
+  GRecMutex hwnds_lock;
   HWND internal_hwnd;
   HWND external_hwnd;
   GstD3D11WindowWin32OverlayState overlay_state;
 
-  HDC device_handle;
   gboolean have_swapchain1;
 
   /* atomic */
@@ -90,8 +90,8 @@ struct _GstD3D11WindowWin32
   gint pending_move_window;
 
   /* fullscreen related */
-  RECT restore_rect;
   LONG restore_style;
+  WINDOWPLACEMENT restore_placement;
 
   /* Handle set_render_rectangle */
   GstVideoRectangle render_rect;
@@ -105,7 +105,7 @@ G_DEFINE_TYPE (GstD3D11WindowWin32, gst_d3d11_window_win32,
     GST_TYPE_D3D11_WINDOW);
 
 static void gst_d3d11_window_win32_constructed (GObject * object);
-static void gst_d3d11_window_win32_dispose (GObject * object);
+static void gst_d3d11_window_win32_finalize (GObject * object);
 
 static void gst_d3d11_window_win32_show (GstD3D11Window * window);
 static void gst_d3d11_window_win32_update_swap_chain (GstD3D11Window * window);
@@ -149,7 +149,7 @@ gst_d3d11_window_win32_class_init (GstD3D11WindowWin32Class * klass)
   GstD3D11WindowClass *window_class = GST_D3D11_WINDOW_CLASS (klass);
 
   gobject_class->constructed = gst_d3d11_window_win32_constructed;
-  gobject_class->dispose = gst_d3d11_window_win32_dispose;
+  gobject_class->finalize = gst_d3d11_window_win32_finalize;
 
   window_class->show = GST_DEBUG_FUNCPTR (gst_d3d11_window_win32_show);
   window_class->update_swap_chain =
@@ -177,6 +177,8 @@ static void
 gst_d3d11_window_win32_init (GstD3D11WindowWin32 * self)
 {
   self->main_context = g_main_context_new ();
+  self->restore_placement.length = sizeof (WINDOWPLACEMENT);
+  g_rec_mutex_init (&self->hwnds_lock);
 }
 
 static void
@@ -205,11 +207,14 @@ done:
 }
 
 static void
-gst_d3d11_window_win32_dispose (GObject * object)
+gst_d3d11_window_win32_finalize (GObject * object)
 {
-  GST_DEBUG_OBJECT (object, "dispose");
+  GstD3D11WindowWin32 *self = (GstD3D11WindowWin32 *) object;
+
+  GST_DEBUG_OBJECT (object, "finalize");
   gst_d3d11_window_win32_unprepare (GST_D3D11_WINDOW (object));
-  G_OBJECT_CLASS (parent_class)->dispose (object);
+  g_rec_mutex_clear (&self->hwnds_lock);
+  G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
 static GstFlowReturn
@@ -287,9 +292,13 @@ gst_d3d11_window_win32_unprepare (GstD3D11Window * window)
           0, 0);
     }
 
+    /* Hold hwnds lock to allow the window thread finish processing what it could
+     * already have in the queue at this moment, before we reset the handlers to null */
+    g_rec_mutex_lock (&self->hwnds_lock);
     self->external_hwnd = NULL;
     self->internal_hwnd = NULL;
     self->internal_hwnd_thread = NULL;
+    g_rec_mutex_unlock (&self->hwnds_lock);
   }
 
   if (self->loop) {
@@ -344,16 +353,10 @@ gst_d3d11_window_win32_set_render_rectangle (GstD3D11Window * window,
        * on message pumping thread is not a worst idea in generall */
       PostMessageA (self->internal_hwnd, WM_GST_D3D11_MOVE_WINDOW, 0, 0);
     }
-  } else {
-    /* XXX: Not sure what's expected behavior if we are drawing on internal
-     * HWND but user wants to specify rectangle.
-     *
-     * - Should we move window to corresponding desktop coordinates ?
-     * - Or should crop correspondingly by modifying viewport of
-     *   render target view of swapchian's backbuffer or so ?
-     * - Or should we ignore set_render_rectangle if we are drawing on
-     *   internal HWND without external HWND ?
-     */
+  } else if (!window->external_handle && self->internal_hwnd) {
+    MoveWindow (self->internal_hwnd,
+        self->render_rect.x, self->render_rect.y, self->render_rect.w,
+        self->render_rect.h, TRUE);
   }
 }
 
@@ -585,7 +588,7 @@ gst_d3d11_window_win32_create_internal_window (GstD3D11WindowWin32 * self)
     wc.lpfnWndProc = window_proc;
     wc.hInstance = hinstance;
     wc.hIcon = LoadIcon (NULL, IDI_WINLOGO);
-    wc.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.hCursor = LoadCursor (NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH) GetStockObject (BLACK_BRUSH);
     wc.lpszClassName = "GSTD3D11";
@@ -602,7 +605,6 @@ gst_d3d11_window_win32_create_internal_window (GstD3D11WindowWin32 * self)
     GST_LOG_OBJECT (self, "window class was already registered");
   }
 
-  self->device_handle = 0;
   self->internal_hwnd = 0;
   self->visible = FALSE;
 
@@ -621,12 +623,6 @@ gst_d3d11_window_win32_create_internal_window (GstD3D11WindowWin32 * self)
 
   GST_DEBUG_OBJECT (self, "d3d11 window created: %" G_GUINTPTR_FORMAT,
       (guintptr) self->internal_hwnd);
-
-  /* device_handle is set in the window_proc */
-  if (!self->device_handle) {
-    GST_ERROR_OBJECT (self, "device handle is not available");
-    return FALSE;
-  }
 
   GST_LOG_OBJECT (self,
       "Created a internal d3d11 window %p", self->internal_hwnd);
@@ -659,37 +655,30 @@ gst_d3d11_window_win32_change_fullscreen_mode_internal (GstD3D11WindowWin32 *
     /* Restore the window's attributes and size */
     SetWindowLongA (hwnd, GWL_STYLE, self->restore_style);
 
-    SetWindowPos (hwnd, HWND_NOTOPMOST,
-        self->restore_rect.left,
-        self->restore_rect.top,
-        self->restore_rect.right - self->restore_rect.left,
-        self->restore_rect.bottom - self->restore_rect.top,
-        SWP_FRAMECHANGED | SWP_NOACTIVATE);
-
-    ShowWindow (hwnd, SW_NORMAL);
+    SetWindowPlacement (hwnd, &self->restore_placement);
   } else {
     ComPtr < IDXGIOutput > output;
     DXGI_OUTPUT_DESC output_desc;
     IDXGISwapChain *swap_chain = window->swap_chain;
 
+    /* remember current placement to restore window later */
+    GetWindowPlacement (hwnd, &self->restore_placement);
+
     /* show window before change style */
     ShowWindow (hwnd, SW_SHOW);
 
-    /* Save the old window rect so we can restore it when exiting
-     * fullscreen mode */
-    GetWindowRect (hwnd, &self->restore_rect);
     self->restore_style = GetWindowLong (hwnd, GWL_STYLE);
 
     /* Make the window borderless so that the client area can fill the screen */
     SetWindowLongA (hwnd, GWL_STYLE,
         self->restore_style &
         ~(WS_CAPTION | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU |
-            WS_THICKFRAME));
+            WS_THICKFRAME | WS_MAXIMIZE));
 
     swap_chain->GetContainingOutput (&output);
     output->GetDesc (&output_desc);
 
-    SetWindowPos (hwnd, HWND_TOPMOST,
+    SetWindowPos (hwnd, HWND_TOP,
         output_desc.DesktopCoordinates.left,
         output_desc.DesktopCoordinates.top,
         output_desc.DesktopCoordinates.right,
@@ -877,18 +866,21 @@ window_proc (HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
     GST_LOG_OBJECT (self, "WM_CREATE");
 
-    self->device_handle = GetDC (hWnd);
-    /* Do this, otherwise we hang on exit. We can still use it (due to the
-     * CS_OWNDC flag in the WindowClass) after we have Released.
-     */
-    ReleaseDC (hWnd, self->device_handle);
-
     SetPropA (hWnd, D3D11_WINDOW_PROP_NAME, self);
   } else if ((self = gst_d3d11_window_win32_hwnd_get_instance (hWnd))) {
-    g_assert (self->internal_hwnd == hWnd);
+    g_rec_mutex_lock (&self->hwnds_lock);
+    if (self->internal_hwnd != hWnd) {
+      g_warn_if_fail (self->internal_hwnd == NULL);
+      /* Most likely the instance is already in the destruction proccess,
+       * just let it process WM_GST_D3D11_DESTROY_INTERNAL_WINDOW */
+      g_rec_mutex_unlock (&self->hwnds_lock);
+      gst_object_unref (self);
+      return DefWindowProcA (hWnd, uMsg, wParam, lParam);
+    }
 
     gst_d3d11_window_win32_handle_window_proc (self, hWnd, uMsg, wParam,
         lParam);
+    g_rec_mutex_unlock (&self->hwnds_lock);
 
     switch (uMsg) {
       case WM_SIZE:
@@ -1203,22 +1195,30 @@ gst_d3d11_window_win32_show (GstD3D11Window * window)
     /* if no parent the real size has to be set now because this has not been done
      * when at window creation */
     if (!self->external_hwnd) {
-      RECT rect = { 0, };
-
-      rect.right = width;
-      rect.bottom = height;
-
-      if (AdjustWindowRect (&rect, WS_GST_D3D11, FALSE)) {
-        width = rect.right - rect.left;
-        height = rect.bottom - rect.top;
+      if (self->render_rect.x != 0 || self->render_rect.y != 0 ||
+          self->render_rect.w != 0 || self->render_rect.h != 0) {
+        MoveWindow (self->internal_hwnd,
+            self->render_rect.x, self->render_rect.y, self->render_rect.w,
+            self->render_rect.h, FALSE);
       } else {
-        width += 2 * GetSystemMetrics (SM_CXSIZEFRAME);
-        height +=
-            2 * GetSystemMetrics (SM_CYSIZEFRAME) +
-            GetSystemMetrics (SM_CYCAPTION);
+        RECT rect = { 0, };
+
+        rect.right = width;
+        rect.bottom = height;
+
+        if (AdjustWindowRect (&rect, WS_GST_D3D11, FALSE)) {
+          width = rect.right - rect.left;
+          height = rect.bottom - rect.top;
+        } else {
+          width += 2 * GetSystemMetrics (SM_CXSIZEFRAME);
+          height +=
+              2 * GetSystemMetrics (SM_CYSIZEFRAME) +
+              GetSystemMetrics (SM_CYCAPTION);
+        }
+
+        MoveWindow (self->internal_hwnd, 0, 0, width, height, FALSE);
       }
 
-      MoveWindow (self->internal_hwnd, 0, 0, width, height, FALSE);
       ShowWindow (self->internal_hwnd, SW_SHOW);
     } else if (self->internal_hwnd) {
       /* ShowWindow will throw message to message pumping thread (app thread)
@@ -1227,6 +1227,9 @@ gst_d3d11_window_win32_show (GstD3D11Window * window)
        */
       PostMessageA (self->internal_hwnd, WM_GST_D3D11_SHOW_WINDOW, 0, 0);
     }
+
+    if (g_atomic_int_get (&self->pending_fullscreen_count) > 0)
+      PostMessageA (self->internal_hwnd, WM_GST_D3D11_FULLSCREEN, 0, 0);
 
     self->visible = TRUE;
   }
@@ -1295,8 +1298,16 @@ gst_d3d11_window_win32_change_fullscreen_mode (GstD3D11Window * window)
 
   if (self->internal_hwnd) {
     g_atomic_int_add (&self->pending_fullscreen_count, 1);
-    PostMessageA (self->internal_hwnd, WM_GST_D3D11_FULLSCREEN, 0, 0);
+    if (self->visible)
+      PostMessageA (self->internal_hwnd, WM_GST_D3D11_FULLSCREEN, 0, 0);
   }
+}
+
+HWND
+gst_d3d11_window_win32_get_internal_hwnd (GstD3D11Window * window)
+{
+  GstD3D11WindowWin32 *self = GST_D3D11_WINDOW_WIN32 (window);
+  return self->internal_hwnd;
 }
 
 GstD3D11Window *

@@ -37,6 +37,7 @@
 #include "msdk.h"
 #include "msdk-enums.h"
 #include "gstmsdkcontext.h"
+#include "gstmsdkcaps.h"
 
 G_BEGIN_DECLS
 
@@ -55,9 +56,19 @@ G_BEGIN_DECLS
 
 #define MAX_EXTRA_PARAMS 8
 
+#define check_update_property(type, obj, old_val, new_val)          \
+  gst_msdkenc_check_update_property_##type (obj, old_val, new_val)
+#define check_update_property_uint(obj, old_val, new_val)           \
+  check_update_property (uint, obj, old_val, new_val)
+#define check_update_property_int(obj, old_val, new_val)            \
+  check_update_property (int, obj, old_val, new_val)
+#define check_update_property_bool(obj, old_val, new_val)           \
+  check_update_property (bool, obj, old_val, new_val)
+
 typedef struct _GstMsdkEnc GstMsdkEnc;
 typedef struct _GstMsdkEncClass GstMsdkEncClass;
 typedef struct _MsdkEncTask MsdkEncTask;
+typedef struct _MsdkEncCData MsdkEncCData;
 
 enum
 {
@@ -105,20 +116,12 @@ struct _GstMsdkEnc
   GstMsdkContext *context;
   GstMsdkContext *old_context;
   mfxVideoParam param;
-  guint num_surfaces;
   guint num_tasks;
   MsdkEncTask *tasks;
   guint next_task;
   /* Extra frames for encoding, set by each element,
    * the default value is 0 */
   guint num_extra_frames;
-
-  gboolean has_vpp;
-  mfxVideoParam vpp_param;
-  guint num_vpp_surfaces;
-  /* Input interfaces, output above */
-  mfxFrameAllocResponse vpp_alloc_resp;
-  mfxFrameAllocResponse alloc_resp;
 
   mfxExtBuffer *extra_params[MAX_EXTRA_PARAMS];
   guint num_extra_params;
@@ -139,6 +142,7 @@ struct _GstMsdkEnc
   gboolean use_va;
   gboolean use_d3d11;
   gboolean initialized;
+  guint64 modifier;
 
   /* element properties */
   gboolean hardware;
@@ -158,7 +162,7 @@ struct _GstMsdkEnc
   guint gop_size;
   guint ref_frames;
   guint i_frames;
-  guint b_frames;
+  gint b_frames;
   guint num_slices;
   gint16 mbbrc;
   gint16 adaptive_i;
@@ -166,6 +170,9 @@ struct _GstMsdkEnc
   guint max_frame_size_i;
   guint max_frame_size_p;
   gint16 lowdelay_brc;
+
+  GstClockTime start_pts;
+  GstClockTime frame_duration;
 
   GstStructure *ext_coding_props;
 
@@ -181,13 +188,7 @@ struct _GstMsdkEncClass
   gboolean (*set_format) (GstMsdkEnc * encoder);
   gboolean (*configure) (GstMsdkEnc * encoder);
   GstCaps *(*set_src_caps) (GstMsdkEnc * encoder);
-  /* Return TRUE if vpp is required before encoding
-   * @info (in), input video info
-   * @out_format (out), a pointer to the output format of vpp, which is set
-   * when return TRUE
-   */
-  gboolean (*need_conversion) (GstMsdkEnc * encoder, GstVideoInfo * info,
-      GstVideoFormat * out_format);
+  gboolean (*is_format_supported) (GstMsdkEnc * encoder, GstVideoFormat format);
 
   /* Return TRUE if sub class requires a recofnig */
   gboolean (*need_reconfig) (GstMsdkEnc * encoder, GstVideoCodecFrame * frame);
@@ -205,12 +206,30 @@ struct _MsdkEncTask
   mfxBitstream output_bitstream;
 };
 
+struct _MsdkEncCData
+{
+  GstCaps *sink_caps;
+  GstCaps *src_caps;
+};
+
 GType gst_msdkenc_get_type (void);
 
 void gst_msdkenc_add_extra_param (GstMsdkEnc * thiz, mfxExtBuffer * param);
 
 void
 gst_msdkenc_install_common_properties (GstMsdkEncClass *encoder_class);
+
+gboolean
+gst_msdkenc_check_update_property_uint (GstMsdkEnc * thiz, guint * old_val,
+                                        guint new_val);
+
+gboolean
+gst_msdkenc_check_update_property_int (GstMsdkEnc * thiz, gint * old_val,
+                                        gint new_val);
+
+gboolean
+gst_msdkenc_check_update_property_bool (GstMsdkEnc * thiz, gboolean * old_val,
+                                        gboolean new_val);
 
 gboolean
 gst_msdkenc_set_common_property (GObject * object, guint prop_id,

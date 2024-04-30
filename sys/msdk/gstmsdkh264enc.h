@@ -37,17 +37,6 @@
 
 G_BEGIN_DECLS
 
-#define GST_TYPE_MSDKH264ENC \
-  (gst_msdkh264enc_get_type())
-#define GST_MSDKH264ENC(obj) \
-  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_MSDKH264ENC,GstMsdkH264Enc))
-#define GST_MSDKH264ENC_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_MSDKH264ENC,GstMsdkH264EncClass))
-#define GST_IS_MSDKH264ENC(obj) \
-  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_MSDKH264ENC))
-#define GST_IS_MSDKH264ENC_CLASS(klass) \
-  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_MSDKH264ENC))
-
 typedef struct _GstMsdkH264Enc GstMsdkH264Enc;
 typedef struct _GstMsdkH264EncClass GstMsdkH264EncClass;
 
@@ -73,12 +62,19 @@ struct _GstMsdkH264Enc
   guint prop_flag;
   guint p_pyramid;
   guint min_qp;
+  guint min_qp_i;
+  guint min_qp_p;
+  guint min_qp_b;
   guint max_qp;
+  guint max_qp_i;
+  guint max_qp_p;
+  guint max_qp_b;
   guint intra_refresh_type;
   guint intra_refresh_cycle_size;
   gint intra_refresh_qp_delta;
   guint intra_refresh_cycle_dist;
   guint dblk_idc;
+  gboolean pic_timing_sei;
 
   GstH264NalParser *parser;
   GArray *cc_sei_array;
@@ -90,7 +86,10 @@ struct _GstMsdkH264EncClass
   GstMsdkEncClass parent_class;
 };
 
-GType gst_msdkh264enc_get_type (void);
+gboolean
+gst_msdkh264enc_register (GstPlugin * plugin,
+    GstMsdkContext * context, GstCaps * sink_caps,
+    GstCaps * src_caps, guint rank);
 
 G_END_DECLS
 

@@ -22,8 +22,10 @@
 
 #include <gst/gst.h>
 #include <gst/video/video.h>
-#include <gst/cuda/gstcudautils.h>
+#include <gst/cuda/gstcuda.h>
+#include <gst/codecs/gstcodecpicture.h>
 #include "gstcuvidloader.h"
+#include "gstnvdecobject.h"
 
 G_BEGIN_DECLS
 
@@ -31,32 +33,23 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (GstNvDecoder,
     gst_nv_decoder, GST, NV_DECODER, GstObject);
 
-typedef struct _GstNvDecoderFrame
-{
-  /* CUVIDPICPARAMS::CurrPicIdx */
-  gint index;
-  guintptr devptr;
-  guint pitch;
-
-  gboolean mapped;
-
-  /* Extra frame allocated for AV1 film grain */
-  gint decode_frame_index;
-
-  /*< private >*/
-  GstNvDecoder *decoder;
-
-  gint ref_count;
-} GstNvDecoderFrame;
-
 typedef struct _GstNvDecoderClassData
 {
   GstCaps *sink_caps;
   GstCaps *src_caps;
   guint cuda_device_id;
+  gint64 adapter_luid;
+  guint max_width;
+  guint max_height;
 } GstNvDecoderClassData;
 
-GstNvDecoder * gst_nv_decoder_new (GstCudaContext * context);
+GstNvDecoder * gst_nv_decoder_new (guint device_id,
+                                   gint64 adapter_luid);
+
+gboolean       gst_nv_decoder_open (GstNvDecoder * decoder,
+                                    GstElement * element);
+
+gboolean       gst_nv_decoder_close (GstNvDecoder * decoder);
 
 gboolean       gst_nv_decoder_is_configured (GstNvDecoder * decoder);
 
@@ -67,22 +60,27 @@ gboolean       gst_nv_decoder_configure (GstNvDecoder * decoder,
                                          gint coded_height,
                                          guint coded_bitdepth,
                                          guint pool_size,
-                                         gboolean alloc_aux_frame);
+                                         gboolean alloc_aux_frame,
+                                         guint num_output_surfaces,
+                                         guint init_max_width,
+                                         guint init_max_height);
 
-GstNvDecoderFrame * gst_nv_decoder_new_frame (GstNvDecoder * decoder);
+GstFlowReturn  gst_nv_decoder_new_picture (GstNvDecoder * decoder,
+                                           GstCodecPicture * picture);
 
-GstNvDecoderFrame * gst_nv_decoder_frame_ref (GstNvDecoderFrame * frame);
+gboolean       gst_nv_decoder_decode         (GstNvDecoder * decoder,
+                                              CUVIDPICPARAMS * params);
 
-void gst_nv_decoder_frame_unref (GstNvDecoderFrame * frame);
+GstFlowReturn  gst_nv_decoder_output_picture (GstNvDecoder * decoder,
+                                              GstVideoDecoder * videodec,
+                                              GstVideoCodecFrame * frame,
+                                              GstCodecPicture * picture,
+                                              guint buffer_flags);
 
-gboolean gst_nv_decoder_decode_picture (GstNvDecoder * decoder,
-                                        CUVIDPICPARAMS * params);
+void           gst_nv_decoder_set_flushing   (GstNvDecoder * decoder,
+                                              gboolean flushing);
 
-gboolean gst_nv_decoder_finish_frame   (GstNvDecoder * decoder,
-                                        GstVideoDecoder * videodec,
-                                        GstVideoCodecState * input_state,
-                                        GstNvDecoderFrame *frame,
-                                        GstBuffer ** buffer);
+void           gst_nv_decoder_reset          (GstNvDecoder * decoder);
 
 /* utils for class registration */
 gboolean gst_nv_decoder_check_device_caps (CUcontext cuda_ctx,
@@ -93,12 +91,12 @@ gboolean gst_nv_decoder_check_device_caps (CUcontext cuda_ctx,
 const gchar * gst_cuda_video_codec_to_string (cudaVideoCodec codec);
 
 /* helper methods */
-gboolean gst_nv_decoder_handle_set_context   (GstNvDecoder * decoder,
-                                              GstElement * videodec,
+void     gst_nv_decoder_handle_set_context   (GstNvDecoder * decoder,
+                                              GstElement * element,
                                               GstContext * context);
 
-gboolean gst_nv_decoder_handle_context_query (GstNvDecoder * decoder,
-                                              GstVideoDecoder * videodec,
+gboolean gst_nv_decoder_handle_query         (GstNvDecoder * decoder,
+                                              GstElement * element,
                                               GstQuery * query);
 
 gboolean gst_nv_decoder_negotiate            (GstNvDecoder * decoder,
@@ -108,6 +106,10 @@ gboolean gst_nv_decoder_negotiate            (GstNvDecoder * decoder,
 gboolean gst_nv_decoder_decide_allocation    (GstNvDecoder * decoder,
                                               GstVideoDecoder * videodec,
                                               GstQuery * query);
+
+guint    gst_nv_decoder_get_max_output_size  (guint coded_size,
+                                              guint user_requested,
+                                              guint device_max);
 
 G_END_DECLS
 

@@ -112,7 +112,8 @@ foreach f: [
         'sys/winks/ksvideohelpers.h',
         'gst/videoparsers/gstjpeg2000parse.h',
         'gst-libs/gst/*/*-prelude.h',
-        'gst-libs/gst/vulkan/vulkan_fwd.h'
+        'gst-libs/gst/vulkan/vulkan_fwd.h',
+        'gst-libs/gst/dxva/gstdxvatypedef.h',
     ]
     excludes += [join_paths(meson.current_source_dir(), root_rel, f)]
 endforeach
@@ -131,7 +132,10 @@ if build_gir
         {'name': 'audio', 'gir': audio_gir, 'lib': gstbadaudio_dep, 'prefix': 'bad-'},
         {'name': 'transcoder', 'gir': transcoder_gir, 'lib': gst_transcoder_dep},
         {'name': 'codecs', 'gir': codecs_gir, 'lib': gstcodecs_dep},
-        {'name': 'cuda', 'gir': gst_cuda_gir, 'lib': gstcuda_dep},
+        {'name': 'cuda', 'gir': gst_cuda_gir, 'lib': gstcuda_dep, 'c_source_patterns': ['*.h', '*.cpp']},
+        {'name': 'dxva', 'gir': dxva_gir, 'lib': gstdxva_dep, 'c_source_patterns': ['*.h', '*.cpp']},
+        {'name': 'mse', 'gir': mse_gir, 'lib': gstmse_dep, 'suffix': 'lib'},
+        {'name': 'analytics', 'gir': analytics_gir, 'lib': gstanalytics_dep},
     ]
 
     if gstopencv_dep.found()
@@ -142,6 +146,8 @@ if build_gir
 
     if gstva_dep.found()
         libs += [{'name': 'va', 'gir': va_gir, 'lib': gstva_dep, 'suffix': 'lib'}]
+    else
+        libs += [{'name': 'va', 'gir-file': join_paths(meson.global_source_root(), 'girs', 'GstVa-1.0.gir'), 'lib': []}]
     endif
 
     if gstvulkan_dep.found()
@@ -180,25 +186,34 @@ foreach lib_def: libs
   endforeach
   c_sources += extra_sources
 
-    if lib_def.has_key('gir')
+    if lib_def.has_key('gir') or lib_def.has_key('gir-file')
         if has_gi_extension
-            gir = lib_def['gir']
+            if lib_def.has_key('gir')
+                gir_targets = lib_def['gir']
+                gir = gir_targets[0]
+                gir_file = gir[0].full_path()
+            else
+                gir_targets = []
+                gir = []
+                gir_file = lib_def['gir-file']
+            endif
+
             prefix = lib_def.get('prefix', '')
             suffix = lib_def.get('suffix', '')
             libs_doc += [hotdoc.generate_doc(prefix + name + suffix,
                 project_version: api_version,
                 gi_c_sources: c_sources,
-                gi_sources: gir[0].full_path(),
+                gi_sources: gir_file,
                 gi_c_source_filters: excludes,
                 sitemap: join_paths('libs', name, 'sitemap.txt'),
                 index: join_paths('libs/', name, 'index.md'),
                 gi_index: join_paths('libs/', name, 'index.md'),
                 gi_smart_index: true,
                 gi_order_generated_subpages: true,
-                dependencies: [lib, gir],
+                dependencies: [lib, gir_targets],
                 c_flags: '-DGST_USE_UNSTABLE_API',
                 install: false,
-                depends: gir[0],
+                depends: gir,
             )]
         endif
     else
@@ -220,45 +235,35 @@ foreach lib_def: libs
     endif
 endforeach
 
-list_plugin_res = run_command(python3, '-c',
-'''
-import sys
-import json
-
-with open("@0@") as f:
-    print(':'.join(json.load(f).keys()), end='')
-'''.format(plugins_cache),
-  check: true)
-
-plugins_doc = []
-foreach plugin_name: list_plugin_res.stdout().split(':')
-    plugins_doc += [hotdoc.generate_doc(plugin_name,
-        project_version: api_version,
-        sitemap: 'plugins/sitemap.txt',
-        index: 'plugins/index.md',
-        c_flags: '-DGST_USE_UNSTABLE_API',
-        gst_index: 'plugins/index.md',
-        gst_smart_index: true,
-        gst_c_sources: [
-            join_paths(root_rel, 'sys/*/*.[cmh]'),
-            join_paths(root_rel, 'sys/*/*.cpp'),
-            join_paths(root_rel, 'sys/*/*.cc'),
-            join_paths(root_rel, 'sys/*/*.mm'),
-            join_paths(root_rel, 'sys/*/*.hh'),
-            join_paths(root_rel, 'ext/*/*.[ch]'),
-            join_paths(root_rel, 'ext/*/*.cpp'),
-            join_paths(root_rel, 'ext/*/*.cc'),
-            join_paths(root_rel, 'ext/*/*.hh'),
-            join_paths(root_rel, 'gst/*/*.[ch]'),
-            join_paths(root_rel, 'gst/rtmp2/*/*.[ch]'),
-        ],
-        dependencies: [gst_dep],
-        install: false,
-        disable_incremental_build: true,
-        gst_cache_file: plugins_cache,
-        gst_c_source_filters: excludes,
-        gst_order_generated_subpages: true,
-        gst_plugin_name: plugin_name,
-        include_paths: join_paths(meson.current_source_dir(), '..'),
-    )]
-endforeach
+cdir = meson.current_source_dir()
+if host_machine.system() == 'windows'
+  pathsep = ';'
+else
+  pathsep = ':'
+endif
+gst_plugins_doc = run_command(
+    plugins_cache_generator,
+    'hotdoc-config',
+    '--builddir', meson.current_build_dir(),
+    '--project_version', api_version,
+    '--sitemap', cdir / 'plugins/sitemap.txt',
+    '--index', cdir / 'plugins/index.md',
+    '--c_flags', '\-DGST_USE_UNSTABLE_API',
+    '--gst_index', 'plugins/index.md',
+    '--gst_c_sources',
+        cdir / '../sys/*/*.[cmh]',
+        cdir / '../sys/*/*.cpp',
+        cdir / '../sys/*/*.cc',
+        cdir / '../sys/*/*.mm',
+        cdir / '../sys/*/*.hh',
+        cdir / '../ext/*/*.[ch]',
+        cdir / '../ext/*/*.cpp',
+        cdir / '../ext/*/*.cc',
+        cdir / '../ext/*/*.hh',
+        cdir / '../gst/*/*.[ch]',
+        cdir / '../gst/rtmp2/*/*.[ch]',
+    '--gst_cache_file', plugins_cache,
+    '--gst_c_source_filters', excludes,
+    '--include_paths', join_paths(meson.current_source_dir(), '..'),
+    check: true,
+).stdout().split(pathsep)

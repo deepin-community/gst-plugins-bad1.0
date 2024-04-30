@@ -6,11 +6,13 @@ endif
 tests = [
     {'path': 'opencv/cvtracker'},
     {'path': 'testsrcbin/caps_spec'},
+    {'path': 'codectimestamper/h264_propagate_caps'},
     {'path': 'wpe/load_bytes_first', 'skip': not building_wpe},
     {'path': 'vtenc/vtenc_h264', 'skip': not applemedia_found_deps},
     {'path': 'vtenc/vtenc_h264_b_frames', 'skip': not applemedia_found_deps},
     {'path': 'vtenc/vtenc_h265', 'skip': not applemedia_found_deps},
     {'path': 'vtenc/vtenc_h265_b_frames', 'skip': not applemedia_found_deps},
+    {'path': 'autovideoconvert/renegotiate'},
 ]
 
 env = environment()

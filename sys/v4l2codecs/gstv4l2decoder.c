@@ -398,8 +398,7 @@ gst_v4l2_decoder_enum_size_for_format (GstV4l2Decoder * self,
       size.discrete.width, size.discrete.height, index,
       GST_FOURCC_ARGS (pixelformat));
 
-  return gst_caps_new_simple ("video/x-raw", "format", G_TYPE_STRING,
-      gst_video_format_to_string (format),
+  return gst_caps_new_simple ("video/x-raw",
       "width", G_TYPE_INT, size.discrete.width,
       "height", G_TYPE_INT, size.discrete.height, NULL);
 }
@@ -409,8 +408,9 @@ gst_v4l2_decoder_probe_caps_for_format (GstV4l2Decoder * self,
     guint32 pixelformat, gint unscaled_width, gint unscaled_height)
 {
   gint index = 0;
-  GstCaps *caps, *tmp;
+  GstCaps *caps, *tmp, *size_caps;
   GstVideoFormat format;
+  guint32 drm_fourcc;
 
   GST_DEBUG_OBJECT (self, "enumerate size for %" GST_FOURCC_FORMAT,
       GST_FOURCC_ARGS (pixelformat));
@@ -421,22 +421,57 @@ gst_v4l2_decoder_probe_caps_for_format (GstV4l2Decoder * self,
   caps = gst_caps_new_simple ("video/x-raw", "format", G_TYPE_STRING,
       gst_video_format_to_string (format), NULL);
 
+  size_caps = gst_caps_new_empty ();
   while ((tmp = gst_v4l2_decoder_enum_size_for_format (self, pixelformat,
               index++, unscaled_width, unscaled_height))) {
-    caps = gst_caps_merge (caps, tmp);
+    size_caps = gst_caps_merge (size_caps, tmp);
   }
+
+  if (!gst_caps_is_empty (size_caps)) {
+    tmp = caps;
+    caps = gst_caps_intersect_full (tmp, size_caps, GST_CAPS_INTERSECT_FIRST);
+    gst_caps_unref (tmp);
+  }
+
+  /* TODO: Add a V4L2 to DRM fourcc translator for formats that we don't support
+   * in software.
+   */
+  drm_fourcc = gst_video_dma_drm_fourcc_from_format (format);
+  if (drm_fourcc /* != DRM_FORMAT_INVALID */ ) {
+    GstCaps *drm_caps;
+
+    drm_caps = gst_caps_new_simple ("video/x-raw", "format", G_TYPE_STRING,
+        "DMA_DRM", "drm-format", G_TYPE_STRING,
+        gst_video_dma_drm_fourcc_to_string (drm_fourcc, 0), NULL);
+    gst_caps_set_features_simple (drm_caps,
+        gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_DMABUF));
+
+    if (!gst_caps_is_empty (size_caps)) {
+      gst_caps_set_features_simple (size_caps,
+          gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_DMABUF));
+      tmp = drm_caps;
+      drm_caps =
+          gst_caps_intersect_full (tmp, size_caps, GST_CAPS_INTERSECT_FIRST);
+      gst_caps_unref (tmp);
+    }
+
+    caps = gst_caps_merge (drm_caps, caps);
+  }
+
+  gst_caps_unref (size_caps);
 
   return caps;
 }
 
 GstCaps *
-gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self)
+gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self,
+    GstStaticCaps * static_filter)
 {
   gint ret;
   struct v4l2_format fmt = {
     .type = self->src_buf_type,
   };
-  GstCaps *caps;
+  GstCaps *caps, *filter, *tmp;
   gint i;
 
   g_return_val_if_fail (self->opened, FALSE);
@@ -455,7 +490,6 @@ gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self)
    * structure in the caps */
   for (i = 0; ret >= 0; i++) {
     struct v4l2_fmtdesc fmtdesc = { i, self->src_buf_type, };
-    GstCaps *tmp;
 
     ret = ioctl (self->video_fd, VIDIOC_ENUM_FMT, &fmtdesc);
     if (ret < 0) {
@@ -470,21 +504,29 @@ gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self)
     caps = gst_caps_merge (caps, tmp);
   }
 
+  filter = gst_static_caps_get (static_filter);
+  tmp = caps;
+  caps = gst_caps_intersect_full (tmp, filter, GST_CAPS_INTERSECT_FIRST);
+  gst_caps_unref (tmp);
+  gst_caps_unref (filter);
+
+  GST_DEBUG_OBJECT (self, "Probed caps: %" GST_PTR_FORMAT, caps);
+
   return caps;
 }
 
 gboolean
 gst_v4l2_decoder_select_src_format (GstV4l2Decoder * self, GstCaps * caps,
-    GstVideoInfo * info)
+    GstVideoInfo * vinfo, GstVideoInfoDmaDrm * vinfo_drm)
 {
   gint ret;
   struct v4l2_format fmt = {
     .type = self->src_buf_type,
   };
-  GstStructure *str;
-  const gchar *format_str;
   GstVideoFormat format;
   guint32 pix_fmt;
+  GstVideoInfo tmp_vinfo;
+  GstVideoInfoDmaDrm tmp_vinfo_drm;
 
   if (gst_caps_is_empty (caps))
     return FALSE;
@@ -495,16 +537,31 @@ gst_v4l2_decoder_select_src_format (GstV4l2Decoder * self, GstCaps * caps,
     return FALSE;
   }
 
-  caps = gst_caps_make_writable (caps);
-  str = gst_caps_get_structure (caps, 0);
-  gst_structure_fixate_field (str, "format");
+  gst_video_info_init (&tmp_vinfo);
+  gst_video_info_dma_drm_init (&tmp_vinfo_drm);
 
-  format_str = gst_structure_get_string (str, "format");
-  format = gst_video_format_from_string (format_str);
+  GST_DEBUG_OBJECT (self, "Original caps: %" GST_PTR_FORMAT, caps);
+  caps = gst_caps_fixate (caps);
+  GST_DEBUG_OBJECT (self, "Fixated caps: %" GST_PTR_FORMAT, caps);
 
-  if (gst_v4l2_format_from_video_format (format, &pix_fmt) &&
-      pix_fmt != fmt.fmt.pix_mp.pixelformat) {
-    GST_DEBUG_OBJECT (self, "Trying to use peer format: %s ", format_str);
+  if (gst_video_info_dma_drm_from_caps (&tmp_vinfo_drm, caps)) {
+    format = tmp_vinfo_drm.vinfo.finfo->format;
+  } else if (gst_video_info_from_caps (&tmp_vinfo, caps)) {
+    format = tmp_vinfo.finfo->format;
+  } else {
+    GST_WARNING_OBJECT (self, "Can't transform caps into video info!");
+    return FALSE;
+  }
+
+  if (!gst_v4l2_format_from_video_format (format, &pix_fmt)) {
+    GST_ERROR_OBJECT (self, "Unsupported V4L2 pixelformat %" GST_FOURCC_FORMAT,
+        GST_FOURCC_ARGS (fmt.fmt.pix_mp.pixelformat));
+    return FALSE;
+  }
+
+  if (pix_fmt != fmt.fmt.pix_mp.pixelformat) {
+    GST_WARNING_OBJECT (self, "Trying to use peer format: %s",
+        gst_video_format_to_string (format));
     fmt.fmt.pix_mp.pixelformat = pix_fmt;
 
     ret = ioctl (self->video_fd, VIDIOC_S_FMT, &fmt);
@@ -514,17 +571,52 @@ gst_v4l2_decoder_select_src_format (GstV4l2Decoder * self, GstCaps * caps,
     }
   }
 
-  if (!gst_v4l2_format_to_video_info (&fmt, info)) {
+  if (!gst_v4l2_format_to_video_info (&fmt, vinfo)) {
     GST_ERROR_OBJECT (self, "Unsupported V4L2 pixelformat %" GST_FOURCC_FORMAT,
         GST_FOURCC_ARGS (fmt.fmt.pix_mp.pixelformat));
     return FALSE;
   }
 
+  if (tmp_vinfo_drm.drm_fourcc) {
+    if (!gst_video_info_dma_drm_from_video_info (vinfo_drm, vinfo, 0)) {
+      GST_ERROR_OBJECT (self,
+          "Unsupported V4L2 pixelformat for DRM %" GST_FOURCC_FORMAT,
+          GST_FOURCC_ARGS (fmt.fmt.pix_mp.pixelformat));
+      return FALSE;
+    }
+  } else {
+    gst_video_info_dma_drm_init (vinfo_drm);
+  }
+
   GST_INFO_OBJECT (self, "Selected format %s %ix%i",
-      gst_video_format_to_string (info->finfo->format),
-      info->width, info->height);
+      gst_video_format_to_string (vinfo->finfo->format),
+      vinfo->width, vinfo->height);
 
   return TRUE;
+}
+
+GstVideoCodecState *
+gst_v4l2_decoder_set_output_state (GstVideoDecoder * decoder,
+    GstVideoInfo * vinfo, GstVideoInfoDmaDrm * vinfo_drm, guint width,
+    guint height, GstVideoCodecState * reference)
+{
+  GstVideoCodecState *state;
+
+  state = gst_video_decoder_set_output_state (decoder, vinfo->finfo->format,
+      width, height, reference);
+
+  if (vinfo_drm->drm_fourcc /* != DRM_FORMAT_INVALID */ ) {
+    GstVideoInfoDmaDrm tmp_vinfo_drm;
+
+    gst_video_info_dma_drm_from_video_info (&tmp_vinfo_drm, &state->info, 0);
+    state->caps = gst_video_info_dma_drm_to_caps (&tmp_vinfo_drm);
+  } else {
+    state->caps = gst_video_info_to_caps (&state->info);
+  }
+
+  GST_DEBUG_OBJECT (decoder, "Setting caps: %" GST_PTR_FORMAT, state->caps);
+
+  return state;
 }
 
 gint
@@ -564,7 +656,7 @@ gst_v4l2_decoder_export_buffer (GstV4l2Decoder * self,
   gint i, ret;
   struct v4l2_plane planes[GST_VIDEO_MAX_PLANES] = { {0} };
   struct v4l2_buffer v4l2_buf = {
-    .index = 0,
+    .index = index,
     .type = direction_to_buffer_type (self, direction),
   };
 
@@ -640,7 +732,8 @@ gst_v4l2_decoder_queue_sink_mem (GstV4l2Decoder * self,
     .type = self->sink_buf_type,
     .memory = V4L2_MEMORY_MMAP,
     .index = gst_v4l2_codec_memory_get_index (mem),
-    .timestamp.tv_usec = frame_num,
+    .timestamp.tv_sec = frame_num / 1000000,
+    .timestamp.tv_usec = frame_num % 1000000,
     .request_fd = request->fd,
     .flags = V4L2_BUF_FLAG_REQUEST_FD | flags,
   };
@@ -747,7 +840,7 @@ gst_v4l2_decoder_dequeue_src (GstV4l2Decoder * self, guint32 * out_frame_num)
     return FALSE;
   }
 
-  *out_frame_num = buf.timestamp.tv_usec;
+  *out_frame_num = buf.timestamp.tv_usec + buf.timestamp.tv_sec * 1000000;
 
   GST_TRACE_OBJECT (self, "Dequeued picture buffer %i", buf.index);
 
@@ -756,7 +849,7 @@ gst_v4l2_decoder_dequeue_src (GstV4l2Decoder * self, guint32 * out_frame_num)
 
 gboolean
 gst_v4l2_decoder_set_controls (GstV4l2Decoder * self, GstV4l2Request * request,
-    struct v4l2_ext_control * control, guint count)
+    struct v4l2_ext_control *control, guint count)
 {
   gint ret;
   struct v4l2_ext_controls controls = {
@@ -778,7 +871,7 @@ gst_v4l2_decoder_set_controls (GstV4l2Decoder * self, GstV4l2Request * request,
 
 gboolean
 gst_v4l2_decoder_get_controls (GstV4l2Decoder * self,
-    struct v4l2_ext_control * control, guint count)
+    struct v4l2_ext_control *control, guint count)
 {
   gint ret;
   struct v4l2_ext_controls controls = {

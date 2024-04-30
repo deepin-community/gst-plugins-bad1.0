@@ -845,7 +845,7 @@ test_webrtc_wait_for_ice_gathering_complete (struct test_webrtc *t)
   g_mutex_lock (&t->lock);
   g_object_get (t->webrtc1, "ice-gathering-state", &ice_state1, NULL);
   g_object_get (t->webrtc2, "ice-gathering-state", &ice_state2, NULL);
-  while (ice_state1 != GST_WEBRTC_ICE_GATHERING_STATE_COMPLETE &&
+  while (ice_state1 != GST_WEBRTC_ICE_GATHERING_STATE_COMPLETE ||
       ice_state2 != GST_WEBRTC_ICE_GATHERING_STATE_COMPLETE) {
     g_cond_wait (&t->cond, &t->lock);
     g_object_get (t->webrtc1, "ice-gathering-state", &ice_state1, NULL);
@@ -1210,6 +1210,9 @@ _check_ice_port_restriction (struct test_webrtc *t, GstElement * element,
   gchar *candidate_typ;
   guint port_as_int;
   guint peer_number;
+
+  if (!candidate || candidate[0] == '\0')
+    return;
 
   regex =
       g_regex_new ("candidate:(\\d+) (1) (UDP|TCP) (\\d+) ([0-9.]+|[0-9a-f:]+)"
@@ -1677,6 +1680,18 @@ validate_candidate_stats (const GstStructure * s, const GstStructure * stats)
   g_free (protocol);
 }
 
+static void
+validate_peer_connection_stats (const GstStructure * s)
+{
+  guint opened, closed;
+
+  fail_unless (gst_structure_get (s, "data-channels-opened", G_TYPE_UINT,
+          &opened, NULL));
+  fail_unless (gst_structure_get (s, "data-channels-closed", G_TYPE_UINT,
+          &closed, NULL));
+  fail_unless (opened >= closed);
+}
+
 static gboolean
 validate_stats_foreach (GQuark field_id, const GValue * value,
     const GstStructure * stats)
@@ -1705,6 +1720,7 @@ validate_stats_foreach (GQuark field_id, const GValue * value,
     validate_remote_outbound_rtp_stats (s, stats);
   } else if (type == GST_WEBRTC_STATS_CSRC) {
   } else if (type == GST_WEBRTC_STATS_PEER_CONNECTION) {
+    validate_peer_connection_stats (s);
   } else if (type == GST_WEBRTC_STATS_DATA_CHANNEL) {
   } else if (type == GST_WEBRTC_STATS_STREAM) {
   } else if (type == GST_WEBRTC_STATS_TRANSPORT) {
@@ -2043,6 +2059,69 @@ GST_START_TEST (test_data_channel_create)
 
   g_object_unref (channel);
   g_free (label);
+  test_webrtc_free (t);
+}
+
+GST_END_TEST;
+
+static void
+signal_data_channel (struct test_webrtc *t,
+    GstElement * element, GObject * our, gpointer user_data)
+{
+  test_webrtc_signal_state_unlocked (t, STATE_CUSTOM);
+}
+
+GST_START_TEST (test_data_channel_create_two_channels)
+{
+  struct test_webrtc *t = test_webrtc_new ();
+  GObject *channel = NULL;
+  GObject *channel2 = NULL;
+  VAL_SDP_INIT (media_count, _count_num_sdp_media, GUINT_TO_POINTER (1), NULL);
+  VAL_SDP_INIT (offer, on_sdp_has_datachannel, NULL, &media_count);
+  gchar *label;
+  GstStructure *options = NULL;
+
+  t->on_negotiation_needed = NULL;
+  t->on_ice_candidate = NULL;
+  t->on_prepare_data_channel = have_prepare_data_channel;
+  t->on_data_channel = signal_data_channel;
+
+  fail_if (gst_element_set_state (t->webrtc1, GST_STATE_READY) ==
+      GST_STATE_CHANGE_FAILURE);
+  fail_if (gst_element_set_state (t->webrtc2, GST_STATE_READY) ==
+      GST_STATE_CHANGE_FAILURE);
+
+  g_signal_emit_by_name (t->webrtc1, "create-data-channel", "label", NULL,
+      &channel);
+  g_assert_nonnull (channel);
+  g_object_get (channel, "label", &label, NULL);
+  g_assert_cmpstr (label, ==, "label");
+  g_free (label);
+  g_object_unref (channel);
+
+  fail_if (gst_element_set_state (t->webrtc1, GST_STATE_PLAYING) ==
+      GST_STATE_CHANGE_FAILURE);
+  fail_if (gst_element_set_state (t->webrtc2, GST_STATE_PLAYING) ==
+      GST_STATE_CHANGE_FAILURE);
+
+  /* Wait SCTP transport creation */
+  test_validate_sdp_full (t, &offer, &offer, 1 << STATE_CUSTOM, FALSE);
+
+  /* Create another channel on an existing SCTP transport, forcing an ID that
+     should comply with the max-channels requiremennt, this should not raise a
+     critical warning, the id is beneath the required limits. */
+  options =
+      gst_structure_new ("options", "id", G_TYPE_INT, 2, "negotiated",
+      G_TYPE_BOOLEAN, TRUE, NULL);
+  g_signal_emit_by_name (t->webrtc1, "create-data-channel", "label2", options,
+      &channel2);
+  gst_structure_free (options);
+  g_assert_nonnull (channel2);
+  g_object_get (channel2, "label", &label, NULL);
+  g_assert_cmpstr (label, ==, "label2");
+  g_free (label);
+  g_object_unref (channel2);
+
   test_webrtc_free (t);
 }
 
@@ -5708,6 +5787,61 @@ GST_START_TEST (test_msid)
 
 GST_END_TEST;
 
+static void
+_check_ice_end_of_candidates (struct test_webrtc *t, GstElement * element,
+    guint mlineindex, gchar * candidate, GstElement * other, gpointer user_data)
+{
+  gint *end_count = user_data;
+
+  if (!candidate || candidate[0] == '\0') {
+    g_atomic_int_inc (end_count);
+  }
+}
+
+static void
+sdp_media_has_end_of_candidates (struct test_webrtc *t, GstElement * element,
+    GstWebRTCSessionDescription * desc, gpointer user_data)
+{
+  guint i;
+
+  for (i = 0; i < gst_sdp_message_medias_len (desc->sdp); i++) {
+    const GstSDPMedia *media = gst_sdp_message_get_media (desc->sdp, i);
+
+    fail_unless_equals_string (gst_sdp_media_get_attribute_val_n (media,
+            "end-of-candidates", 0), "");
+
+    fail_unless (gst_sdp_media_get_attribute_val_n (media, "end-of-candidates",
+            1) == NULL);
+  }
+}
+
+GST_START_TEST (test_ice_end_of_candidates)
+{
+  struct test_webrtc *t = create_audio_test ();
+  GstWebRTCSessionDescription *local_desc;
+  gint end_candidate_count = 0;
+
+  VAL_SDP_INIT (offer, _count_num_sdp_media, GUINT_TO_POINTER (1), NULL);
+  VAL_SDP_INIT (answer, _count_num_sdp_media, GUINT_TO_POINTER (1), NULL);
+
+
+  t->on_ice_candidate = _check_ice_end_of_candidates;
+  t->ice_candidate_data = &end_candidate_count;
+  test_validate_sdp (t, &offer, &answer);
+
+  test_webrtc_wait_for_ice_gathering_complete (t);
+
+  fail_unless_equals_int (end_candidate_count, 2);
+
+  g_object_get (t->webrtc1, "current-local-description", &local_desc, NULL);
+  sdp_media_has_end_of_candidates (t, t->webrtc1, local_desc, NULL);
+  gst_webrtc_session_description_free (local_desc);
+
+  test_webrtc_free (t);
+}
+
+GST_END_TEST;
+
 static Suite *
 webrtcbin_suite (void)
 {
@@ -5773,8 +5907,10 @@ webrtcbin_suite (void)
     tcase_add_test (tc, test_invalid_add_media_in_answer);
     tcase_add_test (tc, test_add_turn_server);
     tcase_add_test (tc, test_msid);
+    tcase_add_test (tc, test_ice_end_of_candidates);
     if (sctpenc && sctpdec) {
       tcase_add_test (tc, test_data_channel_create);
+      tcase_add_test (tc, test_data_channel_create_two_channels);
       tcase_add_test (tc, test_data_channel_remote_notify);
       tcase_add_test (tc, test_data_channel_transfer_string);
       tcase_add_test (tc, test_data_channel_transfer_data);

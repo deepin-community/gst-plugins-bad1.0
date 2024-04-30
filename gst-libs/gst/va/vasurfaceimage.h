@@ -32,7 +32,9 @@ gboolean              va_create_surfaces                  (GstVaDisplay * displa
                                                            guint rt_format, guint fourcc,
                                                            guint width, guint height,
                                                            gint usage_hint,
-                                                           VASurfaceAttribExternalBuffers * ext_buf,
+                                                           guint64 * modifiers,
+                                                           guint num_modifiers,
+                                                           VADRMPRIMESurfaceDescriptor * desc,
                                                            VASurfaceID * surfaces,
                                                            guint num_surfaces);
 gboolean              va_destroy_surfaces                 (GstVaDisplay * display,
@@ -53,6 +55,12 @@ gboolean              va_check_surface                    (GstVaDisplay * displa
 gboolean              va_copy_surface                     (GstVaDisplay * display,
                                                            VASurfaceID dst,
                                                            VASurfaceID src);
+
+GST_VA_API
+guint                 va_get_surface_usage_hint           (GstVaDisplay * display,
+                                                           VAEntrypoint entrypoint,
+                                                           GstPadDirection dir,
+                                                           gboolean is_dma);
 
 /* images */
 gboolean              va_create_image                     (GstVaDisplay * display,
@@ -80,6 +88,7 @@ gboolean              va_ensure_image                     (GstVaDisplay * displa
 GST_VA_API
 gboolean              va_map_buffer                       (GstVaDisplay * display,
                                                            VABufferID buffer,
+                                                           GstMapFlags flags,
                                                            gpointer * data);
 GST_VA_API
 gboolean              va_unmap_buffer                     (GstVaDisplay * display,

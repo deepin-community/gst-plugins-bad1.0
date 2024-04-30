@@ -126,10 +126,7 @@ _is_screen_content_ext_profile (VAProfile profile)
 {
   if (profile == VAProfileHEVCSccMain || profile == VAProfileHEVCSccMain10
       || profile == VAProfileHEVCSccMain444
-#if VA_CHECK_VERSION(1, 8, 0)
-      || profile == VAProfileHEVCSccMain444_10
-#endif
-      )
+      || profile == VAProfileHEVCSccMain444_10)
     return TRUE;
 
   return FALSE;
@@ -240,8 +237,8 @@ gst_va_h265_dec_output_picture (GstH265Decoder * decoder,
 
   gst_buffer_replace (&frame->output_buffer, va_pic->gstbuffer);
 
-  ret = gst_va_base_dec_process_output (base, frame, picture->discont_state,
-      picture->buffer_flags);
+  ret = gst_va_base_dec_process_output (base, frame,
+      GST_CODEC_PICTURE (picture)->discont_state, picture->buffer_flags);
   gst_h265_picture_unref (picture);
 
   if (ret)
@@ -935,8 +932,8 @@ static const struct
 #define P(idc, va) { G_PASTE (GST_H265_PROFILE_, idc), G_PASTE (VAProfileHEVC, va) }
   P (MAIN, Main),
   P (MAIN_10, Main10),
-  /*P (MAIN_STILL_PICTURE, ),
-  P (MONOCHROME, ),
+  P (MAIN_STILL_PICTURE, Main),
+  /*P (MONOCHROME, ),
   P (MONOCHROME_12, ),
   P (MONOCHROME_16, ),*/
   P (MAIN_12, Main12),
@@ -945,9 +942,9 @@ static const struct
   P (MAIN_444, Main444),
   P (MAIN_444_10, Main444_10),
   P (MAIN_444_12, Main444_12),
-  /*P (MAIN_INTRA, ),
-  P (MAIN_10_INTRA, ),
-  P (MAIN_12_INTRA, ),
+  P (MAIN_INTRA, Main),
+  P (MAIN_10_INTRA, Main10),
+  /*P (MAIN_12_INTRA, ),
   P (MAIN_422_10_INTRA, ),
   P (MAIN_422_12_INTRA, ),
   P (MAIN_444_INTRA, ),
@@ -964,9 +961,7 @@ static const struct
   P (SCREEN_EXTENDED_MAIN, SccMain),
   P (SCREEN_EXTENDED_MAIN_10, SccMain10),
   P (SCREEN_EXTENDED_MAIN_444, SccMain444),
-#if VA_CHECK_VERSION(1, 8, 0)
   P (SCREEN_EXTENDED_MAIN_444_10, SccMain444_10),
-#endif
   /*P (SCREEN_EXTENDED_HIGH_THROUGHPUT_444, ),
   P (SCREEN_EXTENDED_HIGH_THROUGHPUT_444_10, ),
   P (SCREEN_EXTENDED_HIGH_THROUGHPUT_444_14, ),
@@ -1323,22 +1318,9 @@ gst_va_h265_dec_register (GstPlugin * plugin, GstVaDevice * device,
 
   type_info.class_data = cdata;
 
-  /* The first decoder to be registered should use a constant name,
-   * like vah265dec, for any additional decoders, we create unique
-   * names, using inserting the render device name. */
-  if (device->index == 0) {
-    type_name = g_strdup ("GstVaH265Dec");
-    feature_name = g_strdup ("vah265dec");
-  } else {
-    gchar *basename = g_path_get_basename (device->render_device_path);
-    type_name = g_strdup_printf ("GstVa%sH265Dec", basename);
-    feature_name = g_strdup_printf ("va%sh265dec", basename);
-    cdata->description = basename;
-
-    /* lower rank for non-first device */
-    if (rank > 0)
-      rank--;
-  }
+  gst_va_create_feature_name (device, "GstVaH265Dec", "GstVa%sH265Dec",
+      &type_name, "vah265dec", "va%sh265dec", &feature_name,
+      &cdata->description, &rank);
 
   g_once (&debug_once, _register_debug_category, NULL);
 

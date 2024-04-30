@@ -83,11 +83,10 @@ gst_qsv_av1_enc_rate_control_get_type (void)
     {0, nullptr, nullptr}
   };
 
-  if (g_once_init_enter (&rate_control_type)) {
-    GType type =
+  GST_QSV_CALL_ONCE_BEGIN {
+    rate_control_type =
         g_enum_register_static ("GstQsvAV1EncRateControl", rate_controls);
-    g_once_init_leave (&rate_control_type, type);
-  }
+  } GST_QSV_CALL_ONCE_END;
 
   return rate_control_type;
 }
@@ -317,13 +316,11 @@ gst_qsv_av1_enc_check_update_uint (GstQsvAV1Enc * self, guint * old_val,
   if (*old_val == new_val)
     return;
 
-  g_mutex_lock (&self->prop_lock);
   *old_val = new_val;
   if (is_bitrate_param)
     self->bitrate_updated = TRUE;
   else
     self->property_updated = TRUE;
-  g_mutex_unlock (&self->prop_lock);
 }
 
 static void
@@ -333,10 +330,8 @@ gst_qsv_av1_enc_check_update_enum (GstQsvAV1Enc * self, mfxU16 * old_val,
   if (*old_val == (mfxU16) new_val)
     return;
 
-  g_mutex_lock (&self->prop_lock);
   *old_val = (mfxU16) new_val;
   self->property_updated = TRUE;
-  g_mutex_unlock (&self->prop_lock);
 }
 
 static void
@@ -345,6 +340,7 @@ gst_qsv_av1_enc_set_property (GObject * object, guint prop_id,
 {
   GstQsvAV1Enc *self = GST_QSV_AV1_ENC (object);
 
+  g_mutex_lock (&self->prop_lock);
   switch (prop_id) {
     case PROP_QP_I:
       gst_qsv_av1_enc_check_update_uint (self, &self->qp_i,
@@ -378,6 +374,7 @@ gst_qsv_av1_enc_set_property (GObject * object, guint prop_id,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  g_mutex_unlock (&self->prop_lock);
 }
 
 static void
@@ -386,6 +383,7 @@ gst_qsv_av1_enc_get_property (GObject * object, guint prop_id, GValue * value,
 {
   GstQsvAV1Enc *self = GST_QSV_AV1_ENC (object);
 
+  g_mutex_lock (&self->prop_lock);
   switch (prop_id) {
     case PROP_QP_I:
       g_value_set_uint (value, self->qp_i);
@@ -412,6 +410,7 @@ gst_qsv_av1_enc_get_property (GObject * object, guint prop_id, GValue * value,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  g_mutex_unlock (&self->prop_lock);
 }
 
 static void
@@ -460,6 +459,7 @@ gst_qsv_av1_enc_set_format (GstQsvEncoder * encoder,
   mfxFrameInfo *frame_info;
   mfxExtAV1BitstreamParam *bs_param;
   mfxExtAV1ResolutionParam *res_param;
+  GstVideoFormat format;
 
   frame_info = &param->mfx.FrameInfo;
 
@@ -482,24 +482,15 @@ gst_qsv_av1_enc_set_format (GstQsvEncoder * encoder,
   frame_info->AspectRatioW = GST_VIDEO_INFO_PAR_N (info);
   frame_info->AspectRatioH = GST_VIDEO_INFO_PAR_D (info);
 
-  switch (GST_VIDEO_INFO_FORMAT (info)) {
+  format = GST_VIDEO_INFO_FORMAT (info);
+  switch (format) {
     case GST_VIDEO_FORMAT_NV12:
-      frame_info->ChromaFormat = MFX_CHROMAFORMAT_YUV420;
-      frame_info->FourCC = MFX_FOURCC_NV12;
-      frame_info->BitDepthLuma = 8;
-      frame_info->BitDepthChroma = 8;
-      frame_info->Shift = 0;
-      break;
     case GST_VIDEO_FORMAT_P010_10LE:
-      frame_info->ChromaFormat = MFX_CHROMAFORMAT_YUV420;
-      frame_info->FourCC = MFX_FOURCC_P010;
-      frame_info->BitDepthLuma = 10;
-      frame_info->BitDepthChroma = 10;
-      frame_info->Shift = 1;
+      gst_qsv_frame_info_set_format (frame_info, format);
       break;
     default:
       GST_ERROR_OBJECT (self, "Unexpected format %s",
-          gst_video_format_to_string (GST_VIDEO_INFO_FORMAT (info)));
+          gst_video_format_to_string (format));
       return FALSE;
   }
 
@@ -678,21 +669,11 @@ gst_qsv_av1_enc_register (GstPlugin * plugin, guint rank, guint impl_index,
   resolution_param.FrameHeight = 240;
 
   /* MAIN profile covers NV12 and P010 */
-  mfx->FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV420;
-  mfx->FrameInfo.FourCC = MFX_FOURCC_NV12;
-  mfx->FrameInfo.BitDepthLuma = 8;
-  mfx->FrameInfo.BitDepthChroma = 8;
-  mfx->FrameInfo.Shift = 0;
-
+  gst_qsv_frame_info_set_format (&mfx->FrameInfo, GST_VIDEO_FORMAT_NV12);
   if (MFXVideoENCODE_Query (session, &param, &param) == MFX_ERR_NONE)
     supported_formats.push_back ("NV12");
 
-  mfx->FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV420;
-  mfx->FrameInfo.FourCC = MFX_FOURCC_P010;
-  mfx->FrameInfo.BitDepthLuma = 10;
-  mfx->FrameInfo.BitDepthChroma = 10;
-  mfx->FrameInfo.Shift = 1;
-
+  gst_qsv_frame_info_set_format (&mfx->FrameInfo, GST_VIDEO_FORMAT_P010_10LE);
   if (MFXVideoENCODE_Query (session, &param, &param) == MFX_ERR_NONE)
     supported_formats.push_back ("P010_10LE");
 
@@ -701,11 +682,7 @@ gst_qsv_av1_enc_register (GstPlugin * plugin, guint rank, guint impl_index,
     return;
   }
 
-  mfx->FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV420;
-  mfx->FrameInfo.FourCC = MFX_FOURCC_NV12;
-  mfx->FrameInfo.BitDepthLuma = 8;
-  mfx->FrameInfo.BitDepthChroma = 8;
-  mfx->FrameInfo.Shift = 0;
+  gst_qsv_frame_info_set_format (&mfx->FrameInfo, GST_VIDEO_FORMAT_NV12);
 
   /* Check max-resolution */
   for (guint i = 0; i < G_N_ELEMENTS (gst_qsv_resolutions); i++) {

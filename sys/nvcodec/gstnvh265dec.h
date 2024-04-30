@@ -27,10 +27,10 @@ G_BEGIN_DECLS
 
 void gst_nv_h265_dec_register (GstPlugin * plugin,
                                guint device_id,
+                               gint64 adapter_luid,
                                guint rank,
                                GstCaps * sink_caps,
-                               GstCaps * src_caps,
-                               gboolean is_primary);
+                               GstCaps * src_caps);
 
 G_END_DECLS
 

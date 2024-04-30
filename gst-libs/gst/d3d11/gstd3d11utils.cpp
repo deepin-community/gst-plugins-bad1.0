@@ -28,6 +28,7 @@
 #include <windows.h>
 #include <versionhelpers.h>
 #include <mutex>
+#include <atomic>
 
 /**
  * SECTION:gstd3d11utils
@@ -549,6 +550,23 @@ gst_d3d11_luid_to_int64 (const LUID * luid)
   return val.QuadPart;
 }
 
+#ifndef GST_DISABLE_GST_DEBUG
+static void
+gst_d3d11_log_gpu_remove_reason (HRESULT hr, GstD3D11Device * device,
+    GstDebugCategory * cat, const gchar * file, const gchar * function,
+    gint line)
+{
+  gchar *error_text = g_win32_error_message ((guint) hr);
+
+  gst_debug_log (cat, GST_LEVEL_ERROR, file, function, line,
+      NULL, "DeviceRemovedReason: 0x%x, %s", (guint) hr,
+      GST_STR_NULL (error_text));
+  g_free (error_text);
+
+  gst_d3d11_device_log_live_objects (device, file, function, line);
+}
+#endif
+
 /**
  * _gst_d3d11_result:
  * @result: HRESULT D3D11 API return code
@@ -583,6 +601,14 @@ _gst_d3d11_result (HRESULT hr, GstD3D11Device * device, GstDebugCategory * cat,
         GST_STR_NULL (error_text));
     g_free (error_text);
 
+    if (device) {
+      ID3D11Device *device_handle = gst_d3d11_device_get_device_handle (device);
+      hr = device_handle->GetDeviceRemovedReason ();
+      if (hr != S_OK) {
+        gst_d3d11_log_gpu_remove_reason (hr, device, cat, file, function, line);
+      }
+    }
+
     ret = FALSE;
   }
 #if (HAVE_D3D11SDKLAYERS_H || HAVE_DXGIDEBUG_H)
@@ -596,4 +622,23 @@ _gst_d3d11_result (HRESULT hr, GstD3D11Device * device, GstDebugCategory * cat,
 #else
   return SUCCEEDED (hr);
 #endif
+}
+
+/**
+ * gst_d3d11_create_user_token:
+ *
+ * Creates new user token value
+ *
+ * Returns: user token value
+ *
+ * Since: 1.24
+ */
+gint64
+gst_d3d11_create_user_token (void)
+{
+  /* *INDENT-OFF* */
+  static std::atomic < gint64 > user_token { 0 };
+  /* *INDENT-ON* */
+
+  return user_token.fetch_add (1);
 }

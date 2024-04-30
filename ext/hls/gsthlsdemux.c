@@ -160,7 +160,7 @@ gst_hls_demux_class_init (GstHLSDemuxClass * klass)
       "HLS Demuxer",
       "Codec/Demuxer/Adaptive",
       "HTTP Live Streaming demuxer",
-      "Marc-Andre Lureau <marcandre.lureau@gmail.com>\n"
+      "Marc-Andre Lureau <marcandre.lureau@gmail.com>, "
       "Andoni Morales Alastruey <ylatuya@gmail.com>");
 
   adaptivedemux_class->is_live = gst_hls_demux_is_live;
@@ -422,7 +422,7 @@ gst_hls_demux_stream_seek (GstAdaptiveDemuxStream * stream, gboolean forward,
   /* Snap to segment boundary. Improves seek performance on slow machines. */
   snap_nearest =
       (flags & GST_SEEK_FLAG_SNAP_NEAREST) == GST_SEEK_FLAG_SNAP_NEAREST;
-  snap_after = ! !(flags & GST_SEEK_FLAG_SNAP_AFTER);
+  snap_after = !!(flags & GST_SEEK_FLAG_SNAP_AFTER);
 
   GST_M3U8_CLIENT_LOCK (hlsdemux->client);
   /* FIXME: Here we need proper discont handling */

@@ -323,6 +323,8 @@ caps_to_mime (GstCaps * caps)
     return "video/x-vnd.on2.vp8";
   } else if (strcmp (name, "video/x-vp9") == 0) {
     return "video/x-vnd.on2.vp9";
+  } else if (strcmp (name, "video/x-av1") == 0) {
+    return "video/av01";
   } else if (strcmp (name, "video/x-divx") == 0) {
     return "video/mp4v-es";
   }
@@ -1134,7 +1136,7 @@ _amc_gl_possibly_wait_for_gl_sync (struct gl_sync *sync, gint64 end_time)
    *
    * As a result, we need to advance the ready counter somehow ourselves when
    * such events happen. There is no reliable way of knowing when/if the frame
-   * listener is going to fire.  The only uniqueu identifier,
+   * listener is going to fire.  The only unique identifier,
    * SurfaceTexture::get_timestamp seems to always return 0.
    *
    * The maximum queue size as defined in
@@ -1381,7 +1383,7 @@ retry:
       _find_nearest_frame (self,
       gst_util_uint64_scale (buffer_info.presentation_time_us, GST_USECOND, 1));
 
-  is_eos = ! !(buffer_info.flags & BUFFER_FLAG_END_OF_STREAM);
+  is_eos = !!(buffer_info.flags & BUFFER_FLAG_END_OF_STREAM);
 
   if (frame
       && (deadline =

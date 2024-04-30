@@ -78,6 +78,7 @@
 #include <gst/pbutils/pbutils.h>
 #include <gst/videoparsers/gstjpeg2000parse.h>
 #include <gst/video/video-color.h>
+#include <gst/base/base.h>
 
 #include "gstbasetsmux.h"
 #include "gstbasetsmuxaac.h"
@@ -91,6 +92,15 @@ GST_DEBUG_CATEGORY (gst_base_ts_mux_debug);
 /* GstBaseTsMuxPad */
 
 G_DEFINE_TYPE (GstBaseTsMuxPad, gst_base_ts_mux_pad, GST_TYPE_AGGREGATOR_PAD);
+
+#define DEFAULT_PAD_STREAM_NUMBER 0
+
+enum
+{
+  PAD_PROP_0,
+  PAD_PROP_STREAM_NUMBER,
+};
+
 
 /* Internals */
 
@@ -117,6 +127,9 @@ gst_base_ts_mux_pad_reset (GstBaseTsMuxPad * pad)
     g_free (pad->language);
     pad->language = NULL;
   }
+
+  pad->bitrate = 0;
+  pad->max_bitrate = 0;
 }
 
 /* GstAggregatorPad implementation */
@@ -160,15 +173,68 @@ gst_base_ts_mux_pad_dispose (GObject * obj)
 }
 
 static void
+gst_base_ts_mux_pad_set_property (GObject * object, guint prop_id,
+    const GValue * value, GParamSpec * pspec)
+{
+  GstBaseTsMuxPad *ts_pad = GST_BASE_TS_MUX_PAD (object);
+
+  switch (prop_id) {
+    case PAD_PROP_STREAM_NUMBER:
+      ts_pad->stream_number = g_value_get_int (value);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
+gst_base_ts_mux_pad_get_property (GObject * object, guint prop_id,
+    GValue * value, GParamSpec * pspec)
+{
+  GstBaseTsMuxPad *ts_pad = GST_BASE_TS_MUX_PAD (object);
+
+  switch (prop_id) {
+    case PAD_PROP_STREAM_NUMBER:
+      g_value_set_int (value, ts_pad->stream_number);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+      break;
+  }
+}
+
+static void
 gst_base_ts_mux_pad_class_init (GstBaseTsMuxPadClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GstAggregatorPadClass *gstaggpad_class = GST_AGGREGATOR_PAD_CLASS (klass);
 
   gobject_class->dispose = gst_base_ts_mux_pad_dispose;
+  gobject_class->set_property = gst_base_ts_mux_pad_set_property;
+  gobject_class->get_property = gst_base_ts_mux_pad_get_property;
+
   gstaggpad_class->flush = gst_base_ts_mux_pad_flush;
 
   gst_type_mark_as_plugin_api (GST_TYPE_BASE_TS_MUX, 0);
+
+  /**
+   * GstBaseTsMuxPad:stream-number:
+   *
+   * Set stream number for AVC video stream
+   * or AAC audio streams.
+   *
+   * video stream number is stored in 4 bits
+   * audio stream number is stored in 5 bits.
+   * See Table 2-22 of ITU-T H222.0 for details on AAC and AVC stream numbers
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (gobject_class, PAD_PROP_STREAM_NUMBER,
+      g_param_spec_int ("stream-number", "stream number",
+          "stream number", 0x0, 0x1F, DEFAULT_PAD_STREAM_NUMBER,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
 }
 
 static void
@@ -384,7 +450,8 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
   const gchar *mt;
   const GValue *value = NULL;
   GstBuffer *codec_data = NULL;
-  guint8 opus_channel_config_code = 0;
+  guint8 opus_channel_config[1 + 2 + 1 + 1 + 255] = { 0, };
+  gsize opus_channel_config_len = 0;
   guint16 profile = GST_JPEG2000_PARSE_PROFILE_NONE;
   guint8 main_level = 0;
   guint32 max_rate = 0;
@@ -524,11 +591,14 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
     }
 
     if (channels <= 2 && mapping_family == 0) {
-      opus_channel_config_code = channels;
-    } else if (channels == 2 && mapping_family == 255 && stream_count == 1
-        && coupled_count == 1) {
+      opus_channel_config[0] = channels;
+      opus_channel_config_len = 1;
+    } else if (channels == 2 && mapping_family == 255 && ((stream_count == 1
+                && coupled_count == 1) || (stream_count == 2
+                && coupled_count == 0))) {
       /* Dual mono */
-      opus_channel_config_code = 0;
+      opus_channel_config[0] = coupled_count == 0 ? 0x80 : 0x00;
+      opus_channel_config_len = 1;
     } else if (channels >= 2 && channels <= 8 && mapping_family == 1) {
       static const guint8 coupled_stream_counts[9] = {
         1, 0, 1, 1, 2, 2, 2, 3, 3
@@ -559,16 +629,45 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
           coupled_count == coupled_stream_counts[channels] &&
           memcmp (channel_mapping, channel_map_a[channels - 1],
               channels) == 0) {
-        opus_channel_config_code = channels;
+        opus_channel_config[0] = channels;
+        opus_channel_config_len = 1;
       } else if (stream_count == channels - coupled_stream_counts[channels] &&
           coupled_count == coupled_stream_counts[channels] &&
           memcmp (channel_mapping, channel_map_b[channels - 1],
               channels) == 0) {
-        opus_channel_config_code = channels | 0x80;
+        opus_channel_config[0] = channels | 0x80;
+        opus_channel_config_len = 1;
       } else {
         GST_FIXME_OBJECT (ts_pad, "Opus channel mapping not handled");
         goto not_negotiated;
       }
+    } else {
+      GstBitWriter writer;
+      guint i;
+      guint n_bits;
+
+      gst_bit_writer_init_with_data (&writer, opus_channel_config,
+          sizeof (opus_channel_config), FALSE);
+      gst_bit_writer_put_bits_uint8_unchecked (&writer, 0x81, 8);
+      gst_bit_writer_put_bits_uint8_unchecked (&writer, channels, 8);
+      gst_bit_writer_put_bits_uint8_unchecked (&writer, mapping_family, 8);
+
+      n_bits = g_bit_storage (channels);
+      gst_bit_writer_put_bits_uint8_unchecked (&writer, stream_count - 1,
+          n_bits);
+      n_bits = g_bit_storage (stream_count + 1);
+      gst_bit_writer_put_bits_uint8_unchecked (&writer, coupled_count, n_bits);
+
+      n_bits = g_bit_storage (stream_count + coupled_count + 1);
+      for (i = 0; i < channels; i++) {
+        gst_bit_writer_put_bits_uint8_unchecked (&writer, channel_mapping[i],
+            n_bits);
+      }
+
+      gst_bit_writer_align_bytes_unchecked (&writer, 0);
+      g_assert (writer.bit_size % 8 == 0);
+
+      opus_channel_config_len = writer.bit_size / 8;
     }
 
     st = TSMUX_ST_PS_OPUS;
@@ -691,8 +790,12 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
   }
 
   if (ts_pad->stream == NULL) {
+    gint stream_number = DEFAULT_PAD_STREAM_NUMBER;
+
+    g_object_get (ts_pad, "stream-number", &stream_number, NULL);
     ts_pad->stream =
-        tsmux_create_stream (mux->tsmux, st, ts_pad->pid, ts_pad->language);
+        tsmux_create_stream (mux->tsmux, st, stream_number, ts_pad->pid,
+        ts_pad->language, ts_pad->bitrate, ts_pad->max_bitrate);
     if (ts_pad->stream == NULL)
       goto error;
   }
@@ -727,7 +830,9 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
   ts_pad->stream->max_bitrate = max_rate;
   ts_pad->stream->profile_and_level = profile | main_level;
 
-  ts_pad->stream->opus_channel_config_code = opus_channel_config_code;
+  memcpy (ts_pad->stream->opus_channel_config, opus_channel_config,
+      sizeof (opus_channel_config));
+  ts_pad->stream->opus_channel_config_len = opus_channel_config_len;
 
   tsmux_stream_set_buffer_release_func (ts_pad->stream, release_buffer_cb);
 
@@ -769,6 +874,32 @@ gst_base_ts_mux_create_stream (GstBaseTsMux * mux, GstBaseTsMuxPad * ts_pad)
   }
 
   return ret;
+}
+
+static guint16
+get_pmt_pcr_pid (GstBaseTsMux * mux, const gchar * prop_name)
+{
+  if (mux->prog_map == NULL)
+    return 0;
+  gint pcr_pid = 0;
+  if (!gst_structure_get (mux->prog_map, prop_name, G_TYPE_INT, &pcr_pid, NULL))
+    return 0;
+  if (pcr_pid < 1 || pcr_pid > G_MAXUINT16)
+    return 0;
+  return (guint16) pcr_pid;
+}
+
+static gchar *
+get_pmt_pcr_sink (GstBaseTsMux * mux, const gchar * prop_name)
+{
+  if (mux->prog_map == NULL)
+    return 0;
+  gchar *pcr_sink = NULL;
+  if (!gst_structure_get (mux->prog_map, prop_name, G_TYPE_STRING, &pcr_sink,
+          NULL)) {
+    return NULL;
+  }
+  return pcr_sink;
 }
 
 /* Must be called with mux->lock held */
@@ -840,6 +971,7 @@ gst_base_ts_mux_create_pad_stream (GstBaseTsMux * mux, GstPad * pad)
     if (ret != GST_FLOW_OK)
       goto no_stream;
   }
+  ts_pad->stream->program = ts_pad->prog;
 
   if (ts_pad->prog->pcr_stream == NULL) {
     /* Take the first stream of the program for the PCR */
@@ -852,17 +984,23 @@ gst_base_ts_mux_create_pad_stream (GstBaseTsMux * mux, GstPad * pad)
 
   /* Check for user-specified PCR PID */
   prop_name = g_strdup_printf ("PCR_%d", ts_pad->prog->pgm_number);
-  if (mux->prog_map && gst_structure_has_field (mux->prog_map, prop_name)) {
-    const gchar *sink_name =
-        gst_structure_get_string (mux->prog_map, prop_name);
-
-    if (!g_strcmp0 (name, sink_name)) {
-      GST_DEBUG_OBJECT (mux, "User specified stream (pid=%d) as PCR for "
-          "program (prog_id = %d)", ts_pad->pid, ts_pad->prog->pgm_number);
-      tsmux_program_set_pcr_stream (ts_pad->prog, ts_pad->stream);
-    }
+  guint16 pcr_pid = get_pmt_pcr_pid (mux, prop_name);
+  if (pcr_pid) {
+    GST_DEBUG_OBJECT (mux, "User specified PID %d as PCR for "
+        "program (prog_id = %d)", pcr_pid, ts_pad->prog->pgm_number);
+    tsmux_program_set_pcr_pid (ts_pad->prog, pcr_pid);
+    goto have_pcr_pid;
   }
-  g_free (prop_name);
+  gchar *pcr_sink_name = get_pmt_pcr_sink (mux, prop_name);
+  if (!g_strcmp0 (GST_PAD_NAME (pad), pcr_sink_name)) {
+    GST_DEBUG_OBJECT (mux, "User specified stream (pid=%d) as PCR for "
+        "program (prog_id = %d)", ts_pad->pid, ts_pad->prog->pgm_number);
+    tsmux_program_set_pcr_stream (ts_pad->prog, ts_pad->stream);
+  }
+  g_clear_pointer (&pcr_sink_name, g_free);
+
+have_pcr_pid:
+  g_clear_pointer (&prop_name, g_free);
 
   return ret;
 
@@ -1278,7 +1416,7 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
     }
   }
 
-  if (G_UNLIKELY (prog->pcr_stream == NULL)) {
+  if (!prog->pcr_pid && G_UNLIKELY (prog->pcr_stream == NULL)) {
     /* Take the first data stream for the PCR */
     GST_DEBUG_OBJECT (best,
         "Use stream (pid=%d) from pad as PCR for program (prog_id = %d)",
@@ -1913,6 +2051,21 @@ gst_base_ts_mux_send_event (GstElement * element, GstEvent * event)
   return GST_ELEMENT_CLASS (parent_class)->send_event (element, event);
 }
 
+/* Must be called with mux->lock held */
+static void
+gst_base_ts_mux_resend_all_pmts (GstBaseTsMux * mux)
+{
+  GList *cur;
+
+  /* output PMT for each program */
+  for (cur = mux->tsmux->programs; cur; cur = cur->next) {
+    TsMuxProgram *program = (TsMuxProgram *) cur->data;
+
+    program->pmt_changed = TRUE;
+    tsmux_resend_pmt (program);
+  }
+}
+
 /* GstAggregator implementation */
 
 static gboolean
@@ -1930,7 +2083,6 @@ gst_base_ts_mux_sink_event (GstAggregator * agg, GstAggregatorPad * agg_pad,
     {
       GstCaps *caps;
       GstFlowReturn ret;
-      GList *cur;
 
       g_mutex_lock (&mux->lock);
       if (ts_pad->stream == NULL) {
@@ -1956,14 +2108,8 @@ gst_base_ts_mux_sink_event (GstAggregator * agg, GstAggregatorPad * agg_pad,
       mux->tsmux->si_changed = TRUE;
       tsmux_resend_pat (mux->tsmux);
       tsmux_resend_si (mux->tsmux);
+      gst_base_ts_mux_resend_all_pmts (mux);
 
-      /* output PMT for each program */
-      for (cur = mux->tsmux->programs; cur; cur = cur->next) {
-        TsMuxProgram *program = (TsMuxProgram *) cur->data;
-
-        program->pmt_changed = TRUE;
-        tsmux_resend_pmt (program);
-      }
       g_mutex_unlock (&mux->lock);
 
       res = TRUE;
@@ -2044,25 +2190,45 @@ gst_base_ts_mux_sink_event (GstAggregator * agg, GstAggregatorPad * agg_pad,
     case GST_EVENT_TAG:{
       GstTagList *list;
       gchar *lang = NULL;
+      guint bitrate = 0;
+      guint max_bitrate = 0;
 
       GST_DEBUG_OBJECT (mux, "received tag event");
       gst_event_parse_tag (event, &list);
 
-      /* Matroska wants ISO 639-2B code, taglist most likely contains 639-1 */
+      /* MPEG wants ISO 639-2T code, taglist most likely contains 639-1 */
       if (gst_tag_list_get_string (list, GST_TAG_LANGUAGE_CODE, &lang)) {
         const gchar *lang_code;
 
-        lang_code = gst_tag_get_language_code_iso_639_2B (lang);
+        lang_code = gst_tag_get_language_code_iso_639_2T (lang);
         if (lang_code) {
-          GST_DEBUG_OBJECT (ts_pad, "Setting language to '%s'", lang_code);
 
-          g_free (ts_pad->language);
-          ts_pad->language = g_strdup (lang_code);
+          g_mutex_lock (&mux->lock);
+          if (g_strcmp0 (ts_pad->language, lang_code) != 0) {
+            GST_DEBUG_OBJECT (ts_pad, "Setting language to '%s'", lang_code);
+
+            g_free (ts_pad->language);
+            ts_pad->language = g_strdup (lang_code);
+            if (ts_pad->stream) {
+              strncpy (ts_pad->stream->language, lang_code, 3);
+              ts_pad->stream->language[3] = 0;
+              gst_base_ts_mux_resend_all_pmts (mux);
+            }
+          }
+          g_mutex_unlock (&mux->lock);
         } else {
           GST_WARNING_OBJECT (ts_pad, "Did not get language code for '%s'",
               lang);
         }
         g_free (lang);
+      }
+
+      if (gst_tag_list_get_uint (list, GST_TAG_BITRATE, &bitrate)) {
+        ts_pad->bitrate = bitrate;
+      }
+
+      if (gst_tag_list_get_uint (list, GST_TAG_MAXIMUM_BITRATE, &max_bitrate)) {
+        ts_pad->max_bitrate = bitrate;
       }
 
       /* handled this, don't want collectpads to forward it downstream */

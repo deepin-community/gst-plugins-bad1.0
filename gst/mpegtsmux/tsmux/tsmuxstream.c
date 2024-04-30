@@ -96,19 +96,29 @@ struct TsMuxStreamBuffer
   void *user_data;
 };
 
+static void
+tsmux_stream_get_es_descrs_default (TsMuxStream * stream,
+    GstMpegtsPMTStream * pmt_stream, gpointer user_data)
+{
+  tsmux_stream_default_get_es_descrs (stream, pmt_stream);
+}
+
 /**
  * tsmux_stream_new:
  * @pid: a PID
  * @stream_type: the stream type
+ * @stream_number: stream number
  *
- * Create a new stream with PID of @pid and @stream_type.
+ * Create a new stream with PID of @pid and @stream_type,
+ * with stream number @stream_number.
  *
  * Returns: a new #TsMuxStream.
  */
 TsMuxStream *
-tsmux_stream_new (guint16 pid, guint stream_type)
+tsmux_stream_new (guint16 pid, guint stream_type, guint stream_number)
 {
-  TsMuxStream *stream = g_slice_new0 (TsMuxStream);
+  TsMuxStream *stream = g_new0 (TsMuxStream, 1);
+  gboolean supports_user_specified_stream_number = FALSE;
 
   stream->state = TSMUX_STREAM_STATE_HEADER;
   stream->pi.pid = pid;
@@ -125,10 +135,16 @@ tsmux_stream_new (guint16 pid, guint stream_type)
     case TSMUX_ST_VIDEO_MPEG4:
     case TSMUX_ST_VIDEO_H264:
     case TSMUX_ST_VIDEO_HEVC:
-      /* FIXME: Assign sequential IDs? */
-      stream->id = 0xE0;
+      if (stream_number > 0xF) {
+        GST_WARNING
+            ("video stream number %d is greater than 0xF. Setting to 0.",
+            stream_number);
+        stream_number = 0;
+      }
+      stream->id = 0xE0 | stream_number;
       stream->pi.flags |= TSMUX_PACKET_FLAG_PES_FULL_HEADER;
       stream->is_video_stream = TRUE;
+      supports_user_specified_stream_number = TRUE;
       break;
     case TSMUX_ST_VIDEO_JP2K:
       stream->id = 0xBD;
@@ -138,10 +154,16 @@ tsmux_stream_new (guint16 pid, guint stream_type)
     case TSMUX_ST_AUDIO_AAC:
     case TSMUX_ST_AUDIO_MPEG1:
     case TSMUX_ST_AUDIO_MPEG2:
-      /* FIXME: Assign sequential IDs? */
+      if (stream_number > 0x1F) {
+        GST_WARNING
+            ("audio stream number %d is greater than 0x1F. Setting to 0.",
+            stream_number);
+        stream_number = 0;
+      }
       stream->is_audio = TRUE;
-      stream->id = 0xC0;
+      stream->id = 0xC0 | stream_number;
       stream->pi.flags |= TSMUX_PACKET_FLAG_PES_FULL_HEADER;
+      supports_user_specified_stream_number = TRUE;
       break;
     case TSMUX_ST_VIDEO_DIRAC:
     case TSMUX_ST_PS_AUDIO_LPCM:
@@ -209,6 +231,12 @@ tsmux_stream_new (guint16 pid, guint stream_type)
       break;
   }
 
+  if (!supports_user_specified_stream_number && stream_number != 0) {
+    GST_WARNING
+        ("Attempt to set stream number %d for unsupported stream type %d",
+        stream_number, stream_type);
+  }
+
   stream->first_ts = GST_CLOCK_STIME_NONE;
 
   stream->last_pts = GST_CLOCK_STIME_NONE;
@@ -217,8 +245,7 @@ tsmux_stream_new (guint16 pid, guint stream_type)
   stream->pcr_ref = 0;
   stream->next_pcr = -1;
 
-  stream->get_es_descrs =
-      (TsMuxStreamGetESDescriptorsFunc) tsmux_stream_default_get_es_descrs;
+  stream->get_es_descrs = tsmux_stream_get_es_descrs_default;
   stream->get_es_descrs_data = NULL;
 
   return stream;
@@ -259,11 +286,11 @@ tsmux_stream_free (TsMuxStream * stream)
 
     if (stream->buffer_release)
       stream->buffer_release (tmbuf->data, tmbuf->user_data);
-    g_slice_free (TsMuxStreamBuffer, tmbuf);
+    g_free (tmbuf);
   }
   g_list_free (stream->buffers);
 
-  g_slice_free (TsMuxStream, stream);
+  g_free (stream);
 }
 
 /**
@@ -331,7 +358,7 @@ tsmux_stream_consume (TsMuxStream * stream, guint len)
           stream->cur_buffer->user_data);
     }
 
-    g_slice_free (TsMuxStreamBuffer, stream->cur_buffer);
+    g_free (stream->cur_buffer);
     stream->cur_buffer = NULL;
     /* FIXME: As a hack, for unbounded streams, start a new PES packet for each
      * incoming packet we receive. This assumes that incoming data is
@@ -716,7 +743,7 @@ tsmux_stream_add_data (TsMuxStream * stream, guint8 * data, guint len,
 
   g_return_if_fail (stream != NULL);
 
-  packet = g_slice_new (TsMuxStreamBuffer);
+  packet = g_new (TsMuxStreamBuffer, 1);
   packet->data = data;
   packet->size = len;
   packet->user_data = user_data;
@@ -856,142 +883,17 @@ tsmux_stream_default_get_es_descrs (TsMuxStream * stream,
       break;
     case TSMUX_ST_PS_AUDIO_AC3:
     {
-      guint8 add_info[6];
-      guint8 *pos;
+      /* This is only called for DVB, ATSC ignores this case in favour of its
+       * special handling for the 0x81 descriptor */
+      /* We choose to provide no optional information */
+      guint8 add_info[1] = { 0x00 };
 
-      pos = add_info;
-
-      /* audio_stream_descriptor () | ATSC A/52-2001 Annex A
-       *
-       * descriptor_tag       8 uimsbf
-       * descriptor_length    8 uimsbf
-       * sample_rate_code     3 bslbf
-       * bsid                 5 bslbf
-       * bit_rate_code        6 bslbf
-       * surround_mode        2 bslbf
-       * bsmod                3 bslbf
-       * num_channels         4 bslbf
-       * full_svc             1 bslbf
-       * langcod              8 bslbf
-       * [...]
-       */
-      *pos++ = 0x81;
-      *pos++ = 0x04;
-
-      /* 3 bits sample_rate_code, 5 bits hardcoded bsid (default ver 8) */
-      switch (stream->audio_sampling) {
-        case 48000:
-          *pos++ = 0x08;
-          break;
-        case 44100:
-          *pos++ = 0x28;
-          break;
-        case 32000:
-          *pos++ = 0x48;
-          break;
-        default:
-          *pos++ = 0xE8;
-          break;                /* 48, 44.1 or 32 Khz */
-      }
-
-      /* 1 bit bit_rate_limit, 5 bits bit_rate_code, 2 bits suround_mode */
-      switch (stream->audio_bitrate) {
-        case 32:
-          *pos++ = 0x00 << 2;
-          break;
-        case 40:
-          *pos++ = 0x01 << 2;
-          break;
-        case 48:
-          *pos++ = 0x02 << 2;
-          break;
-        case 56:
-          *pos++ = 0x03 << 2;
-          break;
-        case 64:
-          *pos++ = 0x04 << 2;
-          break;
-        case 80:
-          *pos++ = 0x05 << 2;
-          break;
-        case 96:
-          *pos++ = 0x06 << 2;
-          break;
-        case 112:
-          *pos++ = 0x07 << 2;
-          break;
-        case 128:
-          *pos++ = 0x08 << 2;
-          break;
-        case 160:
-          *pos++ = 0x09 << 2;
-          break;
-        case 192:
-          *pos++ = 0x0A << 2;
-          break;
-        case 224:
-          *pos++ = 0x0B << 2;
-          break;
-        case 256:
-          *pos++ = 0x0C << 2;
-          break;
-        case 320:
-          *pos++ = 0x0D << 2;
-          break;
-        case 384:
-          *pos++ = 0x0E << 2;
-          break;
-        case 448:
-          *pos++ = 0x0F << 2;
-          break;
-        case 512:
-          *pos++ = 0x10 << 2;
-          break;
-        case 576:
-          *pos++ = 0x11 << 2;
-          break;
-        case 640:
-          *pos++ = 0x12 << 2;
-          break;
-        default:
-          *pos++ = 0x32 << 2;
-          break;                /* 640 Kb/s upper limit */
-      }
-
-      /* 3 bits bsmod, 4 bits num_channels, 1 bit full_svc */
-      switch (stream->audio_channels) {
-        case 1:
-          *pos++ = 0x01 << 1;
-          break;                /* 1/0 */
-        case 2:
-          *pos++ = 0x02 << 1;
-          break;                /* 2/0 */
-        case 3:
-          *pos++ = 0x0A << 1;
-          break;                /* <= 3 */
-        case 4:
-          *pos++ = 0x0B << 1;
-          break;                /* <= 4 */
-        case 5:
-          *pos++ = 0x0C << 1;
-          break;                /* <= 5 */
-        case 6:
-        default:
-          *pos++ = 0x0D << 1;
-          break;                /* <= 6 */
-      }
-
-      *pos++ = 0x00;
-
-      descriptor = gst_mpegts_descriptor_from_registration ("AC-3",
-          add_info, 6);
+      descriptor = gst_mpegts_descriptor_from_registration ("AC-3", NULL, 0);
       g_ptr_array_add (pmt_stream->descriptors, descriptor);
 
       descriptor =
-          gst_mpegts_descriptor_from_custom (GST_MTS_DESC_AC3_AUDIO_STREAM,
-          add_info, 6);
+          gst_mpegts_descriptor_from_custom (GST_MTS_DESC_DVB_AC3, add_info, 1);
       g_ptr_array_add (pmt_stream->descriptors, descriptor);
-
       break;
     }
     case TSMUX_ST_PS_AUDIO_DTS:
@@ -1033,7 +935,7 @@ tsmux_stream_default_get_es_descrs (TsMuxStream * stream,
         descriptor =
             gst_mpegts_descriptor_from_custom_with_extension
             (GST_MTS_DESC_DVB_EXTENSION, 0x80,
-            &stream->opus_channel_config_code, 1);
+            stream->opus_channel_config, stream->opus_channel_config_len);
 
         g_ptr_array_add (pmt_stream->descriptors, descriptor);
       }

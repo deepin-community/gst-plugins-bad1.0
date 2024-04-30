@@ -251,7 +251,8 @@ gst_vp9_decoder_check_codec_change (GstVp9Decoder * self,
   }
 
   ret = klass->new_sequence (self, frame_hdr,
-      GST_VP9_REF_FRAMES + priv->preferred_output_delay);
+      /* +1 for the current frame */
+      GST_VP9_REF_FRAMES + 1 + priv->preferred_output_delay);
 
   if (ret != GST_FLOW_OK)
     priv->had_sequence = FALSE;
@@ -376,6 +377,7 @@ gst_vp9_decoder_handle_frame (GstVideoDecoder * decoder,
   GstVp9ParserResult pres;
   GstMapInfo map;
   GstFlowReturn ret = GST_FLOW_OK;
+  GstFlowReturn output_ret = GST_FLOW_OK;
   gboolean intra_only = FALSE;
   gboolean check_codec_change = FALSE;
   GstVp9DecoderOutputFrame output_frame;
@@ -490,11 +492,11 @@ gst_vp9_decoder_handle_frame (GstVideoDecoder * decoder,
       goto unmap_and_error;
     }
 
-    picture->system_frame_number = pic_to_dup->system_frame_number;
+    GST_CODEC_PICTURE_COPY_FRAME_NUMBER (picture, pic_to_dup);
   } else {
     picture = gst_vp9_picture_new ();
     picture->frame_hdr = frame_hdr;
-    picture->system_frame_number = frame->system_frame_number;
+    GST_CODEC_PICTURE_FRAME_NUMBER (picture) = frame->system_frame_number;
     picture->data = map.data;
     picture->size = map.size;
 
@@ -550,7 +552,7 @@ gst_vp9_decoder_handle_frame (GstVideoDecoder * decoder,
     /* If subclass didn't update output state at this point,
      * marking this picture as a discont and stores current input state */
     if (priv->input_state_changed) {
-      picture->discont_state = gst_video_codec_state_ref (self->input_state);
+      gst_vp9_picture_set_discont_state (picture, self->input_state);
       priv->input_state_changed = FALSE;
     }
 
@@ -560,7 +562,13 @@ gst_vp9_decoder_handle_frame (GstVideoDecoder * decoder,
     gst_queue_array_push_tail_struct (priv->output_queue, &output_frame);
   }
 
-  gst_vp9_decoder_drain_output_queue (self, priv->preferred_output_delay, &ret);
+  gst_vp9_decoder_drain_output_queue (self,
+      priv->preferred_output_delay, &output_ret);
+  if (output_ret != GST_FLOW_OK) {
+    GST_DEBUG_OBJECT (self,
+        "Output returned %s", gst_flow_get_name (output_ret));
+    return output_ret;
+  }
 
   if (ret == GST_FLOW_ERROR) {
     GST_VIDEO_DECODER_ERROR (self, 1, STREAM, DECODE,
@@ -586,7 +594,7 @@ error:
           ("Failed to decode data"), (NULL), ret);
     }
 
-    gst_video_decoder_drop_frame (decoder, frame);
+    gst_video_decoder_release_frame (decoder, frame);
 
     return ret;
   }

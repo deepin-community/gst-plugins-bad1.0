@@ -158,49 +158,63 @@ typedef struct
   /* pending bar data */
   guint8 bar_data[GST_VIDEO_BAR_MAX_BYTES];
   guint bar_data_size;
-  gboolean has_bar_data;
-
-  /* parsed bar data */
-  GstVideoBarData bar_parsed;
 
   /* pending AFD data */
   guint8 afd;
   gboolean active_format_flag;
   GstVideoAFDSpec afd_spec;
-  gboolean has_afd;
-
-  /* parsed afd data */
-  GstVideoAFD afd_parsed;
 
 } GstVideoParseUserData;
 
 /*
  * GstVideoParseUserDataUnregistered
  *
- * Holds unparsed User Data Unregistered.
+ * Holds unparsed, unregistered user data.
  */
 typedef struct
 {
+  /* item type: GstVideoUnregisteredMessage */
+  GArray *messages;
+} GstVideoParseUserDataUnregistered;
+
+/*
+ * GstVideoUnregisteredMessage
+ *
+ * Item type for the unregistered user data.
+ */
+typedef struct {
   guint8 uuid[16];
   guint8 *data;
   gsize size;
-} GstVideoParseUserDataUnregistered;
+} GstVideoUnregisteredMessage;
 
 G_BEGIN_DECLS
 
-void gst_video_parse_user_data(GstElement * elt, GstVideoParseUserData * user_data,
-			GstByteReader * br, guint8 field, guint16 provider_code);
+void gst_video_parse_user_data (GstElement            * elt,
+                                GstVideoParseUserData * user_data,
+                                GstByteReader         * br,
+                                guint8                  field,
+                                guint16                 provider_code);
 
-void gst_video_parse_user_data_unregistered(GstElement * elt, GstVideoParseUserDataUnregistered * user_data,
-			GstByteReader * br, guint8 uuid[16]);
+void gst_video_push_user_data (GstElement            * elt,
+                               GstVideoParseUserData * user_data,
+                               GstBuffer             * buf);
 
-void gst_video_user_data_unregistered_clear(GstVideoParseUserDataUnregistered * user_data);
+void gst_video_clear_user_data (GstVideoParseUserData * user_data);
 
-void gst_video_push_user_data(GstElement * elt, GstVideoParseUserData * user_data,
-			 GstBuffer * buf);
 
-void gst_video_push_user_data_unregistered(GstElement * elt, GstVideoParseUserDataUnregistered * user_data,
-			 GstBuffer * buf);
+void gst_video_parse_user_data_unregistered (GstElement                        * elt,
+                                             GstVideoParseUserDataUnregistered * user_data,
+                                             GstByteReader                     * br,
+                                             guint8                              uuid[16]);
+
+void gst_video_push_user_data_unregistered (GstElement                        * elt,
+                                            GstVideoParseUserDataUnregistered * user_data,
+                                            GstBuffer                         * buf);
+
+void gst_video_clear_user_data_unregistered (GstVideoParseUserDataUnregistered * user_data,
+                                             gboolean                            free);
+
 
 G_END_DECLS
 #endif /* __VIDEO_PARSE_UTILS_H__ */

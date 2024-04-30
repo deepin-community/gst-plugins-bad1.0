@@ -19,8 +19,10 @@
 
 #pragma once
 
-#include "cuda-prelude.h"
-#include "cuda-gst.h"
+#include <gst/cuda/cuda-prelude.h>
+#include <gst/cuda/cuda-gst.h>
+#include <gst/cuda/gstcudacontext.h>
+#include <gst/cuda/gstcudastream.h>
 
 #include <gst/video/video.h>
 
@@ -46,7 +48,28 @@ gboolean      gst_cuda_buffer_copy (GstBuffer * dst,
                                     GstCudaBufferCopyType src_type,
                                     const GstVideoInfo * src_info,
                                     GstCudaContext * context,
-                                    CUstream stream);
+                                    GstCudaStream * stream);
+
+GST_CUDA_API
+void          gst_cuda_memory_set_from_fixed_pool (GstMemory * mem);
+
+GST_CUDA_API
+gboolean      gst_cuda_memory_is_from_fixed_pool (GstMemory * mem);
+
+gboolean      gst_cuda_virtual_memory_symbol_loaded (void);
+
+gpointer      gst_cuda_get_win32_handle_metadata (void);
 
 G_END_DECLS
+
+#ifdef __cplusplus
+#include <mutex>
+
+#define GST_CUDA_CALL_ONCE_BEGIN \
+    static std::once_flag __once_flag; \
+    std::call_once (__once_flag, [&]()
+
+#define GST_CUDA_CALL_ONCE_END )
+
+#endif /* __cplusplus */
 

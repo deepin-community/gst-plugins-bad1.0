@@ -101,17 +101,19 @@ gst_webrtc_ice_find_transport (GstWebRTCICE * ice,
  * @ice: The #GstWebRTCICE
  * @stream: The #GstWebRTCICEStream
  * @candidate: The ICE candidate
+ * @promise: (nullable): A #GstPromise for task notifications (Since: 1.24)
  *
  * Since: 1.22
  */
 void
 gst_webrtc_ice_add_candidate (GstWebRTCICE * ice,
-    GstWebRTCICEStream * stream, const gchar * candidate)
+    GstWebRTCICEStream * stream, const gchar * candidate, GstPromise * promise)
 {
   g_return_if_fail (GST_IS_WEBRTC_ICE (ice));
   g_assert (GST_WEBRTC_ICE_GET_CLASS (ice)->add_candidate);
 
-  GST_WEBRTC_ICE_GET_CLASS (ice)->add_candidate (ice, stream, candidate);
+  GST_WEBRTC_ICE_GET_CLASS (ice)->add_candidate (ice, stream, candidate,
+      promise);
 }
 
 /**
@@ -456,7 +458,7 @@ gst_webrtc_ice_get_turn_server (GstWebRTCICE * ice)
  * gst_webrtc_ice_set_http_proxy:
  * @ice: The #GstWebRTCICE
  * @uri: (transfer none): URI of the HTTP proxy of the form
- *   http://[username:password@]hostname[:port]
+ *   http://[username:password@]hostname[:port][?alpn=<alpn>]
  *
  * Set HTTP Proxy to be used when connecting to TURN server.
  *
@@ -476,7 +478,7 @@ gst_webrtc_ice_set_http_proxy (GstWebRTCICE * ice, const gchar * uri_s)
  * @ice: The #GstWebRTCICE
  *
  * Returns: (transfer full): URI of the HTTP proxy of the form
- *   http://[username:password@]hostname[:port]
+ *   http://[username:password@]hostname[:port][?alpn=<alpn>]
  *
  * Get HTTP Proxy to be used when connecting to TURN server.
  *

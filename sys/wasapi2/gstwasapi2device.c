@@ -69,7 +69,8 @@ gst_wasapi2_device_class_init (GstWasapi2DeviceClass * klass)
 
   g_object_class_install_property (gobject_class, PROP_DEVICE,
       g_param_spec_string ("device", "Device",
-          "WASAPI playback device as a GUID string", NULL,
+          "Audio device ID as provided by "
+          "Windows.Devices.Enumeration.DeviceInformation.Id", NULL,
           G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
 }
 
@@ -282,11 +283,15 @@ gst_wasapi2_device_provider_probe_internal (GstWasapi2DeviceProvider * self,
     GstCaps *caps = NULL;
     gchar *device_id = NULL;
     gchar *device_name = NULL;
+    GstWasapi2Result result;
 
-    client = gst_wasapi2_client_new (client_class, i, NULL, 0, NULL);
-
-    if (!client)
+    result = gst_wasapi2_client_enumerate (client_class, i, &client);
+    if (result == GST_WASAPI2_DEVICE_NOT_FOUND)
       return;
+    else if (result == GST_WASAPI2_ACTIVATION_FAILED)
+      continue;
+
+    g_assert (client);
 
     caps = gst_wasapi2_client_get_caps (client);
     if (!caps) {

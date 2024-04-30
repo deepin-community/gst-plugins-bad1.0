@@ -11,6 +11,8 @@ version=$(shell dpkg-parsechangelog | grep ^Version: | cut -d ' ' -f 2)
 # upstream version
 gst_version=$(shell echo $(version) | cut -d '-' -f 1)
 
+built_binaries := $(shell dh_listpackages)
+
 # Let's decide the package name and url depending on the distribution
 DISTRO = "$(shell dpkg-vendor --query vendor)"
 
@@ -37,8 +39,16 @@ conf_flags += -Damfcodec=disabled -Ddirectshow=disabled -Dwasapi=disabled -Dwasa
 # In non-free currently
 conf_flags += -Dfdkaac=disabled
 
-ifeq (,$(filter $(DEB_HOST_ARCH),amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa hurd-i386 m68k powerpc ppc64 riscv64))
-conf_flags += -Dopencv=disabled -Dzxing=disabled
+ifeq (,$(filter $(DEB_HOST_ARCH),amd64 arm64 armel armhf i386 mips64el ppc64el riscv64 s390x alpha hppa hurd-i386 m68k powerpc ppc64 sparc64))
+conf_flags += -Dzxing=disabled
+endif
+
+ifeq ($(filter gstreamer1.0-opencv,$(built_binaries)),)
+conf_flags += -Dopencv=disabled
+endif
+
+ifeq ($(filter gstreamer1.0-wpe,$(built_binaries)),)
+conf_flags += -Dwpe=disabled
 endif
 
 ifneq ($(DEB_HOST_ARCH_ENDIAN),little)
@@ -56,8 +66,11 @@ conf_flags += -Dvulkan=disabled -Dwayland=disabled -Ddvb=disabled
 endif
 
 ifeq ($(DEB_HOST_ARCH_OS),hurd)
-conf_flags += -Dresindvd=disabled
+conf_flags += -Dresindvd=disabled -Dnvcodec=disabled
 endif
+
+# bookworm backport flags
+conf_flags += -Daja=disabled -Dqt6d3d11=disabled -Dwebrtcdsp=disabled
 
 %:
 	dh $@
@@ -108,9 +121,10 @@ endif
 
 ifneq ($(DEB_HOST_ARCH_OS),hurd)
 	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstresindvd.so
+	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstnvcodec.so
 endif
 
-ifneq (,$(filter $(DEB_HOST_ARCH),amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa hurd-i386 m68k powerpc ppc64 riscv64))
+ifneq (,$(filter $(DEB_HOST_ARCH),amd64 arm64 armel armhf i386 mips64el ppc64el riscv64 s390x alpha hppa hurd-i386 m68k powerpc ppc64 sparc64))
 	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstzxing.so
 endif
 

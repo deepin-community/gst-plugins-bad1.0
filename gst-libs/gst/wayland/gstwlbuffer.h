@@ -25,6 +25,8 @@
 G_BEGIN_DECLS
 
 #define GST_TYPE_WL_BUFFER gst_wl_buffer_get_type ()
+
+GST_WL_API
 G_DECLARE_FINAL_TYPE (GstWlBuffer, gst_wl_buffer, GST, WL_BUFFER, GObject);
 
 struct _GstWlBuffer
@@ -44,6 +46,12 @@ void gst_wl_buffer_force_release_and_unref (GstBuffer *buf, GstWlBuffer * self);
 
 GST_WL_API
 void gst_wl_buffer_attach (GstWlBuffer * self, struct wl_surface *surface);
+
+GST_WL_API
+void gst_wl_buffer_ref_gst_buffer(GstWlBuffer * self);
+
+GST_WL_API
+void gst_wl_buffer_unref_buffer(GstWlBuffer * self);
 
 GST_WL_API
 GstWlDisplay *gst_wl_buffer_get_display (GstWlBuffer * self);

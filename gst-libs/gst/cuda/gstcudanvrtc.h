@@ -17,16 +17,10 @@
  * Boston, MA 02110-1301, USA.
  */
 
-#ifndef __GST_CUDA_NVRTC_H__
-#define __GST_CUDA_NVRTC_H__
+#pragma once
 
-#ifndef GST_USE_UNSTABLE_API
-#warning "The Cuda library from gst-plugins-bad is unstable API and may change in future."
-#warning "You can define GST_USE_UNSTABLE_API to avoid this warning."
-#endif
-
-#include "cuda-prelude.h"
 #include <gst/gst.h>
+#include <gst/cuda/cuda-prelude.h>
 
 G_BEGIN_DECLS
 
@@ -36,6 +30,9 @@ gboolean  gst_cuda_nvrtc_load_library (void);
 GST_CUDA_API
 gchar *   gst_cuda_nvrtc_compile (const gchar * source);
 
+GST_CUDA_API
+gchar *   gst_cuda_nvrtc_compile_cubin (const gchar * source,
+                                        gint device);
+
 G_END_DECLS
 
-#endif /* __GST_CUDA_NVRTC_H__ */

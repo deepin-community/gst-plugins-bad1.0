@@ -56,6 +56,15 @@
 GST_DEBUG_CATEGORY_EXTERN (gst_msdkh265enc_debug);
 #define GST_CAT_DEFAULT gst_msdkh265enc_debug
 
+#define GST_MSDKH265ENC(obj) \
+  (G_TYPE_CHECK_INSTANCE_CAST((obj), G_TYPE_FROM_INSTANCE (obj), GstMsdkH265Enc))
+#define GST_MSDKH265ENC_CLASS(klass) \
+  (G_TYPE_CHECK_CLASS_CAST((klass), G_TYPE_FROM_CLASS (klass), GstMsdkH265EncClass))
+#define GST_IS_MSDKH265ENC(obj) \
+  (G_TYPE_CHECK_INSTANCE_TYPE((obj), G_TYPE_FROM_INSTANCE (obj)))
+#define GST_IS_MSDKH265ENC_CLASS(klass) \
+  (G_TYPE_CHECK_CLASS_TYPE((klass), G_TYPE_FROM_CLASS (klass)))
+
 enum
 {
 #ifndef GST_REMOVE_DEPRECATED
@@ -71,12 +80,19 @@ enum
   PROP_B_PYRAMID,
   PROP_P_PYRAMID,
   PROP_MIN_QP,
+  PROP_MIN_QP_I,
+  PROP_MIN_QP_P,
+  PROP_MIN_QP_B,
   PROP_MAX_QP,
+  PROP_MAX_QP_I,
+  PROP_MAX_QP_P,
+  PROP_MAX_QP_B,
   PROP_INTRA_REFRESH_TYPE,
   PROP_INTRA_REFRESH_CYCLE_SIZE,
   PROP_INTRA_REFRESH_QP_DELTA,
   PROP_INTRA_REFRESH_CYCLE_DIST,
   PROP_DBLK_IDC,
+  PROP_PIC_TIMING_SEI,
 };
 
 enum
@@ -100,70 +116,24 @@ enum
 #define PROP_INTRA_REFRESH_QP_DELTA_DEFAULT   0
 #define PROP_INTRA_REFRESH_CYCLE_DIST_DEFAULT 0
 #define PROP_DBLK_IDC_DEFAULT                 0
+#define PROP_PIC_TIMING_SEI_DEFAULT           TRUE
 
-#define RAW_FORMATS "NV12, I420, YV12, YUY2, UYVY, BGRA, BGR10A2_LE, P010_10LE, VUYA"
-#define PROFILES    "main, main-10, main-444, main-still-picture, main-10-still-picture"
-#define COMMON_FORMAT "{ " RAW_FORMATS " }"
-#define PRFOLIE_STR   "{ " PROFILES " }"
+/* *INDENT-OFF* */
+static const gchar *doc_sink_caps_str =
+    GST_VIDEO_CAPS_MAKE (
+        "{ NV12, P010_10LE, YUY2, BGRA, VUYA, BGR10A2_LE, Y210, Y410, "
+        "P012_LE, Y212_LE }") " ;"
+    GST_VIDEO_CAPS_MAKE_WITH_FEATURES ("memory:DMABuf",
+        "{ NV12, P010_10LE, YUY2, BGRA, VUYA, BGR10A2_LE, Y210, Y410, "
+        "P012_LE, Y212_LE }") " ;"
+    GST_VIDEO_CAPS_MAKE_WITH_FEATURES ("memory:VAMemory", "{ NV12 }") " ;"
+    GST_VIDEO_CAPS_MAKE_WITH_FEATURES ("memory:D3D11Memory",
+        "{ NV12, P010_10LE }");
+/* *INDENT-ON* */
 
+static const gchar *doc_src_caps_str = "video/x-h265";
 
-#if (MFX_VERSION >= 1027)
-#undef  COMMON_FORMAT
-#undef  PRFOLIE_STR
-#define FORMATS_1027    RAW_FORMATS ", Y410, Y210"
-#define PROFILES_1027   PROFILES ", main-444-10, main-422-10"
-#define COMMON_FORMAT   "{ " FORMATS_1027 " }"
-#define PRFOLIE_STR     "{ " PROFILES_1027 " }"
-#endif
-
-#if (MFX_VERSION >= 1031)
-#undef  COMMON_FORMAT
-#undef  PRFOLIE_STR
-#define FORMATS_1031    FORMATS_1027 ", P012_LE"
-#define PROFILES_1031   PROFILES_1027  ", main-12"
-#define COMMON_FORMAT   "{ " FORMATS_1031 " }"
-#define PRFOLIE_STR     "{ " PROFILES_1031 " }"
-#endif
-
-#if (MFX_VERSION >= 1032)
-#undef  COMMON_FORMAT
-#undef  PRFOLIE_STR
-#define FORMATS_1032    FORMATS_1031
-#define PROFILES_1032   PROFILES_1031  ", screen-extended-main, " \
-  "screen-extended-main-10, screen-extended-main-444, " \
-  "screen-extended-main-444-10"
-#define COMMON_FORMAT   "{ " FORMATS_1032 " }"
-#define PRFOLIE_STR     "{ " PROFILES_1032 " }"
-#endif
-
-#ifdef _WIN32
-static GstStaticPadTemplate sink_factory = GST_STATIC_PAD_TEMPLATE ("sink",
-    GST_PAD_SINK,
-    GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (GST_MSDK_CAPS_STR (COMMON_FORMAT,
-            "{ NV12, P010_10LE }") "; "
-        GST_MSDK_CAPS_MAKE_WITH_D3D11_FEATURE ("{ NV12, P010_10LE }")));
-#else
-static GstStaticPadTemplate sink_factory = GST_STATIC_PAD_TEMPLATE ("sink",
-    GST_PAD_SINK,
-    GST_PAD_ALWAYS,
-    GST_STATIC_CAPS (GST_MSDK_CAPS_STR (COMMON_FORMAT,
-            "{ NV12, P010_10LE }") "; "
-        GST_MSDK_CAPS_MAKE_WITH_VA_FEATURE ("NV12")));
-#endif
-
-static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
-    GST_PAD_SRC,
-    GST_PAD_ALWAYS,
-    GST_STATIC_CAPS ("video/x-h265, "
-        "framerate = (fraction) [0/1, MAX], "
-        "width = (int) [ 1, MAX ], height = (int) [ 1, MAX ], "
-        "stream-format = (string) byte-stream , alignment = (string) au , "
-        "profile = (string) " PRFOLIE_STR)
-    );
-
-#define gst_msdkh265enc_parent_class parent_class
-G_DEFINE_TYPE (GstMsdkH265Enc, gst_msdkh265enc, GST_TYPE_MSDKENC);
+static GstElementClass *parent_class = NULL;
 
 static void
 gst_msdkh265enc_insert_sei (GstMsdkH265Enc * thiz, GstVideoCodecFrame * frame,
@@ -264,118 +234,12 @@ gst_msdkh265enc_add_cc (GstMsdkH265Enc * thiz, GstVideoCodecFrame * frame)
   gst_memory_unref (mem);
 }
 
-static void
-gst_msdkh265enc_add_mdcv_sei (GstMsdkEnc * encoder, GstVideoCodecFrame * frame)
-{
-  GstMsdkH265Enc *thiz = GST_MSDKH265ENC (encoder);
-  GstVideoMasteringDisplayInfo *mastering_display_info
-      = encoder->input_state->mastering_display_info;
-  GstH265SEIMessage sei;
-  GstH265MasteringDisplayColourVolume *mdcv;
-  GstMemory *mem = NULL;
-  guint i = 0;
-
-  memset (&sei, 0, sizeof (GstH265SEIMessage));
-  sei.payloadType = GST_H265_SEI_MASTERING_DISPLAY_COLOUR_VOLUME;
-  mdcv = &sei.payload.mastering_display_colour_volume;
-
-  for (i = 0; i < 3; i++) {
-    mdcv->display_primaries_x[i] =
-        mastering_display_info->display_primaries[i].x;
-    mdcv->display_primaries_y[i] =
-        mastering_display_info->display_primaries[i].y;
-  }
-
-  mdcv->white_point_x = mastering_display_info->white_point.x;
-  mdcv->white_point_y = mastering_display_info->white_point.y;
-  mdcv->max_display_mastering_luminance =
-      mastering_display_info->max_display_mastering_luminance;
-  mdcv->min_display_mastering_luminance =
-      mastering_display_info->min_display_mastering_luminance;
-
-  if (!thiz->cc_sei_array)
-    thiz->cc_sei_array = g_array_new (FALSE, FALSE, sizeof (GstH265SEIMessage));
-  else
-    g_array_set_size (thiz->cc_sei_array, 0);
-
-  g_array_append_val (thiz->cc_sei_array, sei);
-
-  if (!thiz->cc_sei_array || !thiz->cc_sei_array->len)
-    return;
-
-  /* layer_id and temporal_id will be updated by parser later */
-  mem = gst_h265_create_sei_memory (0, 1, 4, thiz->cc_sei_array);
-
-  if (!mem) {
-    GST_WARNING_OBJECT (thiz, "Cannot create SEI nal unit");
-    return;
-  }
-
-  GST_DEBUG_OBJECT (thiz,
-      "Inserting %d mastering display colout volume SEI message(s)",
-      thiz->cc_sei_array->len);
-
-  gst_msdkh265enc_insert_sei (thiz, frame, mem);
-  gst_memory_unref (mem);
-}
-
-static void
-gst_msdkh265enc_add_cll_sei (GstMsdkEnc * encoder, GstVideoCodecFrame * frame)
-{
-  GstMsdkH265Enc *thiz = GST_MSDKH265ENC (encoder);
-  GstVideoContentLightLevel *content_light_level
-      = encoder->input_state->content_light_level;
-  GstH265ContentLightLevel *cll;
-  GstH265SEIMessage sei;
-  GstMemory *mem = NULL;
-
-  memset (&sei, 0, sizeof (GstH265SEIMessage));
-  sei.payloadType = GST_H265_SEI_CONTENT_LIGHT_LEVEL;
-  cll = &sei.payload.content_light_level;
-
-  cll->max_content_light_level = content_light_level->max_content_light_level;
-  cll->max_pic_average_light_level =
-      content_light_level->max_frame_average_light_level;
-
-  if (!thiz->cc_sei_array)
-    thiz->cc_sei_array = g_array_new (FALSE, FALSE, sizeof (GstH265SEIMessage));
-  else
-    g_array_set_size (thiz->cc_sei_array, 0);
-
-  g_array_append_val (thiz->cc_sei_array, sei);
-
-  if (!thiz->cc_sei_array || !thiz->cc_sei_array->len)
-    return;
-
-  /* layer_id and temporal_id will be updated by parser later */
-  mem = gst_h265_create_sei_memory (0, 1, 4, thiz->cc_sei_array);
-
-  if (!mem) {
-    GST_WARNING_OBJECT (thiz, "Cannot create SEI nal unit");
-    return;
-  }
-
-  GST_DEBUG_OBJECT (thiz,
-      "Inserting %d content light level SEI message(s)",
-      thiz->cc_sei_array->len);
-
-  gst_msdkh265enc_insert_sei (thiz, frame, mem);
-  gst_memory_unref (mem);
-}
-
 static GstFlowReturn
 gst_msdkh265enc_pre_push (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
 {
   GstMsdkH265Enc *thiz = GST_MSDKH265ENC (encoder);
-  GstMsdkEnc *msdk_encoder = GST_MSDKENC (encoder);
 
   gst_msdkh265enc_add_cc (thiz, frame);
-
-  if (msdk_encoder->input_state->mastering_display_info)
-    gst_msdkh265enc_add_mdcv_sei (msdk_encoder, frame);
-
-  if (msdk_encoder->input_state->content_light_level)
-    gst_msdkh265enc_add_cll_sei (msdk_encoder, frame);
 
   return GST_FLOW_OK;
 }
@@ -384,20 +248,22 @@ static gboolean
 gst_msdkh265enc_set_format (GstMsdkEnc * encoder)
 {
   GstMsdkH265Enc *thiz = GST_MSDKH265ENC (encoder);
+  GstPad *srcpad;
   GstCaps *template_caps, *allowed_caps;
 
   g_free (thiz->profile_name);
   thiz->profile_name = NULL;
 
-  allowed_caps = gst_pad_get_allowed_caps (GST_VIDEO_ENCODER_SRC_PAD (encoder));
+  srcpad = GST_VIDEO_ENCODER_SRC_PAD (encoder);
 
+  allowed_caps = gst_pad_get_allowed_caps (srcpad);
   if (!allowed_caps || gst_caps_is_empty (allowed_caps)) {
     if (allowed_caps)
       gst_caps_unref (allowed_caps);
     return FALSE;
   }
 
-  template_caps = gst_static_pad_template_get_caps (&src_factory);
+  template_caps = gst_pad_get_pad_template_caps (srcpad);
 
   if (gst_caps_is_equal (allowed_caps, template_caps)) {
     GST_INFO_OBJECT (thiz,
@@ -420,6 +286,67 @@ gst_msdkh265enc_set_format (GstMsdkEnc * encoder)
   gst_caps_unref (template_caps);
 
   return TRUE;
+}
+
+static void
+_get_hdr_sei (GstMsdkEnc * encoder)
+{
+  GstVideoCodecState *state;
+  GstVideoMasteringDisplayInfo mdcv_info;
+  GstVideoContentLightLevel cll_info;
+  GstMsdkH265Enc *h265enc = GST_MSDKH265ENC (encoder);
+  const guint chroma_den = 50000;
+  const guint luma_den = 10000;
+
+  h265enc->have_mdcv = h265enc->have_cll = FALSE;
+  state = encoder->input_state;
+  if (gst_video_mastering_display_info_from_caps (&mdcv_info, state->caps)) {
+    memset (&h265enc->mdcv, 0, sizeof (mfxExtMasteringDisplayColourVolume));
+    h265enc->mdcv.Header.BufferId = MFX_EXTBUFF_MASTERING_DISPLAY_COLOUR_VOLUME;
+    h265enc->mdcv.Header.BufferSz = sizeof (mfxExtMasteringDisplayColourVolume);
+    h265enc->mdcv.InsertPayloadToggle = MFX_PAYLOAD_IDR;
+
+    /* According to HEVC spec, display primaries order is G,B,R */
+    h265enc->mdcv.DisplayPrimariesX[0] =
+        MIN ((mdcv_info.display_primaries[1].x * chroma_den), chroma_den);
+    h265enc->mdcv.DisplayPrimariesY[0] =
+        MIN ((mdcv_info.display_primaries[1].y * chroma_den), chroma_den);
+    h265enc->mdcv.DisplayPrimariesX[1] =
+        MIN ((mdcv_info.display_primaries[2].x * chroma_den), chroma_den);
+    h265enc->mdcv.DisplayPrimariesY[1] =
+        MIN ((mdcv_info.display_primaries[2].y * chroma_den), chroma_den);
+    h265enc->mdcv.DisplayPrimariesX[2] =
+        MIN ((mdcv_info.display_primaries[0].x * chroma_den), chroma_den);
+    h265enc->mdcv.DisplayPrimariesY[2] =
+        MIN ((mdcv_info.display_primaries[0].y * chroma_den), chroma_den);
+
+    h265enc->mdcv.WhitePointX =
+        MIN ((mdcv_info.white_point.x * chroma_den), chroma_den);
+    h265enc->mdcv.WhitePointY =
+        MIN ((mdcv_info.white_point.y * chroma_den), chroma_den);
+
+    h265enc->mdcv.MaxDisplayMasteringLuminance =
+        mdcv_info.max_display_mastering_luminance * luma_den;
+    h265enc->mdcv.MinDisplayMasteringLuminance =
+        MIN ((mdcv_info.min_display_mastering_luminance * luma_den),
+        h265enc->mdcv.MaxDisplayMasteringLuminance);
+    h265enc->have_mdcv = TRUE;
+  }
+
+  if (gst_video_content_light_level_from_caps (&cll_info, state->caps)) {
+    memset (&h265enc->cll, 0, sizeof (mfxExtContentLightLevelInfo));
+    h265enc->cll.Header.BufferId = MFX_EXTBUFF_CONTENT_LIGHT_LEVEL_INFO;
+    h265enc->cll.Header.BufferSz = sizeof (mfxExtContentLightLevelInfo);
+    h265enc->cll.InsertPayloadToggle = MFX_PAYLOAD_IDR;
+
+    h265enc->cll.MaxContentLightLevel =
+        MIN (cll_info.max_content_light_level, 65535);
+    h265enc->cll.MaxPicAverageLightLevel =
+        MIN (cll_info.max_frame_average_light_level, 65535);
+    h265enc->have_cll = TRUE;
+  }
+
+  return;
 }
 
 static gboolean
@@ -498,12 +425,13 @@ gst_msdkh265enc_configure (GstMsdkEnc * encoder)
    * "i-frames" by incrementing the value by one in each case*/
   encoder->param.mfx.IdrInterval += 1;
 
-  /* Enable Extended coding options */
   encoder->option2.MaxSliceSize = h265enc->max_slice_size;
-  encoder->option2.MinQPI = encoder->option2.MinQPP = encoder->option2.MinQPB =
-      h265enc->min_qp;
-  encoder->option2.MaxQPI = encoder->option2.MaxQPP = encoder->option2.MaxQPB =
-      h265enc->max_qp;
+  encoder->option2.MinQPI = h265enc->min_qp_i;
+  encoder->option2.MinQPP = h265enc->min_qp_p;
+  encoder->option2.MinQPB = h265enc->min_qp_b;
+  encoder->option2.MaxQPI = h265enc->max_qp_i;
+  encoder->option2.MaxQPP = h265enc->max_qp_p;
+  encoder->option2.MaxQPB = h265enc->max_qp_b;
   encoder->option2.DisableDeblockingIdc = h265enc->dblk_idc;
 
   if (h265enc->tune_mode == 16 || h265enc->lowpower) {
@@ -540,12 +468,16 @@ gst_msdkh265enc_configure (GstMsdkEnc * encoder)
     encoder->enable_extopt3 = TRUE;
   }
 
-  if (encoder->option3.LowDelayBRC == MFX_CODINGOPTION_ON) {
-    h265enc->option.Header.BufferId = MFX_EXTBUFF_CODING_OPTION;
-    h265enc->option.Header.BufferSz = sizeof (h265enc->option);
+  /* Fill Extended coding options */
+  h265enc->option.Header.BufferId = MFX_EXTBUFF_CODING_OPTION;
+  h265enc->option.Header.BufferSz = sizeof (h265enc->option);
+  h265enc->option.PicTimingSEI =
+      (h265enc->pic_timing_sei ? MFX_CODINGOPTION_ON : MFX_CODINGOPTION_OFF);
+
+  if (encoder->option3.LowDelayBRC == MFX_CODINGOPTION_ON)
     h265enc->option.NalHrdConformance = MFX_CODINGOPTION_OFF;
-    gst_msdkenc_add_extra_param (encoder, (mfxExtBuffer *) & h265enc->option);
-  }
+
+  gst_msdkenc_add_extra_param (encoder, (mfxExtBuffer *) & h265enc->option);
 
   gst_msdkenc_ensure_extended_coding_options (encoder);
 
@@ -565,6 +497,13 @@ gst_msdkh265enc_configure (GstMsdkEnc * encoder)
   }
 
   encoder->param.mfx.LowPower = h265enc->tune_mode;
+
+  /* Set HDR SEI */
+  _get_hdr_sei (encoder);
+  if (h265enc->have_mdcv)
+    gst_msdkenc_add_extra_param (encoder, (mfxExtBuffer *) & h265enc->mdcv);
+  if (h265enc->have_cll)
+    gst_msdkenc_add_extra_param (encoder, (mfxExtBuffer *) & h265enc->cll);
 
   return TRUE;
 }
@@ -692,6 +631,7 @@ static void
 gst_msdkh265enc_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
 {
+  GstMsdkEnc *enc = GST_MSDKENC (object);
   GstMsdkH265Enc *thiz = GST_MSDKH265ENC (object);
 
   if (gst_msdkenc_set_common_property (object, prop_id, value, pspec))
@@ -744,30 +684,98 @@ gst_msdkh265enc_set_property (GObject * object, guint prop_id,
 
     case PROP_MIN_QP:
       thiz->min_qp = g_value_get_uint (value);
+      thiz->min_qp_i = thiz->min_qp_p = thiz->min_qp_b = thiz->min_qp;
+      break;
+
+    case PROP_MIN_QP_I:
+      if (check_update_property_uint (enc, &thiz->min_qp_i,
+              g_value_get_uint (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed min-qp-i to %u", thiz->min_qp_i);
+      }
+      break;
+
+    case PROP_MIN_QP_P:
+      if (check_update_property_uint (enc, &thiz->min_qp_p,
+              g_value_get_uint (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed min-qp-p to %u", thiz->min_qp_p);
+      }
+      break;
+
+    case PROP_MIN_QP_B:
+      if (check_update_property_uint (enc, &thiz->min_qp_b,
+              g_value_get_uint (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed min-qp-b to %u", thiz->min_qp_b);
+      }
       break;
 
     case PROP_MAX_QP:
       thiz->max_qp = g_value_get_uint (value);
+      thiz->max_qp_i = thiz->max_qp_p = thiz->max_qp_b = thiz->max_qp;
+      break;
+
+    case PROP_MAX_QP_I:
+      if (check_update_property_uint (enc, &thiz->max_qp_i,
+              g_value_get_uint (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed max-qp-i to %u", thiz->max_qp_i);
+      }
+      break;
+
+    case PROP_MAX_QP_P:
+      if (check_update_property_uint (enc, &thiz->max_qp_p,
+              g_value_get_uint (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed max-qp-p to %u", thiz->max_qp_p);
+      }
+      break;
+
+    case PROP_MAX_QP_B:
+      if (check_update_property_uint (enc, &thiz->max_qp_b,
+              g_value_get_uint (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed max-qp-b to %u", thiz->max_qp_b);
+      }
       break;
 
     case PROP_INTRA_REFRESH_TYPE:
-      thiz->intra_refresh_type = g_value_get_enum (value);
+      if (check_update_property_uint (enc, &thiz->intra_refresh_type,
+              g_value_get_enum (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed intra-refresh-type to %u",
+            thiz->intra_refresh_type);
+      }
       break;
 
     case PROP_INTRA_REFRESH_CYCLE_SIZE:
-      thiz->intra_refresh_cycle_size = g_value_get_uint (value);
+      if (check_update_property_uint (enc, &thiz->intra_refresh_cycle_size,
+              g_value_get_uint (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed intra-refresh-cycle-size to %u",
+            thiz->intra_refresh_cycle_size);
+      }
       break;
 
     case PROP_INTRA_REFRESH_QP_DELTA:
-      thiz->intra_refresh_qp_delta = g_value_get_int (value);
+      if (check_update_property_int (enc, &thiz->intra_refresh_qp_delta,
+              g_value_get_int (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed intra-refresh-qp-delta to %d",
+            thiz->intra_refresh_qp_delta);
+      }
       break;
 
     case PROP_INTRA_REFRESH_CYCLE_DIST:
-      thiz->intra_refresh_cycle_dist = g_value_get_uint (value);
+      if (check_update_property_uint (enc, &thiz->intra_refresh_cycle_dist,
+              g_value_get_uint (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed intra-refresh-cycle-dist to %u",
+            thiz->intra_refresh_cycle_dist);
+      }
       break;
 
     case PROP_DBLK_IDC:
       thiz->dblk_idc = g_value_get_uint (value);
+      break;
+
+    case PROP_PIC_TIMING_SEI:
+      if (check_update_property_bool (enc, &thiz->pic_timing_sei,
+              g_value_get_boolean (value))) {
+        GST_DEBUG_OBJECT (thiz, "changed pic-timimg-sei to %d",
+            thiz->pic_timing_sei);
+      }
       break;
 
     default:
@@ -826,8 +834,32 @@ gst_msdkh265enc_get_property (GObject * object, guint prop_id, GValue * value,
       g_value_set_uint (value, thiz->min_qp);
       break;
 
+    case PROP_MIN_QP_I:
+      g_value_set_uint (value, thiz->min_qp_i);
+      break;
+
+    case PROP_MIN_QP_P:
+      g_value_set_uint (value, thiz->min_qp_p);
+      break;
+
+    case PROP_MIN_QP_B:
+      g_value_set_uint (value, thiz->min_qp_b);
+      break;
+
     case PROP_MAX_QP:
       g_value_set_uint (value, thiz->max_qp);
+      break;
+
+    case PROP_MAX_QP_I:
+      g_value_set_uint (value, thiz->max_qp_i);
+      break;
+
+    case PROP_MAX_QP_P:
+      g_value_set_uint (value, thiz->max_qp_p);
+      break;
+
+    case PROP_MAX_QP_B:
+      g_value_set_uint (value, thiz->max_qp_b);
       break;
 
     case PROP_INTRA_REFRESH_TYPE:
@@ -848,6 +880,10 @@ gst_msdkh265enc_get_property (GObject * object, guint prop_id, GValue * value,
 
     case PROP_DBLK_IDC:
       g_value_set_uint (value, thiz->dblk_idc);
+      break;
+
+    case PROP_PIC_TIMING_SEI:
+      g_value_set_boolean (value, thiz->pic_timing_sei);
       break;
 
     default:
@@ -876,16 +912,19 @@ gst_msdkh265enc_set_extra_params (GstMsdkEnc * encoder,
 }
 
 static gboolean
-gst_msdkh265enc_need_conversion (GstMsdkEnc * encoder, GstVideoInfo * info,
-    GstVideoFormat * out_format)
+gst_msdkh265enc_is_format_supported (GstMsdkEnc * encoder,
+    GstVideoFormat format)
 {
   GstMsdkH265Enc *h265enc = GST_MSDKH265ENC (encoder);
 
-  switch (GST_VIDEO_INFO_FORMAT (info)) {
+  switch (format) {
     case GST_VIDEO_FORMAT_NV12:
+    case GST_VIDEO_FORMAT_VUYA:
+    case GST_VIDEO_FORMAT_BGRA:
+    case GST_VIDEO_FORMAT_BGRx:
+    case GST_VIDEO_FORMAT_Y212_LE:
     case GST_VIDEO_FORMAT_BGR10A2_LE:
     case GST_VIDEO_FORMAT_P010_10LE:
-    case GST_VIDEO_FORMAT_VUYA:
 #if (MFX_VERSION >= 1027)
     case GST_VIDEO_FORMAT_Y410:
     case GST_VIDEO_FORMAT_Y210:
@@ -893,49 +932,22 @@ gst_msdkh265enc_need_conversion (GstMsdkEnc * encoder, GstVideoInfo * info,
 #if (MFX_VERSION >= 1031)
     case GST_VIDEO_FORMAT_P012_LE:
 #endif
-      return FALSE;
-
+      return TRUE;
     case GST_VIDEO_FORMAT_YUY2:
 #if (MFX_VERSION >= 1027)
       if (encoder->codename >= MFX_PLATFORM_ICELAKE &&
           h265enc->tune_mode == MFX_CODINGOPTION_OFF)
-        return FALSE;
+        return TRUE;
 #endif
     default:
-      if (GST_VIDEO_INFO_COMP_DEPTH (info, 0) == 10)
-        *out_format = GST_VIDEO_FORMAT_P010_10LE;
-      else
-        *out_format = GST_VIDEO_FORMAT_NV12;
-      return TRUE;
+      return FALSE;
   }
 }
 
 static void
-gst_msdkh265enc_class_init (GstMsdkH265EncClass * klass)
+_msdkh265enc_install_properties (GObjectClass * gobject_class,
+    GstMsdkEncClass * encoder_class)
 {
-  GObjectClass *gobject_class;
-  GstElementClass *element_class;
-  GstVideoEncoderClass *videoencoder_class;
-  GstMsdkEncClass *encoder_class;
-
-  gobject_class = G_OBJECT_CLASS (klass);
-  element_class = GST_ELEMENT_CLASS (klass);
-  videoencoder_class = GST_VIDEO_ENCODER_CLASS (klass);
-  encoder_class = GST_MSDKENC_CLASS (klass);
-
-  gobject_class->finalize = gst_msdkh265enc_finalize;
-  gobject_class->set_property = gst_msdkh265enc_set_property;
-  gobject_class->get_property = gst_msdkh265enc_get_property;
-
-  videoencoder_class->pre_push = gst_msdkh265enc_pre_push;
-
-  encoder_class->set_format = gst_msdkh265enc_set_format;
-  encoder_class->configure = gst_msdkh265enc_configure;
-  encoder_class->set_src_caps = gst_msdkh265enc_set_src_caps;
-  encoder_class->need_reconfig = gst_msdkh265enc_need_reconfig;
-  encoder_class->set_extra_params = gst_msdkh265enc_set_extra_params;
-  encoder_class->need_conversion = gst_msdkh265enc_need_conversion;
-
   gst_msdkenc_install_common_properties (encoder_class);
 
 #ifndef GST_REMOVE_DEPRECATED
@@ -988,13 +1000,79 @@ gst_msdkh265enc_class_init (GstMsdkH265EncClass * klass)
 
   g_object_class_install_property (gobject_class, PROP_MIN_QP,
       g_param_spec_uint ("min-qp", "Min QP",
-          "Minimal quantizer for I/P/B frames",
+          "Minimal quantizer scale for I/P/B frames",
+          0, 51, PROP_MIN_QP_DEFAULT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstMsdkH265Enc:min-qp-i:
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (gobject_class, PROP_MIN_QP_I,
+      g_param_spec_uint ("min-qp-i", "Min QP I",
+          "Minimal quantizer scale for I frame",
+          0, 51, PROP_MIN_QP_DEFAULT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstMsdkH265Enc:min-qp-p:
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (gobject_class, PROP_MIN_QP_P,
+      g_param_spec_uint ("min-qp-p", "Min QP P",
+          "Minimal quantizer scale for P frame",
+          0, 51, PROP_MIN_QP_DEFAULT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstMsdkH265Enc:min-qp-b:
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (gobject_class, PROP_MIN_QP_B,
+      g_param_spec_uint ("min-qp-b", "Min QP B",
+          "Minimal quantizer scale for B frame",
           0, 51, PROP_MIN_QP_DEFAULT,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class, PROP_MAX_QP,
       g_param_spec_uint ("max-qp", "Max QP",
-          "Maximum quantizer for I/P/B frames",
+          "Maximum quantizer scale for I/P/B frames",
+          0, 51, PROP_MAX_QP_DEFAULT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstMsdkH265Enc:max-qp-i:
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (gobject_class, PROP_MAX_QP_I,
+      g_param_spec_uint ("max-qp-i", "Max QP I",
+          "Maximum quantizer scale for I frame",
+          0, 51, PROP_MAX_QP_DEFAULT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstMsdkH265Enc:max-qp-p:
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (gobject_class, PROP_MAX_QP_P,
+      g_param_spec_uint ("max-qp-p", "Max QP P",
+          "Maximum quantizer scale for P frame",
+          0, 51, PROP_MAX_QP_DEFAULT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstMsdkH265Enc:max-qp-b:
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (gobject_class, PROP_MAX_QP_B,
+      g_param_spec_uint ("max-qp-b", "Max QP B",
+          "Maximum quantizer scale for B frame",
           0, 51, PROP_MAX_QP_DEFAULT,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
@@ -1029,20 +1107,68 @@ gst_msdkh265enc_class_init (GstMsdkH265EncClass * klass)
           0, 2, PROP_DBLK_IDC_DEFAULT,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * GstMsdkH265Enc:pic-timing-sei:
+   *
+   * Since: 1.24
+   */
+  g_object_class_install_property (gobject_class, PROP_PIC_TIMING_SEI,
+      g_param_spec_boolean ("pic-timing-sei", "Picture Timing SEI",
+          "Insert picture timing SEI with pic_struct syntax",
+          PROP_PIC_TIMING_SEI_DEFAULT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+}
+
+static void
+gst_msdkh265enc_class_init (gpointer klass, gpointer data)
+{
+  GObjectClass *gobject_class;
+  GstElementClass *element_class;
+  GstVideoEncoderClass *videoencoder_class;
+  GstMsdkEncClass *encoder_class;
+  MsdkEncCData *cdata = data;
+
+  parent_class = g_type_class_peek_parent (klass);
+
+  gobject_class = G_OBJECT_CLASS (klass);
+  element_class = GST_ELEMENT_CLASS (klass);
+  videoencoder_class = GST_VIDEO_ENCODER_CLASS (klass);
+  encoder_class = GST_MSDKENC_CLASS (klass);
+
+  gobject_class->finalize = gst_msdkh265enc_finalize;
+  gobject_class->set_property = gst_msdkh265enc_set_property;
+  gobject_class->get_property = gst_msdkh265enc_get_property;
+
+  videoencoder_class->pre_push = gst_msdkh265enc_pre_push;
+
+  encoder_class->set_format = gst_msdkh265enc_set_format;
+  encoder_class->configure = gst_msdkh265enc_configure;
+  encoder_class->set_src_caps = gst_msdkh265enc_set_src_caps;
+  encoder_class->need_reconfig = gst_msdkh265enc_need_reconfig;
+  encoder_class->set_extra_params = gst_msdkh265enc_set_extra_params;
+  encoder_class->is_format_supported = gst_msdkh265enc_is_format_supported;
+
+  _msdkh265enc_install_properties (gobject_class, encoder_class);
+
   gst_element_class_set_static_metadata (element_class,
       "Intel MSDK H265 encoder",
       "Codec/Encoder/Video/Hardware",
       "H265 video encoder based on " MFX_API_SDK,
       "Josep Torra <jtorra@oblong.com>");
 
-  gst_element_class_add_static_pad_template (element_class, &sink_factory);
-  gst_element_class_add_static_pad_template (element_class, &src_factory);
+  gst_msdkcaps_pad_template_init (element_class,
+      cdata->sink_caps, cdata->src_caps, doc_sink_caps_str, doc_src_caps_str);
+
+  gst_caps_unref (cdata->sink_caps);
+  gst_caps_unref (cdata->src_caps);
+  g_free (cdata);
 }
 
 static void
-gst_msdkh265enc_init (GstMsdkH265Enc * thiz)
+gst_msdkh265enc_init (GTypeInstance * instance, gpointer g_class)
 {
-  GstMsdkEnc *msdk_enc = (GstMsdkEnc *) thiz;
+  GstMsdkH265Enc *thiz = GST_MSDKH265ENC (instance);
+  GstMsdkEnc *msdk_enc = (GstMsdkEnc *) instance;
   thiz->lowpower = PROP_LOWPOWER_DEFAULT;
   thiz->num_tile_rows = PROP_TILE_ROW_DEFAULT;
   thiz->num_tile_cols = PROP_TILE_COL_DEFAULT;
@@ -1052,11 +1178,68 @@ gst_msdkh265enc_init (GstMsdkH265Enc * thiz)
   thiz->b_pyramid = PROP_B_PYRAMID_DEFAULT;
   thiz->p_pyramid = PROP_P_PYRAMID_DEFAULT;
   thiz->min_qp = PROP_MIN_QP_DEFAULT;
+  thiz->min_qp_i = PROP_MIN_QP_DEFAULT;
+  thiz->min_qp_p = PROP_MIN_QP_DEFAULT;
+  thiz->min_qp_b = PROP_MIN_QP_DEFAULT;
   thiz->max_qp = PROP_MAX_QP_DEFAULT;
+  thiz->max_qp_i = PROP_MAX_QP_DEFAULT;
+  thiz->max_qp_p = PROP_MAX_QP_DEFAULT;
+  thiz->max_qp_b = PROP_MAX_QP_DEFAULT;
   thiz->intra_refresh_type = PROP_INTRA_REFRESH_TYPE_DEFAULT;
   thiz->intra_refresh_cycle_size = PROP_INTRA_REFRESH_CYCLE_SIZE_DEFAULT;
   thiz->intra_refresh_qp_delta = PROP_INTRA_REFRESH_QP_DELTA_DEFAULT;
   thiz->intra_refresh_cycle_dist = PROP_INTRA_REFRESH_CYCLE_DIST_DEFAULT;
   thiz->dblk_idc = PROP_DBLK_IDC_DEFAULT;
+  thiz->pic_timing_sei = PROP_PIC_TIMING_SEI_DEFAULT;
   msdk_enc->num_extra_frames = 1;
+}
+
+gboolean
+gst_msdkh265enc_register (GstPlugin * plugin,
+    GstMsdkContext * context, GstCaps * sink_caps,
+    GstCaps * src_caps, guint rank)
+{
+  GType type;
+  MsdkEncCData *cdata;
+  gchar *type_name, *feature_name;
+  gboolean ret = FALSE;
+
+  GTypeInfo type_info = {
+    .class_size = sizeof (GstMsdkH265EncClass),
+    .class_init = gst_msdkh265enc_class_init,
+    .instance_size = sizeof (GstMsdkH265Enc),
+    .instance_init = gst_msdkh265enc_init
+  };
+
+  cdata = g_new (MsdkEncCData, 1);
+  cdata->sink_caps = gst_caps_copy (sink_caps);
+  cdata->src_caps = gst_caps_copy (src_caps);
+
+#ifdef _WIN32
+  gst_msdkcaps_set_strings (cdata->sink_caps,
+      "memory:D3D11Memory", "format", "NV12, P010_10LE");
+#endif
+
+  gst_caps_set_simple (cdata->src_caps,
+      "alignment", G_TYPE_STRING, "au",
+      "stream-format", G_TYPE_STRING, "byte-stream", NULL);
+
+  GST_MINI_OBJECT_FLAG_SET (cdata->sink_caps,
+      GST_MINI_OBJECT_FLAG_MAY_BE_LEAKED);
+  GST_MINI_OBJECT_FLAG_SET (cdata->src_caps,
+      GST_MINI_OBJECT_FLAG_MAY_BE_LEAKED);
+
+  type_info.class_data = cdata;
+
+  type_name = g_strdup ("GstMsdkH265Enc");
+  feature_name = g_strdup ("msdkh265enc");
+
+  type = g_type_register_static (GST_TYPE_MSDKENC, type_name, &type_info, 0);
+  if (type)
+    ret = gst_element_register (plugin, feature_name, rank, type);
+
+  g_free (type_name);
+  g_free (feature_name);
+
+  return ret;
 }

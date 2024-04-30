@@ -71,11 +71,14 @@ _set_base_stats (GstStructure * s, GstWebRTCStatsType type, double ts,
 static GstStructure *
 _get_peer_connection_stats (GstWebRTCBin * webrtc)
 {
-  GstStructure *s = gst_structure_new_empty ("unused");
+  guint opened;
+  guint closed;
+  GstStructure *s = gst_structure_new_empty ("peer-connection-stats");
 
-  /* FIXME: datachannel */
-  gst_structure_set (s, "data-channels-opened", G_TYPE_UINT, 0,
-      "data-channels-closed", G_TYPE_UINT, 0, "data-channels-requested",
+  gst_webrtc_bin_get_peer_connection_stats (webrtc, &opened, &closed);
+
+  gst_structure_set (s, "data-channels-opened", G_TYPE_UINT, opened,
+      "data-channels-closed", G_TYPE_UINT, closed, "data-channels-requested",
       G_TYPE_UINT, 0, "data-channels-accepted", G_TYPE_UINT, 0, NULL);
 
   return s;
@@ -581,9 +584,9 @@ _get_stats_from_ice_candidates (GstWebRTCBin * webrtc,
       can->stream_id, can->ipaddr, can->port);
   stats = gst_structure_new_empty (id);
 
-  if (strcmp (candidate_tag, "local")) {
+  if (g_str_equal (candidate_tag, "local")) {
     type = GST_WEBRTC_STATS_LOCAL_CANDIDATE;
-  } else if (strcmp (candidate_tag, "remote")) {
+  } else if (g_str_equal (candidate_tag, "remote")) {
     type = GST_WEBRTC_STATS_REMOTE_CANDIDATE;
   } else {
     GST_WARNING_OBJECT (webrtc, "Invalid ice candidate tag: %s", candidate_tag);

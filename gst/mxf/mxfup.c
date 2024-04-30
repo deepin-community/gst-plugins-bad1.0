@@ -52,30 +52,30 @@ static const struct
   const gchar *caps_string;
 } _rgba_mapping_table[] = {
   {
-    "RGB", 3, {
-  'R', 8, 'G', 8, 'B', 8}, GST_VIDEO_CAPS_MAKE ("RGB")}, {
-    "BGR", 3, {
-  'B', 8, 'G', 8, 'R', 8}, GST_VIDEO_CAPS_MAKE ("BGR")}, {
-    "v308", 3, {
-  'Y', 8, 'U', 8, 'V', 8}, GST_VIDEO_CAPS_MAKE ("v308")}, {
-    "xRGB", 4, {
-  'F', 8, 'R', 8, 'G', 8, 'B', 8}, GST_VIDEO_CAPS_MAKE ("xRGB")}, {
-    "RGBx", 4, {
-  'R', 8, 'G', 8, 'B', 8, 'F', 8}, GST_VIDEO_CAPS_MAKE ("RGBx")}, {
-    "xBGR", 4, {
-  'F', 8, 'B', 8, 'G', 8, 'R', 8}, GST_VIDEO_CAPS_MAKE ("xBGR")}, {
-    "BGRx", 4, {
-  'B', 8, 'G', 8, 'R', 8, 'F', 8}, GST_VIDEO_CAPS_MAKE ("BGRx")}, {
-    "RGBA", 4, {
-  'R', 8, 'G', 8, 'B', 8, 'A', 8}, GST_VIDEO_CAPS_MAKE ("RGBA")}, {
-    "ARGB", 4, {
-  'A', 8, 'R', 8, 'G', 8, 'B', 8}, GST_VIDEO_CAPS_MAKE ("RGBA")}, {
-    "BGRA", 4, {
-  'B', 8, 'G', 8, 'R', 8, 'A', 8}, GST_VIDEO_CAPS_MAKE ("BGRA")}, {
-    "ABGR", 4, {
-  'A', 8, 'B', 8, 'G', 8, 'R', 8}, GST_VIDEO_CAPS_MAKE ("ABGR")}, {
-    "AYUV", 4, {
-  'A', 8, 'Y', 8, 'U', 8, 'V', 8}, GST_VIDEO_CAPS_MAKE ("AYUV")}
+        "RGB", 3, {
+          'R', 8, 'G', 8, 'B', 8}, GST_VIDEO_CAPS_MAKE ("RGB")}, {
+        "BGR", 3, {
+          'B', 8, 'G', 8, 'R', 8}, GST_VIDEO_CAPS_MAKE ("BGR")}, {
+        "v308", 3, {
+          'Y', 8, 'U', 8, 'V', 8}, GST_VIDEO_CAPS_MAKE ("v308")}, {
+        "xRGB", 4, {
+          'F', 8, 'R', 8, 'G', 8, 'B', 8}, GST_VIDEO_CAPS_MAKE ("xRGB")}, {
+        "RGBx", 4, {
+          'R', 8, 'G', 8, 'B', 8, 'F', 8}, GST_VIDEO_CAPS_MAKE ("RGBx")}, {
+        "xBGR", 4, {
+          'F', 8, 'B', 8, 'G', 8, 'R', 8}, GST_VIDEO_CAPS_MAKE ("xBGR")}, {
+        "BGRx", 4, {
+          'B', 8, 'G', 8, 'R', 8, 'F', 8}, GST_VIDEO_CAPS_MAKE ("BGRx")}, {
+        "RGBA", 4, {
+          'R', 8, 'G', 8, 'B', 8, 'A', 8}, GST_VIDEO_CAPS_MAKE ("RGBA")}, {
+        "ARGB", 4, {
+          'A', 8, 'R', 8, 'G', 8, 'B', 8}, GST_VIDEO_CAPS_MAKE ("RGBA")}, {
+        "BGRA", 4, {
+          'B', 8, 'G', 8, 'R', 8, 'A', 8}, GST_VIDEO_CAPS_MAKE ("BGRA")}, {
+        "ABGR", 4, {
+          'A', 8, 'B', 8, 'G', 8, 'R', 8}, GST_VIDEO_CAPS_MAKE ("ABGR")}, {
+        "AYUV", 4, {
+          'A', 8, 'Y', 8, 'U', 8, 'V', 8}, GST_VIDEO_CAPS_MAKE ("AYUV")}
 };
 
 static const struct
@@ -88,8 +88,9 @@ static const struct
   const gchar *caps_string;
 } _cdci_mapping_table[] = {
   {
-  "YUY2", 2, 1, 0, TRUE, GST_VIDEO_CAPS_MAKE ("YUY2")}, {
-"UYVY", 2, 1, 0, FALSE, GST_VIDEO_CAPS_MAKE ("UYVY")},};
+      "YUY2", 2, 1, 0, TRUE, GST_VIDEO_CAPS_MAKE ("YUY2")}, {
+      "UYVY", 2, 1, 0, FALSE, GST_VIDEO_CAPS_MAKE ("UYVY")},
+};
 
 typedef struct
 {
@@ -101,30 +102,13 @@ typedef struct
 } MXFUPMappingData;
 
 static gboolean
-mxf_is_up_essence_track (const MXFMetadataTimelineTrack * track)
+mxf_is_up_essence_track (const MXFMetadataFileDescriptor * d)
 {
-  guint i;
+  const MXFUL *key = &d->essence_container;
 
-  g_return_val_if_fail (track != NULL, FALSE);
-
-  if (track->parent.descriptor == NULL)
-    return FALSE;
-
-  for (i = 0; i < track->parent.n_descriptor; i++) {
-    MXFMetadataFileDescriptor *d = track->parent.descriptor[i];
-    MXFUL *key;
-
-    if (!d)
-      continue;
-
-    key = &d->essence_container;
-    /* SMPTE 384M 8 */
-    if (mxf_is_generic_container_essence_container_label (key) &&
-        key->u[12] == 0x02 && key->u[13] == 0x05 && key->u[15] <= 0x03)
-      return TRUE;
-  }
-
-  return FALSE;
+  /* SMPTE 384M 8 */
+  return (mxf_is_generic_container_essence_container_label (key) &&
+      key->u[12] == 0x02 && key->u[13] == 0x05 && key->u[15] <= 0x03);
 }
 
 static GstFlowReturn
@@ -134,6 +118,8 @@ mxf_up_handle_essence_element (const MXFUL * key, GstBuffer * buffer,
     gpointer mapping_data, GstBuffer ** outbuf)
 {
   MXFUPMappingData *data = mapping_data;
+  gsize expected_in_stride = 0, out_stride = 0;
+  gsize expected_in_size = 0, out_size = 0;
 
   /* SMPTE 384M 7.1 */
   if (key->u[12] != 0x15 || (key->u[14] != 0x01 && key->u[14] != 0x02
@@ -162,22 +148,25 @@ mxf_up_handle_essence_element (const MXFUL * key, GstBuffer * buffer,
     }
   }
 
-  if (gst_buffer_get_size (buffer) != data->bpp * data->width * data->height) {
+  // Checked for overflows when parsing the descriptor
+  expected_in_stride = data->bpp * data->width;
+  out_stride = GST_ROUND_UP_4 (expected_in_stride);
+  expected_in_size = expected_in_stride * data->height;
+  out_size = out_stride * data->height;
+
+  if (gst_buffer_get_size (buffer) != expected_in_size) {
     GST_ERROR ("Invalid buffer size");
     gst_buffer_unref (buffer);
     return GST_FLOW_ERROR;
   }
 
-  if (data->bpp != 4
-      || GST_ROUND_UP_4 (data->width * data->bpp) != data->width * data->bpp) {
+  if (data->bpp != 4 || out_stride != expected_in_stride) {
     guint y;
     GstBuffer *ret;
     GstMapInfo inmap, outmap;
     guint8 *indata, *outdata;
 
-    ret =
-        gst_buffer_new_and_alloc (GST_ROUND_UP_4 (data->width * data->bpp) *
-        data->height);
+    ret = gst_buffer_new_and_alloc (out_size);
     gst_buffer_map (buffer, &inmap, GST_MAP_READ);
     gst_buffer_map (ret, &outmap, GST_MAP_WRITE);
     indata = inmap.data;
@@ -185,8 +174,8 @@ mxf_up_handle_essence_element (const MXFUL * key, GstBuffer * buffer,
 
     for (y = 0; y < data->height; y++) {
       memcpy (outdata, indata, data->width * data->bpp);
-      outdata += GST_ROUND_UP_4 (data->width * data->bpp);
-      indata += data->width * data->bpp;
+      outdata += out_stride;
+      indata += expected_in_stride;
     }
 
     gst_buffer_unmap (buffer, &inmap);
@@ -392,6 +381,36 @@ mxf_up_create_caps (MXFMetadataTimelineTrack * track, GstTagList ** tags,
         mapping_data);
   } else {
     return NULL;
+  }
+
+  if (caps) {
+    MXFUPMappingData *data = *mapping_data;
+    gsize expected_in_stride = 0, out_stride = 0;
+    gsize expected_in_size = 0, out_size = 0;
+
+    // Do some checking of the parameters to see if they're valid and
+    // we can actually work with them.
+    if (data->image_start_offset > data->image_end_offset) {
+      GST_WARNING ("Invalid image start/end offset");
+      g_free (data);
+      *mapping_data = NULL;
+      gst_clear_caps (&caps);
+
+      return NULL;
+    }
+
+    if (!g_size_checked_mul (&expected_in_stride, data->bpp, data->width) ||
+        (out_stride = GST_ROUND_UP_4 (expected_in_stride)) < expected_in_stride
+        || !g_size_checked_mul (&expected_in_size, expected_in_stride,
+            data->height)
+        || !g_size_checked_mul (&out_size, out_stride, data->height)) {
+      GST_ERROR ("Invalid resolution or bit depth");
+      g_free (data);
+      *mapping_data = NULL;
+      gst_clear_caps (&caps);
+
+      return NULL;
+    }
   }
 
   return caps;

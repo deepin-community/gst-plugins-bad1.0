@@ -165,37 +165,6 @@ struct choose_data
   GstVulkanQueue *queue;
 };
 
-static gboolean
-_choose_queue (GstVulkanDevice * device, GstVulkanQueue * queue,
-    struct choose_data *data)
-{
-  guint flags =
-      device->physical_device->queue_family_props[queue->family].queueFlags;
-
-  if ((flags & VK_QUEUE_GRAPHICS_BIT) != 0) {
-    if (data->queue)
-      gst_object_unref (data->queue);
-    data->queue = gst_object_ref (queue);
-    return FALSE;
-  }
-
-  return TRUE;
-}
-
-static GstVulkanQueue *
-_find_graphics_queue (GstVulkanVideoFilter * filter)
-{
-  struct choose_data data;
-
-  data.filter = filter;
-  data.queue = NULL;
-
-  gst_vulkan_device_foreach_queue (filter->device,
-      (GstVulkanDeviceForEachQueueFunc) _choose_queue, &data);
-
-  return data.queue;
-}
-
 static GstCaps *
 gst_vulkan_video_filter_transform_caps (GstBaseTransform * bt,
     GstPadDirection direction, GstCaps * caps, GstCaps * filter)
@@ -278,9 +247,11 @@ gst_vulkan_video_filter_decide_allocation (GstBaseTransform * bt,
   config = gst_buffer_pool_get_config (pool);
 
   gst_buffer_pool_config_set_params (config, caps, size, min, max);
-  gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
 
-  gst_buffer_pool_set_config (pool, config);
+  if (!gst_buffer_pool_set_config (pool, config)) {
+    gst_object_unref (pool);
+    return FALSE;
+  }
 
   if (update_pool)
     gst_query_set_nth_allocation_pool (query, 0, pool, size, min, max);
@@ -319,7 +290,8 @@ gst_vulkan_video_filter_start (GstBaseTransform * bt)
   if (!gst_vulkan_queue_run_context_query (GST_ELEMENT (render),
           &render->queue)) {
     GST_DEBUG_OBJECT (render, "No queue retrieved from peer elements");
-    render->queue = _find_graphics_queue (render);
+    render->queue =
+        gst_vulkan_device_select_queue (render->device, VK_QUEUE_GRAPHICS_BIT);
   }
   if (!render->queue)
     return FALSE;

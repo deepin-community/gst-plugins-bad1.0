@@ -73,8 +73,6 @@
 
 G_BEGIN_DECLS
 
-#define TSMUX_MAX_ES_INFO_LENGTH ((1 << 12) - 1)
-
 #define TSMUX_PID_AUTO ((guint16)-1)
 
 #define TSMUX_START_PROGRAM_ID 0x0001
@@ -86,7 +84,7 @@ typedef struct TsMux TsMux;
 
 typedef gboolean (*TsMuxWriteFunc) (GstBuffer * buf, void *user_data, gint64 new_pcr);
 typedef void (*TsMuxAllocFunc) (GstBuffer ** buf, void *user_data);
-typedef TsMuxStream * (*TsMuxNewStreamFunc) (guint16 new_pid, guint stream_type, void *user_data);
+typedef TsMuxStream * (*TsMuxNewStreamFunc) (guint16 new_pid, guint stream_type, guint stream_number, gpointer user_data);
 
 struct TsMuxSection {
   TsMuxPacketInfo pi;
@@ -99,6 +97,8 @@ struct TsMuxProgram {
   gboolean wrote_si;
 
   TsMuxSection pmt;
+  TsMuxPacketInfo pi;
+
   /* PMT version */
   guint8   pmt_version;
   /* trigger for writing PMT */
@@ -109,6 +109,7 @@ struct TsMuxProgram {
 
   /* Next PMT position, 27 MHz */
   gint64   next_pmt_pcr;
+  gint64   next_pcr;
 
   /* program ID for the PAT */
   guint16 pgm_number;
@@ -125,6 +126,7 @@ struct TsMuxProgram {
 
   /* stream which carries the PCR */
   TsMuxStream *pcr_stream;
+  guint16 pcr_pid;
 
   /* programs TsMuxStream's */
   GPtrArray *streams;
@@ -179,9 +181,6 @@ struct TsMux {
   TsMuxNewStreamFunc new_stream_func;
   void *new_stream_data;
 
-  /* scratch space for writing ES_info descriptors */
-  guint8 es_info_buf[TSMUX_MAX_ES_INFO_LENGTH];
-
   guint64 bitrate;
   guint64 n_bytes;
 
@@ -228,12 +227,13 @@ gboolean        tsmux_add_mpegts_si_section     (TsMux * mux, GstMpegtsSection *
 gboolean        tsmux_send_section              (TsMux *mux, GstMpegtsSection *section);
 
 /* stream management */
-TsMuxStream *	tsmux_create_stream 		(TsMux *mux, guint stream_type, guint16 pid, gchar *language);
+TsMuxStream *	tsmux_create_stream 		(TsMux *mux, guint stream_type, guint stream_number, guint16 pid, gchar *language, guint bitrate, guint max_bitrate);
 TsMuxStream *	tsmux_find_stream 		(TsMux *mux, guint16 pid);
 gboolean        tsmux_remove_stream             (TsMux *mux, guint16 pid, TsMuxProgram *program);
 
 void 		tsmux_program_add_stream 	(TsMuxProgram *program, TsMuxStream *stream);
 void 		tsmux_program_set_pcr_stream 	(TsMuxProgram *program, TsMuxStream *stream);
+void           tsmux_program_set_pcr_pid       (TsMuxProgram *program, guint16 pid);
 void    tsmux_set_pcr_interval (TsMux * mux, guint freq);
 
 /* writing stuff */

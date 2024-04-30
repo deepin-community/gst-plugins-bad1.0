@@ -49,21 +49,25 @@ GST_VA_API
 void                  gst_va_dmabuf_allocator_flush       (GstAllocator * allocator);
 GST_VA_API
 gboolean              gst_va_dmabuf_allocator_set_format  (GstAllocator * allocator,
-                                                           GstVideoInfo * info,
+                                                           GstVideoInfoDmaDrm * info,
                                                            guint usage_hint);
 GST_VA_API
 gboolean              gst_va_dmabuf_allocator_get_format  (GstAllocator * allocator,
-                                                           GstVideoInfo * info,
+                                                           GstVideoInfoDmaDrm * info,
                                                            guint * usage_hint);
 
 GST_VA_API
 gboolean              gst_va_dmabuf_memories_setup        (GstVaDisplay * display,
-                                                           GstVideoInfo * info,
-                                                           guint n_planes,
+                                                           GstVideoInfoDmaDrm * drm_info,
                                                            GstMemory * mem[GST_VIDEO_MAX_PLANES],
-                                                           uintptr_t * fds,
+                                                           uintptr_t fds[GST_VIDEO_MAX_PLANES],
                                                            gsize offset[GST_VIDEO_MAX_PLANES],
                                                            guint usage_hint);
+
+GST_VA_API
+guint64               gst_va_dmabuf_get_modifier_for_format (GstVaDisplay * display,
+                                                             GstVideoFormat format,
+                                                             guint usage_hint);
 
 #define GST_TYPE_VA_ALLOCATOR (gst_va_allocator_get_type())
 #define GST_VA_ALLOCATOR(obj)            (G_TYPE_CHECK_INSTANCE_CAST((obj), GST_TYPE_VA_ALLOCATOR, GstVaAllocator))
@@ -109,12 +113,12 @@ GST_VA_API
 gboolean              gst_va_allocator_set_format         (GstAllocator * allocator,
                                                            GstVideoInfo * info,
                                                            guint usage_hint,
-                                                           GstVaFeature use_derived);
+                                                           GstVaFeature feat_use_derived);
 GST_VA_API
 gboolean              gst_va_allocator_get_format         (GstAllocator * allocator,
                                                            GstVideoInfo * info,
                                                            guint * usage_hint,
-                                                           GstVaFeature * use_derived);
+                                                           gboolean * use_derived);
 GST_VA_API
 void                  gst_va_allocator_set_hacks          (GstAllocator * allocator,
                                                            guint32 hacks);
