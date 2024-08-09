@@ -6,9 +6,9 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: gst-plugins-bad-1.24.2\n"
+"Project-Id-Version: gst-plugins-bad-1.24.6\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2024-04-09 21:50+0100\n"
+"POT-Creation-Date: 2024-07-29 16:42+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -89,7 +89,7 @@ msgid "Couldn't download fragments"
 msgstr ""
 
 #: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:4102
-#: gst/mpegtsdemux/mpegtsbase.c:1774
+#: gst/mpegtsdemux/mpegtsbase.c:1777
 msgid "Internal data stream error."
 msgstr ""
 

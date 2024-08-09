@@ -543,6 +543,17 @@ _modifier_found (guint64 modifier, guint64 * modifiers, guint num_modifiers)
   return FALSE;
 }
 
+static void
+_close_fds (VADRMPRIMESurfaceDescriptor * desc)
+{
+#ifndef G_OS_WIN32
+  for (guint32 i = 0; i < desc->num_objects; i++) {
+    gint fd = desc->objects[i].fd;
+    close (fd);
+  }
+#endif
+}
+
 static gboolean
 _va_create_surface_and_export_to_dmabuf (GstVaDisplay * display,
     guint usage_hint, guint64 * modifiers, guint num_modifiers,
@@ -628,6 +639,8 @@ _va_create_surface_and_export_to_dmabuf (GstVaDisplay * display,
 
 failed:
   {
+    /* Free DMAbufs on failure */
+    _close_fds (&desc);
     va_destroy_surfaces (display, &surface, 1);
     return FALSE;
   }
@@ -660,6 +673,8 @@ gst_va_dmabuf_get_modifier_for_format (GstVaDisplay * display,
           NULL, 0, &info, &surface, &desc))
     return DRM_FORMAT_MOD_INVALID;
 
+  /* Close the fds we won't be using */
+  _close_fds (&desc);
   va_destroy_surfaces (display, &surface, 1);
 
   return desc.objects[0].drm_format_modifier;
@@ -1327,7 +1342,7 @@ static inline gboolean
 _is_old_mesa (GstVaAllocator * va_allocator)
 {
   return GST_VA_DISPLAY_IS_IMPLEMENTATION (va_allocator->display, MESA_GALLIUM)
-      && !gst_va_display_check_version (va_allocator->display, 23, 2);
+      && !gst_va_display_check_version (va_allocator->display, 23, 3);
 }
 #endif /* G_OS_WIN32 */
 
@@ -1376,13 +1391,15 @@ _update_image_info (GstVaAllocator * va_allocator,
   }
   va_allocator->use_derived = FALSE;
 #else
-  /* XXX: Derived in Mesa <23.3 can't use derived images for P010 format
+  /* XXX: Derived in radeonsi Mesa <23.3 can't use derived images for several
+   * cases
    * https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/24381
+   * https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/26174
    */
-  if (va_allocator->img_format == GST_VIDEO_FORMAT_P010_10LE
-      && _is_old_mesa (va_allocator)) {
+  if (_is_old_mesa (va_allocator)) {
     if (feat_use_derived != GST_VA_FEATURE_DISABLED) {
-      GST_INFO_OBJECT (va_allocator, "Disable image derive on old Mesa.");
+      GST_INFO_OBJECT (va_allocator,
+          "Disable image derive on old Mesa (< 23.3).");
       feat_use_derived = GST_VA_FEATURE_DISABLED;
     }
     va_allocator->use_derived = FALSE;

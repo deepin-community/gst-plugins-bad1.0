@@ -88,6 +88,8 @@ static gboolean gst_vtdec_flush (GstVideoDecoder * decoder);
 static GstFlowReturn gst_vtdec_finish (GstVideoDecoder * decoder);
 static gboolean gst_vtdec_sink_event (GstVideoDecoder * decoder,
     GstEvent * event);
+static GstStateChangeReturn gst_vtdec_change_state (GstElement * element,
+    GstStateChange transition);
 static GstFlowReturn gst_vtdec_handle_frame (GstVideoDecoder * decoder,
     GstVideoCodecFrame * frame);
 
@@ -188,6 +190,7 @@ gst_vtdec_class_init (GstVtdecClass * klass)
 
   gobject_class->finalize = gst_vtdec_finalize;
   element_class->set_context = gst_vtdec_set_context;
+  element_class->change_state = gst_vtdec_change_state;
   video_decoder_class->start = GST_DEBUG_FUNCPTR (gst_vtdec_start);
   video_decoder_class->stop = GST_DEBUG_FUNCPTR (gst_vtdec_stop);
   video_decoder_class->negotiate = GST_DEBUG_FUNCPTR (gst_vtdec_negotiate);
@@ -254,6 +257,8 @@ gst_vtdec_stop (GstVideoDecoder * decoder)
   GstVideoCodecFrame *frame;
   GstVtdec *vtdec = GST_VTDEC (decoder);
 
+  GST_DEBUG_OBJECT (vtdec, "stop");
+
   gst_vtdec_drain_decoder (GST_VIDEO_DECODER_CAST (vtdec), TRUE);
   vtdec->downstream_ret = GST_FLOW_FLUSHING;
 
@@ -288,8 +293,6 @@ gst_vtdec_stop (GstVideoDecoder * decoder)
   gst_clear_object (&vtdec->device);
   gst_clear_object (&vtdec->instance);
 #endif
-
-  GST_DEBUG_OBJECT (vtdec, "stop");
 
   return TRUE;
 }
@@ -329,10 +332,10 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
       GST_VIDEO_DECODER_STREAM_LOCK (vtdec);
 
       if (frame->flags & VTDEC_FRAME_FLAG_ERROR) {
-        GST_LOG_OBJECT (vtdec, "ignoring frame %d because of error flag",
-            frame->system_frame_number);
+        GST_VIDEO_DECODER_ERROR (vtdec, 1, STREAM, DECODE,
+            ("Got frame %d with an error flag", frame->system_frame_number),
+            (NULL), ret);
         gst_video_decoder_release_frame (decoder, frame);
-        ret = GST_FLOW_ERROR;
       } else if (is_flushing || (frame->flags & VTDEC_FRAME_FLAG_SKIP)) {
         GST_LOG_OBJECT (vtdec, "flushing frame %d", frame->system_frame_number);
         gst_video_decoder_release_frame (decoder, frame);
@@ -740,7 +743,7 @@ gst_vtdec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
     gst_video_codec_state_unref (vtdec->input_state);
   vtdec->input_state = gst_video_codec_state_ref (state);
 
-  return gst_video_decoder_negotiate (decoder);
+  return gst_vtdec_negotiate (decoder);
 }
 
 static gboolean
@@ -803,6 +806,20 @@ gst_vtdec_sink_event (GstVideoDecoder * decoder, GstEvent * event)
   }
 
   return ret;
+}
+
+static GstStateChangeReturn
+gst_vtdec_change_state (GstElement * element, GstStateChange transition)
+{
+  GstVtdec *self = GST_VTDEC (element);
+
+  if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
+    GST_DEBUG_OBJECT (self, "pausing output loop on PAUSED->READY");
+    gst_vtdec_pause_output_loop (self);
+  }
+
+  return GST_ELEMENT_CLASS (gst_vtdec_parent_class)->change_state (element,
+      transition);
 }
 
 static GstFlowReturn
@@ -1198,8 +1215,30 @@ gst_vtdec_session_output_callback (void *decompression_output_ref_con,
   frame->output_buffer = NULL;
 
   if (status != noErr) {
-    GST_ERROR_OBJECT (vtdec, "Error decoding frame %d", (int) status);
-    frame->flags |= VTDEC_FRAME_FLAG_ERROR;
+    switch (status) {
+      case kVTVideoDecoderReferenceMissingErr:
+        /* ReferenceMissingErr is not critical, when it occurs the frame
+         * usually has the kVTDecodeInfo_FrameDropped flag set. Log only for debugging purposes. */
+        GST_DEBUG_OBJECT (vtdec, "ReferenceMissingErr when decoding frame %d",
+            frame->decode_frame_number);
+        break;
+#ifndef HAVE_IOS
+      case codecBadDataErr:    /* SW decoder on macOS uses a different code from the hardware one... */
+#endif
+      case kVTVideoDecoderBadDataErr:
+        /* BadDataErr also shouldn't cause an error to be displayed immediately.
+         * Set the error flag so the output loop will log a warning
+         * and only error out if this happens too many times. */
+        GST_DEBUG_OBJECT (vtdec, "BadDataErr when decoding frame %d",
+            frame->decode_frame_number);
+        frame->flags |= VTDEC_FRAME_FLAG_ERROR;
+        break;
+      default:
+        GST_ERROR_OBJECT (vtdec, "Error decoding frame %d: %d",
+            frame->decode_frame_number, (int) status);
+        frame->flags |= VTDEC_FRAME_FLAG_ERROR;
+        break;
+    }
   }
 
   if (image_buffer) {
@@ -1221,8 +1260,8 @@ gst_vtdec_session_output_callback (void *decompression_output_ref_con,
     }
   } else {
     if (info_flags & kVTDecodeInfo_FrameDropped) {
-      GST_DEBUG_OBJECT (vtdec, "Frame dropped by video toolbox %p %d",
-          frame, frame->decode_frame_number);
+      GST_DEBUG_OBJECT (vtdec, "Frame %d dropped by VideoToolbox (%p)",
+          frame->decode_frame_number, frame);
       frame->flags |= VTDEC_FRAME_FLAG_DROP;
     } else {
       GST_DEBUG_OBJECT (vtdec, "Decoded frame is NULL");

@@ -835,15 +835,13 @@ gst_av1_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
 
   av1enc->aom_cfg.g_w = GST_VIDEO_INFO_WIDTH (info);
   av1enc->aom_cfg.g_h = GST_VIDEO_INFO_HEIGHT (info);
-  /* Recommended method is to set the timebase to that of the parent
-   * container or multimedia framework (ex: 1/1000 for ms, as in FLV) */
-  if (GST_VIDEO_INFO_FPS_D (info) != 0 && GST_VIDEO_INFO_FPS_N (info) != 0) {
-    av1enc->aom_cfg.g_timebase.num = GST_VIDEO_INFO_FPS_D (info);
-    av1enc->aom_cfg.g_timebase.den = GST_VIDEO_INFO_FPS_N (info);
-  } else {
-    av1enc->aom_cfg.g_timebase.num = DEFAULT_TIMEBASE_N;
-    av1enc->aom_cfg.g_timebase.den = DEFAULT_TIMEBASE_D;
-  }
+  /* Zero framerate and max-framerate but still need to setup the timebase to avoid
+   * a divide by zero error. Presuming the lowest common denominator will be RTP -
+   * VP8 payload draft states clock rate of 90000 which should work for anyone where
+   * FPS < 90000 (shouldn't be too many cases where it's higher) though wouldn't be optimal. RTP specification
+   * http://tools.ietf.org/html/draft-ietf-payload-vp8-01 section 6.3.1 */
+  av1enc->aom_cfg.g_timebase.num = 1;
+  av1enc->aom_cfg.g_timebase.den = 90000;
   av1enc->aom_cfg.g_error_resilient = AOM_ERROR_RESILIENT_DEFAULT;
 
   if (av1enc->threads == DEFAULT_THREADS)
@@ -874,6 +872,8 @@ gst_av1_enc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
     return FALSE;
   }
   av1enc->encoder_inited = TRUE;
+  av1enc->last_pts = GST_CLOCK_TIME_NONE;
+  av1enc->last_input_duration = GST_CLOCK_TIME_NONE;
 
   GST_AV1_ENC_APPLY_CODEC_CONTROL (av1enc, AOME_SET_CPUUSED, av1enc->cpu_used);
 #ifdef AOM_CTRL_AV1E_SET_ROW_MT
@@ -972,30 +972,31 @@ gst_av1_enc_handle_frame (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
       gst_segment_to_running_time (&encoder->input_segment,
       GST_FORMAT_TIME, frame->pts);
 
-  if (GST_CLOCK_TIME_IS_VALID (av1enc->next_pts)
-      && pts_rt <= av1enc->next_pts) {
+  if (GST_CLOCK_TIME_IS_VALID (av1enc->last_pts)
+      && pts_rt <= av1enc->last_pts) {
     GST_WARNING_OBJECT (av1enc,
         "decreasing pts %" GST_TIME_FORMAT " previous buffer was %"
         GST_TIME_FORMAT " enforce increasing pts", GST_TIME_ARGS (pts_rt),
-        GST_TIME_ARGS (av1enc->next_pts));
-    pts_rt = av1enc->next_pts + 1;
+        GST_TIME_ARGS (av1enc->last_pts));
+    pts_rt = av1enc->last_pts + 1;
   }
 
-  av1enc->next_pts = pts_rt;
+  av1enc->last_pts = pts_rt;
 
   // Convert the pts from nanoseconds to timebase units
   scaled_pts =
-      gst_util_uint64_scale_int (pts_rt,
+      gst_util_uint64_scale (pts_rt,
       av1enc->aom_cfg.g_timebase.den,
       av1enc->aom_cfg.g_timebase.num * (GstClockTime) GST_SECOND);
 
   if (frame->duration != GST_CLOCK_TIME_NONE) {
     duration =
-        gst_util_uint64_scale (frame->duration, av1enc->aom_cfg.g_timebase.den,
+        gst_util_uint64_scale_round (frame->duration,
+        av1enc->aom_cfg.g_timebase.den,
         av1enc->aom_cfg.g_timebase.num * (GstClockTime) GST_SECOND);
 
     if (duration > 0) {
-      av1enc->next_pts += frame->duration;
+      av1enc->last_input_duration = frame->duration;
     } else {
       /* We force the path ignoring the duration if we end up with a zero
        * value for duration after scaling (e.g. duration value too small) */
@@ -1003,11 +1004,15 @@ gst_av1_enc_handle_frame (GstVideoEncoder * encoder, GstVideoCodecFrame * frame)
           "Ignoring too small frame duration %" GST_TIME_FORMAT,
           GST_TIME_ARGS (frame->duration));
       duration = 1;
-      av1enc->next_pts += 1;
     }
   } else {
     duration = 1;
-    av1enc->next_pts += 1;
+  }
+
+  if (GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME (frame)) {
+    GST_DEBUG_OBJECT (av1enc, "Forcing keyframe for frame %u",
+        frame->system_frame_number);
+    flags |= AOM_EFLAG_FORCE_KF;
   }
 
   if (aom_codec_encode (&av1enc->encoder, &raw, scaled_pts, duration, flags)
@@ -1042,8 +1047,11 @@ gst_av1_enc_finish (GstVideoEncoder * encoder)
     GST_DEBUG_OBJECT (encoder, "Calling finish");
     g_mutex_lock (&av1enc->encoder_lock);
 
-    if (GST_CLOCK_TIME_IS_VALID (av1enc->next_pts))
-      pts = av1enc->next_pts;
+    if (GST_CLOCK_TIME_IS_VALID (av1enc->last_pts))
+      pts = av1enc->last_pts;
+    if (GST_CLOCK_TIME_IS_VALID (av1enc->last_input_duration))
+      pts += av1enc->last_input_duration;
+
     scaled_pts =
         gst_util_uint64_scale (pts,
         av1enc->aom_cfg.g_timebase.den,
@@ -1075,7 +1083,8 @@ gst_av1_enc_destroy_encoder (GstAV1Enc * av1enc)
     av1enc->encoder_inited = FALSE;
   }
 
-  av1enc->next_pts = GST_CLOCK_TIME_NONE;
+  av1enc->last_pts = GST_CLOCK_TIME_NONE;
+  av1enc->last_input_duration = GST_CLOCK_TIME_NONE;
 
   g_mutex_unlock (&av1enc->encoder_lock);
 }

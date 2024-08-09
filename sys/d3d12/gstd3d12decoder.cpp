@@ -125,7 +125,6 @@ public:
     subresources_[id] = 0;
     heaps_[id] = nullptr;
 
-
     cond_.notify_one ();
   }
 
@@ -137,24 +136,14 @@ public:
     frames.ppHeaps = heaps_.data ();
   }
 
-  guint8 GetSize ()
+  void Lock ()
   {
-    return size_;
+    lock_.lock ();
   }
 
-  ID3D12Resource ** GetTextures ()
+  void Unlock ()
   {
-    return &textures_[0];
-  }
-
-  UINT * GetSubresources ()
-  {
-    return &subresources_[0];
-  }
-
-  ID3D12VideoDecoderHeap ** GetHeaps ()
-  {
-    return &heaps_[0];
+    lock_.unlock ();
   }
 
 private:
@@ -898,6 +887,34 @@ gst_d3d12_decoder_new_picture (GstD3D12Decoder * decoder,
   return GST_FLOW_OK;
 }
 
+GstFlowReturn
+gst_d3d12_decoder_new_picture_with_size (GstD3D12Decoder * decoder,
+    GstVideoDecoder * videodec, GstCodecPicture * picture, guint width,
+    guint height)
+{
+  g_return_val_if_fail (GST_IS_D3D12_DECODER (decoder), GST_FLOW_ERROR);
+  g_return_val_if_fail (GST_IS_VIDEO_DECODER (videodec), GST_FLOW_ERROR);
+  g_return_val_if_fail (picture != nullptr, GST_FLOW_ERROR);
+
+  auto priv = decoder->priv;
+  if (!priv->session) {
+    GST_ERROR_OBJECT (decoder, "No session configured");
+    return GST_FLOW_ERROR;
+  }
+
+  if (priv->session->coded_width >= width &&
+      priv->session->coded_height >= height) {
+    return gst_d3d12_decoder_new_picture (decoder, videodec, picture);
+  }
+
+  /* FIXME: D3D12_VIDEO_DECODE_CONFIGURATION_FLAG_ALLOW_RESOLUTION_CHANGE_ON_NON_KEY_FRAME
+   * supported GPU can decode stream with mixed decoder heap */
+  GST_ERROR_OBJECT (decoder,
+      "Non-keyframe resolution change with larger size is not supported");
+
+  return GST_FLOW_ERROR;
+}
+
 static inline GstD3D12DecoderPicture *
 get_decoder_picture (GstCodecPicture * picture)
 {
@@ -1237,6 +1254,7 @@ gst_d3d12_decoder_end_picture (GstD3D12Decoder * decoder,
   in_args.CompressedBitstream.Size = args->bitstream_size;
   in_args.pHeap = decoder_pic->heap.Get ();
 
+  priv->session->dpb->Lock ();
   priv->session->dpb->GetReferenceFrames (in_args.ReferenceFrames);
 
   priv->cmd->cl->DecodeFrame (priv->session->decoder.Get (),
@@ -1246,6 +1264,8 @@ gst_d3d12_decoder_end_picture (GstD3D12Decoder * decoder,
     priv->cmd->cl->ResourceBarrier (post_barriers.size (), &post_barriers[0]);
 
   hr = priv->cmd->cl->Close ();
+  priv->session->dpb->Unlock ();
+
   if (!gst_d3d12_result (hr, decoder->device)) {
     GST_ERROR_OBJECT (decoder, "Couldn't record decoding command");
     gst_d3d12_command_allocator_unref (gst_ca);
@@ -1268,6 +1288,11 @@ gst_d3d12_decoder_end_picture (GstD3D12Decoder * decoder,
   gst_d3d12_fence_data_pool_acquire (priv->fence_data_pool, &fence_data);
   gst_d3d12_fence_data_add_notify_mini_object (fence_data,
       gst_mini_object_ref (decoder_pic));
+  for (guint i = 0; i < ref_pics->len; i++) {
+    auto ref_pic = (GstCodecPicture *) g_ptr_array_index (ref_pics, i);
+    gst_d3d12_fence_data_add_notify_mini_object (fence_data,
+        gst_codec_picture_ref (ref_pic));
+  }
   gst_d3d12_fence_data_add_notify_mini_object (fence_data, gst_ca);
 
   gst_d3d12_command_queue_set_notify (priv->cmd->queue, priv->cmd->fence_val,
@@ -1344,6 +1369,7 @@ gst_d3d12_decoder_process_output (GstD3D12Decoder * self,
   ID3D12Resource *resource;
   UINT subresource[2];
   HRESULT hr;
+  bool attach_crop_meta = false;
 
   auto priv = self->priv;
 
@@ -1389,25 +1415,11 @@ gst_d3d12_decoder_process_output (GstD3D12Decoder * self,
     GST_MINI_OBJECT_FLAG_SET (dmem, GST_D3D12_MEMORY_TRANSFER_NEED_DOWNLOAD);
     GST_MINI_OBJECT_FLAG_UNSET (dmem, GST_D3D12_MEMORY_TRANSFER_NEED_UPLOAD);
 
-    if (priv->session->need_crop) {
-      GstVideoCropMeta *crop_meta;
-
-      buffer = gst_buffer_make_writable (buffer);
-      crop_meta = gst_buffer_get_video_crop_meta (buffer);
-      if (!crop_meta)
-        crop_meta = gst_buffer_add_video_crop_meta (buffer);
-
-      crop_meta->x = priv->session->crop_x;
-      crop_meta->y = priv->session->crop_y;
-      crop_meta->width = priv->session->info.width;
-      crop_meta->height = priv->session->info.height;
-
-      GST_TRACE_OBJECT (self, "Attatching crop meta");
-    }
+    if (priv->session->need_crop)
+      attach_crop_meta = true;
 
     frame->output_buffer = gst_buffer_ref (buffer);
   } else {
-    GstMemory *mem;
     ID3D12Resource *out_resource = nullptr;
     UINT out_subresource[2];
 
@@ -1417,17 +1429,19 @@ gst_d3d12_decoder_process_output (GstD3D12Decoder * self,
       goto error;
     }
 
-    mem = gst_buffer_peek_memory (frame->output_buffer, 0);
-    if (gst_is_d3d12_memory (mem)) {
-      dmem = GST_D3D12_MEMORY_CAST (mem);
+    auto out_mem = gst_buffer_peek_memory (frame->output_buffer, 0);
+    if (gst_is_d3d12_memory (out_mem)) {
+      auto out_dmem = GST_D3D12_MEMORY_CAST (out_mem);
       if (dmem->device == self->device) {
-        out_resource = gst_d3d12_memory_get_resource_handle (dmem);
-        gst_d3d12_memory_get_subresource_index (dmem, 0, &out_subresource[0]);
-        gst_d3d12_memory_get_subresource_index (dmem, 1, &out_subresource[1]);
+        out_resource = gst_d3d12_memory_get_resource_handle (out_dmem);
+        gst_d3d12_memory_get_subresource_index (out_dmem, 0,
+            &out_subresource[0]);
+        gst_d3d12_memory_get_subresource_index (out_dmem, 1,
+            &out_subresource[1]);
 
-        GST_MINI_OBJECT_FLAG_SET (dmem,
+        GST_MINI_OBJECT_FLAG_SET (out_dmem,
             GST_D3D12_MEMORY_TRANSFER_NEED_DOWNLOAD);
-        GST_MINI_OBJECT_FLAG_UNSET (dmem,
+        GST_MINI_OBJECT_FLAG_UNSET (out_dmem,
             GST_D3D12_MEMORY_TRANSFER_NEED_UPLOAD);
       }
     }
@@ -1533,6 +1547,18 @@ gst_d3d12_decoder_process_output (GstD3D12Decoder * self,
 
   GST_BUFFER_FLAG_SET (frame->output_buffer, buffer_flags);
   gst_codec_picture_unref (picture);
+
+  if (attach_crop_meta) {
+    frame->output_buffer = gst_buffer_make_writable (frame->output_buffer);
+
+    auto crop_meta = gst_buffer_add_video_crop_meta (frame->output_buffer);
+    crop_meta->x = priv->session->crop_x;
+    crop_meta->y = priv->session->crop_y;
+    crop_meta->width = priv->session->info.width;
+    crop_meta->height = priv->session->info.height;
+
+    GST_TRACE_OBJECT (self, "Attatching crop meta");
+  }
 
   return gst_video_decoder_finish_frame (videodec, frame);
 
