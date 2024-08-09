@@ -2,11 +2,11 @@ GStreamer 1.24 Release Notes
 
 GStreamer 1.24.0 was originally released on 4 March 2024.
 
-The latest bug-fix release in the stable 1.24 series is 1.24.2 and was released on 9 April 2024.
+The latest bug-fix release in the stable 1.24 series is 1.24.6 and was released on 29 July 2024.
 
 See https://gstreamer.freedesktop.org/releases/1.24/ for the latest version of this document.
 
-Last updated: Tuesday 9 April 2024, 12:30 UTC (log)
+Last updated: Monday 29 July 2024, 14:30 UTC (log)
 
 ## Introduction
 
@@ -760,7 +760,7 @@ Fake video decoder
 
 -   The FFmpeg meson subproject wrap has been updated to v6.1
 
--   Note: see Known Issues section below for known issues with FFmpeg 6.0
+-   Note: see Known Issues section below for known issues with FFmpeg 6.0.0 and the latest FFmpeg 7.x release
 
 ## GStreamer RTSP server
 
@@ -1276,6 +1276,9 @@ Android
 -   There are known issues with FFmpeg version 6.0.0 due to opaque passing being broken in that version. This affects at least
     avdec_h264, but may affect other decoders as well. Versions before 6.0.0, and 6.0.1 or higher are not affected.
 
+-   gst-libav currently doesn’t build against the latest FFmpeg 7.0 release. This is being worked on and tracked in this “libav:
+    Fix compatibility with ffmpeg 7” Merge Request.
+
 ## Statistics
 
 -   4643 commits
@@ -1671,6 +1674,620 @@ List of merge requests and issues fixed in 1.24.2
 
 -   List of Merge Requests applied in 1.24.2
 -   List of Issues fixed in 1.24.2
+
+1.24.3
+
+The third 1.24 bug-fix release (1.24.3) was released on 30 April 2024.
+
+This release only contains bugfixes and it should be safe to update from 1.24.x.
+
+Highlighted bugfixes in 1.24.3
+
+-   EXIF image tag parsing security fixes
+-   Subtitle handling improvements in parsebin
+-   Fix issues with HLS streams that contain VTT subtitles
+-   Qt6 QML sink re-render and re-sizing fixes
+-   unixfd ipc plugin timestamp and segment handling fixes
+-   vah264enc, vah265enc: Do not touch the PTS of the output frame
+-   vah264dec and vapostproc fixes and improvements
+-   v4l2: multiple fixes and improvements, incl. for mediatek JPEG decoder and v4l2 loopback
+-   v4l2: fix hang after seek with some v4l2 decoders
+-   Wayland sink fixes
+-   ximagesink: fix regression on RPi/aarch64
+-   fmp4mux, mp4mux gained FLAC audio support
+-   D3D11, D3D12: reliablity improvements and memory leak fixes
+-   Media Foundation device provider fixes
+-   GTK4 paintable sink improvements including support for directly importing dmabufs with GTK 4.14
+-   WebRTC sink/source fixes and improvements
+-   AWS s3sink, s3src, s3hlssink now support path-style addressing
+-   MPEG-TS demuxer fixes
+-   Python bindings fixes
+-   various bug fixes, memory leak fixes, and other stability and reliability improvements
+
+gstreamer
+
+-   ptp: Silence Rust compiler warning about some unused trait methods
+
+gst-plugins-base
+
+-   EXIF image tag parsing security fixes
+-   glcolorconvert: remove some dead code
+-   parsebin: Ensure non-time subtitle streams get “parsed”
+-   playbin3: Handle combiner update in case of errors
+-   ximagesink: initialize mask for XISelectEvents
+
+gst-plugins-good
+
+-   adaptivedemux2: Playback hangs with VTT fragments
+-   adaptivedemux2: Avoid double usage of parsebin
+-   pulsedeviceprovider: Add compare_device_type_name function and missing lock
+-   qml6glsink: Notify that the returned QSGNode node has changes
+-   qml6glsink: video content resizes to new item size
+-   qtdemux: fix wrong full_range offset when parsing colr box
+-   soup: fix thread name
+-   v4l2: add multiplane y42b (yuv422m) support (for mediatek v4l2 jpeg decoder)
+-   v4l2: bufferpool: Drop writable check on output pool process
+-   v4l2: bufferpool: Ensure freshly created buffers are not marked as queued, fixing issues with v4l2sink on a v4l2loopback
+    device
+-   v4l2: bufferpool: queue back the buffer flagged LAST but empty, fixes hangs after seek with some decoders
+-   v4l2: silence valgrind warning
+-   vpx: Include vpx error details in errors and warnings
+
+gst-plugins-bad
+
+-   d3d11device: protect device_lock vs device_new
+-   d3d11decoder, d3d12decoder: Fix potential use after free
+-   d3d11videosink: Fix rendering on keyed mutex enabled handle
+-   d3d12decoder: Fix d3d12 resource copy
+-   d3d12encoder: Fix buffer pool leak
+-   d3d12videosink: HWND event handling related fixes
+-   d3d12vp9dec: Fix Intel GPU crash occurred when decoding VP9 SVC
+-   dvbsubenc: fixed some memory leaks and a crash
+-   GstPlay: fix read duration failure issue for some type rtsp streams which have valid duration
+-   mediafoundation: Fix device enumeration
+-   mediafoundation: Fix infinite loop in device provider
+-   tests: fix possible libscpp build failure in gst-plugins-bad
+-   tsdemux, tsparse: Fix Program equality check
+-   tsdemux: Disable smart program update
+-   unixfdsink: Take segment into account when converting timestamps
+-   va: videoformat: use video library to get DRM fourcc
+-   va: radeonsi: DRM RGB formats doesn’t look correctly mapped to VA formats
+-   vah264enc, vah265enc: Do not touch the PTS of output frame
+-   vaav1enc: Change the alignment of output to “tu”
+-   vaallocator: disable derived all together for Mesa <23.3
+-   waylandsink: free staged buffer when do gst_wl_window_finalize
+-   wlwindow: clear configure mutex and cond when finalize
+-   waylandsink: config buffer pool with query size when propose_allocation
+-   v4l2codecs: Don’t unref allocation query caps
+
+gst-plugins-ugly
+
+-   No changes
+
+GStreamer Rust plugins
+
+Fixed:
+
+-   hrtfrender: Use a bitmask instead of an int in the caps for the channel-mask
+-   rtpgccbwe: Don’t log an error when pushing a buffer list fails while stopping
+-   webrtcsink: Don’t panic in bitrate handling with unsupported encoders
+-   webrtcsink: Don’t panic if unsupported input caps are used
+-   webrtcsrc: Allow a None producer-id in request-encoded-filter signal
+
+Added:
+
+-   aws: New property to support path-style addressing
+-   fmp4mux / mp4mux: Support FLAC inside (f)MP4
+-   gtk4: Support directly importing dmabufs with GTK 4.14
+-   gtk4: Add force-aspect-ratio property similar to other video sinks
+
+gst-libav
+
+-   libav: guard some recently dropped APIs
+
+gst-rtsp-server
+
+-   No changes
+
+gstreamer-vaapi
+
+-   No changes
+
+gstreamer-sharp
+
+-   No changes
+
+gst-omx
+
+-   No changes
+
+gst-python
+
+-   Fix Python library name fetching and library searching on Windows
+-   Don’t link to python for the gi overrides module
+
+gst-editing-services
+
+-   ges-launcher: Fix for forcing container profiles
+
+gst-devtools, gst-validate + gst-integration-testsuites
+
+-   debug-viewer: Fix plugin loading machinery
+-   validate/flvdemux: Stop spamming audio/video on test
+
+gst-examples
+
+-   No changes
+
+Development build environment
+
+-   No changes
+
+Cerbero build tool and packaging changes in 1.24.3
+
+-   No changes
+
+Contributors to 1.24.3
+
+Alexander Slobodeniuk, Edward Hervey, Elliot Chen, F. Duncanh, François Laignel, Haihua Hu, He Junyan, Hou Qi, Jan Schmidt,
+Jimmy Ohn, Maksym Khomenko, Matthew Waters, Nicolas Dufresne, Nirbheek Chauhan, Philippe Normand, Philipp Zabel, Qian Hu (胡骞),
+Sanchayan Maity, Sebastian Dröge, Seungha Yang, Simonas Kazlauskas, Taruntej Kanakamalla, Tim Blechmann, Tim-Philipp Müller, U.
+Artie Eoff, Víctor Manuel Jáquez Leal, William Wedler, Xavier Claessens,
+
+… and many others who have contributed bug reports, translations, sent suggestions or helped testing. Thank you all!
+
+List of merge requests and issues fixed in 1.24.3
+
+-   List of Merge Requests applied in 1.24.3
+-   List of Issues fixed in 1.24.3
+
+1.24.4
+
+The fourth 1.24 bug-fix release (1.24.4) was released on 29 May 2024.
+
+This release only contains bugfixes and it should be safe to update from 1.24.x.
+
+Highlighted bugfixes in 1.24.4
+
+-   audioconvert: support more than 64 audio channels
+-   avvidec: fix dropped frames when doing multi-threaded decoding of I-frame codecs such as DV Video
+-   mpegtsmux: Correctly time out in live pipelines, esp. for sparse streams like KLV and DVB subtitles
+-   vtdec deadlock fixes on shutdown and format/resolution changes (as might happen with e.g. HLS/DASH)
+-   fmp4mux, isomp4mux: Add support for adding AV1 header OBUs into the MP4 headers, and add language from tags
+-   gtk4paintablesink improvements: fullscreen mode and gst-play-1.0 support
+-   webrtcsink: add support for insecure TLS and improve error handling and VP9 handling
+-   v4l2codecs: decoder: Reorder caps to prefer DMA_DRM ones, fixes issues with playbin3
+-   vah264enc, vah265enc: timestamp handling fixes; generate IDR frames on force-keyunit-requests, not I frames
+-   Visualizer plugins fixes
+-   Avoid using private APIs on iOS
+-   Various bug fixes, memory leak fixes, and other stability and reliability improvements
+
+gstreamer
+
+-   clock: Fix 32 bit assertions in GST_TIME_TO_TIMEVAL and GST_TIME_TO_TIMESPEC
+-   systemclock: fix usage of __STDC_NO_ATOMICS__
+-   filesrc: Don’t abort on _get_osfhandle() on Windows
+-   tests: Avoid using “bool” for the variable name
+-   Various Solaris / Illumos fixes
+-   parse: Don’t assume that child proxy child objects are GstObjects
+
+gst-plugins-base
+
+-   audioconvert: Support converting >64 channels
+-   decodebin3: Fix caps and stream leaks
+-   playbin(3), streamsynchronizer: Fix deadlock when streams have been flushed before others start
+-   videotestsrc: fix race condition when clearing cached buffer
+-   Fix visualization plugins
+-   GstDiscoverer hangs when processing media file containing mebx on MacOS
+-   glmixer: Add GL_SYNC_META option to buffer pool
+-   typefinding: Fix ID_ODD_SIZE handling regression in WavPack typefinder
+
+gst-plugins-good
+
+-   osxaudio: Avoid using private APIs on iOS
+-   qtdemux: unit test fixes for 32-bit platforms
+
+gst-plugins-bad
+
+-   cudamemory: Fix offset of subsampled planar formats
+-   d3d11: Revert “d3d11device: protect device_lock vs device_new
+-   d3dshader: Fix gamma and primaries conversion pixel shader
+-   dtlsconnection: Fix overflow in timeout calculation on systems with 32 bit time_t
+-   GstPlay: Initialize debug category and error quark in class_init
+-   kmssink: Do not close the DRM prime handle twice
+-   mpegtsmux: Correctly time out and mux anyway in live pipelines
+-   nvcodec: Accept progressive-high profiles for h264
+-   nvencoder: Fix maximum QP value setting
+-   qsvh264dec, qsvh265dec: Fix nalu leaks
+-   v4l2codecs: decoder: Reorder caps to prefer DMA_DRM ones
+-   vah264enc, vah265enc: Let FORCE_KEYFRAME be IDR frame rather than just I frame
+-   vah264enc, vah265enc: Set DTS offset before PTS
+-   vkh26xdec: Fix stop memory leak
+-   vtdec: Fix deadlock when negotiating format change
+-   vtdec: Fix PAUSED->READY deadlock when output loop is running
+-   wayland: Use wl_display_create_queue_with_name
+-   webrtc: request-aux-sender, only sink floating refs
+-   webrtcbin: Allow session level setup attribute in SDP
+
+gst-plugins-ugly
+
+-   No changes
+
+GStreamer Rust plugins
+
+-   fmp4mux, isomp4mux: Add support for adding AV1 header OBUs into the MP4 headers
+-   fmp4mux, isomp4mux: Add language from tags
+-   gtk4paintablesink: Also create own window for gst-play-1.0
+-   gtk4paintablesink: Add GST_GTK4_WINDOW_FULLSCREEN environment variable to fullscreen window for testing with
+    e.g. gst-launch-1.0
+-   gtk4: Fix plugin description and update python examples
+-   rtpgccbwe: Log effective bitrate in more places, and log delay and loss target bitrates separately
+-   webrtcsink: Improve error when no encoder was found or RTP plugins were missing
+-   webrtcsink: Add VP9 parser after the encoder for VP9 too
+-   webrtc: Add support for insecure TLS connections
+
+gst-libav
+
+-   avvidec: Fix dropping wrong “ghost” frames - fixing multi-threaded decoding of I-frame codecs such as DV Video
+
+gst-rtsp-server
+
+-   No changes
+
+gstreamer-vaapi
+
+-   No changes
+
+gstreamer-sharp
+
+-   No changes
+
+gst-omx
+
+-   No changes
+
+gst-python
+
+-   No changes
+
+gst-editing-services
+
+-   ges-pipeline: Configure encodebin before linking
+
+gst-devtools, gst-validate + gst-integration-testsuites
+
+-   No changes
+
+gst-examples
+
+-   No changes
+
+Development build environment
+
+-   No changes
+
+Cerbero build tool and packaging changes in 1.24.4
+
+-   Add Fedora 40 support
+-   srt: bump version to 1.5.3
+-   pango: Fix leaks on Windows (textoverlay plugins)
+-   windows runtime installer has empty qt6 msm
+-   WiX: assorted fixes
+
+Contributors to 1.24.4
+
+Alexander Slobodeniuk, Bill Nottingham, Brad Reitmeyer, Chris Del Guercio, Daniel Stone, Edward Hervey, Emil Pettersson, He
+Junyan, Jordan Petridis, Joshua Breeden, L. E. Segovia, Martin Nordholts, Mathieu Duponchelle, Matthew Waters, Nirbheek Chauhan,
+Philippe Normand, Piotr Brzeziński, Rafael Carício, Robert Ayrapetyan, Robert Mader, Sebastian Dröge, Seungha Yang, Shengqi Yu,
+Stéphane Cerveau, Tim-Philipp Müller,
+
+… and many others who have contributed bug reports, translations, sent suggestions or helped testing. Thank you all!
+
+List of merge requests and issues fixed in 1.24.4
+
+-   List of Merge Requests applied in 1.24.4
+-   List of Issues fixed in 1.24.4
+
+1.24.5
+
+The fifth 1.24 bug-fix release (1.24.5) was released on 20 June 2024.
+
+This release only contains bugfixes and it should be safe to update from 1.24.x.
+
+Highlighted bugfixes in 1.24.5
+
+-   webrtcsink: Support for AV1 via nvav1enc, av1enc or rav1enc encoders
+-   AV1 RTP payloader/depayloader fixes to work correctly with Chrome and Pion WebRTC
+-   av1parse, av1dec error handling/robustness improvements
+-   av1enc: Handle force-keyunit events properly for WebRTC
+-   decodebin3: selection and collection handling improvements
+-   hlsdemux2: Various fixes for discontinuities, variant switching, playlist updates
+-   qml6glsink: fix RGB format support
+-   rtspsrc: more control URL handling fixes
+-   v4l2src: Interpret V4L2 report of sync loss as video signal loss
+-   d3d12 encoder, memory and videosink fixes
+-   vtdec: more robust error handling, fix regression
+-   ndi: support for NDI SDK v6
+-   Various bug fixes, memory leak fixes, and other stability and reliability improvements
+
+gstreamer
+
+-   promise: Don’t use g_return_* for internal checks
+-   debug: Add missing gst_debug_log_id_literal() dummy with gst_debug=false
+-   ptp-helper: Add GNU/Hurd support
+
+gst-plugins-base
+
+-   uridecodebin3: Don’t hold PLAY_ITEMS lock when activating them
+-   decodebin3: Always ensure we end up with parsebin or identity
+-   decodebin3: Properly support changing input collections
+-   decodebin3: Avoid usage of parsebin even more
+-   decodebin3: Fix dealing with input without caps
+-   video-info: Don’t crash in gst_video_info_is_equal() if one videoinfo is zero-initialized
+
+gst-plugins-good
+
+-   flacparse: fix buffer overflow
+-   hlsdemux2: Various fixes for discontinuities, variant switching, playlist updates
+-   qml6glsink: fix RGB format support
+-   rtpdtmfdepay: fix caps negotiation with audioconvert
+-   rtpdtmfsrc: fix leak when shutting down mid-event
+-   rtspsrc: fix invalid seqnum assertions
+-   rtspsrc: Various control URL handling fixes
+-   v4l2src: Interpret V4L2 report of sync loss as video signal loss
+
+gst-plugins-bad
+
+-   av1parse: Do not return error when expectedFrameId mismatch
+-   av1dec: Don’t treat decoding errors as fatal and print more error details
+-   av1enc: Handle force-keyunit events properly by requesting keyframes
+-   codectimestamper: never set DTS to NONE
+-   d3d12encoder: Do not print error log for not-supported feature
+-   d3d12memory: Fix staging buffer alignment
+-   d3d12videosink: Disconnect window signal handler on dispose as intended
+-   dtlssrtpenc: Don’t crash if no pad name is provided when requesting a new pad
+-   glcolorconvert: update existing sync meta if outbuf has one
+-   pcapparse: Parsing code assumes unaligned memory accesses are OK
+-   pcapparse: Avoid unaligned memory access
+-   tsdemux: Fix maximum PCR/DTS values
+-   vtdec: Improve error handling in edge cases
+-   vtdec, qtdemux: regression in 1.24.3 - internal data stream error
+-   uvcgadget: Use g_path_get_basename instead of libc basename
+
+gst-plugins-ugly
+
+-   No changes
+
+GStreamer Rust plugins
+
+-   gtk4: update flatpak integration code
+-   ndi: Add support for loading NDI SDK v6
+-   reqwesthttpsrc: Fix race condition when unlocking
+-   rtp: Don’t restrict payload types for payloaders
+-   rtp: av1pay: Correctly use N flag for marking keyframes
+-   rtp: av1depay: Parse internal size fields of OBUs and handle them
+-   webrtcsink: Refactor value retrieval to avoid lock poisoning
+-   webrtcsink: Add support for AV1
+-   webrtc: Update to async-tungstenite 0.26
+-   Fix various new clippy 1.79 warnings
+-   meson: Fix various issues in dependency management, feature detection, some regressions, and add logging
+
+gst-libav
+
+-   No changes
+
+gst-rtsp-server
+
+-   No changes
+
+gstreamer-vaapi
+
+-   No changes
+
+gstreamer-sharp
+
+-   No changes
+
+gst-omx
+
+-   No changes
+
+gst-python
+
+-   No changes
+
+gst-editing-services
+
+-   No changes
+
+gst-devtools, gst-validate + gst-integration-testsuites
+
+-   No changes
+
+gst-examples
+
+-   No changes
+
+Development build environment
+
+-   No changes
+
+Cerbero build tool and packaging changes in 1.24.5
+
+-   osxrelocator: Fix RPATHs in deeply nested libraries
+
+Contributors to 1.24.5
+
+Angelo Verlain, Chris Del Guercio, Corentin Damman, Edward Hervey, Francisco Javier Velázquez-García, He Junyan, Jakub Adam,
+Jakub Vaněk, Khem Raj, L. E. Segovia, Martin Nordholts, Mathieu Duponchelle, Nirbheek Chauhan, Piotr Brzeziński, Samuel
+Thibault, Sebastian Dröge, Sergey Krivohatskiy, Seungha Yang, Tim-Philipp Müller, Zach van Rijn,
+
+… and many others who have contributed bug reports, translations, sent suggestions or helped testing. Thank you all!
+
+List of merge requests and issues fixed in 1.24.5
+
+-   List of Merge Requests applied in 1.24.5
+-   List of Issues fixed in 1.24.5
+
+1.24.6
+
+The sixth 1.24 bug-fix release (1.24.6) was released on 29 July 2024.
+
+This release only contains bugfixes and it should be safe to update from 1.24.x.
+
+Highlighted bugfixes in 1.24.6
+
+-   Fix compatibility with FFmpeg 7.0
+-   qmlglsink: Fix failure to display content on recent Android devices
+-   adaptivedemux: Fix handling of closed caption streams
+-   cuda: Fix runtime compiler loading with old CUDA tookit
+-   decodebin3 stream selection handling fixes
+-   d3d11compositor, d3d12compositor: Fix transparent background mode with YUV output
+-   d3d12converter: Make gamma remap work as intended
+-   h264decoder: Update output frame duration for interlaced video when second field frame is discarded
+-   macOS audio device provider now listens to audio devices being added/removed at runtime
+-   Rust plugins: audioloudnorm, s3hlssink, gtk4paintablesink, livesync and webrtcsink fixes
+-   videoaggregator: preserve features in non-alpha caps for subclasses with non-system memory sink caps
+-   vtenc: Fix redistribute latency spam
+-   v4l2: fixes for complex video formats
+-   va: Fix strides when importing DMABUFs, dmabuf handle leaks, and blocklist unmaintained Intel i965 driver for encoding
+-   waylandsink: Fix surface cropping for rotated streams
+-   webrtcdsp: Enable multi_channel processing to fix handling of stereo streams
+-   Various bug fixes, memory leak fixes, and other stability and reliability improvements
+
+gstreamer
+
+-   downloadbuffer: fix push mode
+-   queue: queue2: multiqueue: Don’t work with segment.position if buffers have no timestamps
+-   gst-inspect-1.0: Fix leak of plugin/feature
+
+gst-plugins-base
+
+-   decodebin3: Fix detection of selection done
+-   glvideomixer: Fix critical when setting start-time-selection
+-   parsebin: accept-caps handling for elements with unusual sink pad names
+-   subparse: Don’t use jit for regular expressions when running in valgrind
+-   subparse: put valgrind header availability define into config.h for subparse
+-   videoaggregator: preserve features in non-alpha caps
+-   videoscale: correct classification error
+-   meson: Fix invalid include flag in uninstalled gl pc file
+-   Fix various memory leaks
+
+gst-plugins-good
+
+-   adaptivedemux: Fix handling closed caption streams
+-   qml/glsink: also support GLES2 needing shader ‘precision’ directives
+-   v4l2object: use v4l2 reported width for padded_width when complex video formats
+-   v4l2: meson: fix SIZEOF_OFF_T when cross-compiling with Meson >= 1.3.0
+
+gst-plugins-bad
+
+-   svtav1enc: Fix segfault when flushing
+-   avfdeviceprovider: Fix debug category initialization
+-   osxaudiodeviceprovider: Listen for audio devices being added/removed
+-   avtp: Fixed Linux/Alpine 3.20 build
+-   cuda: Fix runtime compiler loading with old CUDA tookit
+-   d3d11compositor, d3d12compositor: Fix transparent background mode with YUV output
+-   d3d11converter: Fix runtime compiled shader code
+-   d3d12converter: Make gamma remap work as intended
+-   h264decoder: Update output frame duration when second field frame is discarded
+-   isac: Work around upstream having no shared library support for MSVC
+-   lc3: remove bitstream comparison in the tests
+-   qroverlay: redraw overlay when caps changes
+-   qsv: Fix critical warnings
+-   rtmp2: guard against calling gst_amf_node_get_type() with NULL
+-   srtsrc: fix case fallthrough of authentication param
+-   va: Blocklist unmaintained i965 driver for encoding
+-   va: Fix strides when importing DMABUFs
+-   va: Fix dmabuf handle leaks
+-   vadisplay: fix minor version check
+-   vkh265dec: Fix H.264 ref in logs
+-   vulkan: fix wrong stages or access in barriers
+-   vtenc: Fix redistribute latency spam
+-   waylandsink: Fix surface cropping for rotated streams
+-   webrtcdsp: Enable multi_channel processing
+
+gst-plugins-ugly
+
+-   asfdemux: Be more lenient towards malformed header, fixes playback of files written by VLC
+
+GStreamer Rust plugins
+
+-   audioloudnorm: Fix limiter buffer index wraparound off-by-one for the last buffer
+-   aws: s3hlssink: Do not call abort before finishing uploads
+-   gtk4paintablesink: Support RGBx formats in SW paths
+-   gtk4paintablesink: default to force-aspect-ratio=false for Paintable
+-   livesync: Use the actual output buffer duration of gap filler buffers
+-   livesync: Allow queueing up to latency buffers, also sync on the first buffer and add sync property
+-   webrtcsink: fix property types for rav1enc AV1 encoder
+
+gst-libav
+
+-   Fix compatibility with ffmpeg 7
+-   avauddec: Fix crash on stop()
+-   avmux: Fix crash when muxer doesn’t get codecid
+
+gst-rtsp-server
+
+-   No changes
+
+gstreamer-vaapi
+
+-   No changes
+
+gstreamer-sharp
+
+-   No changes
+
+gst-omx
+
+-   No changes
+
+gst-python
+
+-   No changes
+
+gst-editing-services
+
+-   ges: Various leak fixes
+
+gst-devtools, gst-validate + gst-integration-testsuites
+
+-   validate: Remove G_REGEX_OPTIMIZE usage, helps avoid valgrind issues
+
+gst-examples
+
+-   No changes
+
+Development build environment
+
+-   libgudev wrap: add fallback uri
+-   liblc3 wrap: update to v1.1.1
+
+Cerbero build tool and packaging changes in 1.24.6
+
+-   meson: Backport fix for Glib including a GCC-only flag in the pkg-config file
+-   libsoup: Workaround build error with GCC 14
+-   libltc: Fix Windows build
+-   webrtc-audio-processing: Fix MinGW build
+-   libvpx: Also build a shared lib on macOS
+-   glib: Fix Windows build
+-   osxrelocator: Fix framework entrypoints being unable to load dylibs
+-   gobject-introspection, recipe: Fix more fallout from the Meson dylib ID fixes
+-   cargo-c.recipe: Ensure that we can change the id and rpath
+
+Contributors to 1.24.6
+
+Chris Spoelstra, Edward Hervey, François Laignel, Guillaume Desmottes, Jakub Adam, Jan Schmidt, Jordan Petridis, L. E. Segovia,
+Loïc Yhuel, Matthew Waters, Nirbheek Chauhan, Piotr Brzeziński, Robert Mader, Ruben Gonzalez, Sanchayan Maity, Sebastian Dröge,
+Sebastian Gross, Seungha Yang, Shengqi Yu, Taruntej Kanakamalla, Tim-Philipp Müller, tomaszmi, Víctor Manuel Jáquez Leal,
+
+… and many others who have contributed bug reports, translations, sent suggestions or helped testing. Thank you all!
+
+List of merge requests and issues fixed in 1.24.6
+
+-   List of Merge Requests applied in 1.24.6
+-   List of Issues fixed in 1.24.6
 
 Schedule for 1.26
 

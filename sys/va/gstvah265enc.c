@@ -307,6 +307,8 @@ struct _GstVaH265Enc
 
     guint num_reorder_frames;
     guint max_dpb_size;
+
+    GstVideoCodecFrame *last_keyframe;
   } gop;
 
   struct
@@ -349,8 +351,6 @@ struct _GstVaH265EncFrame
 
   gint poc;
   gboolean last_frame;
-  /* The total frame count we handled. */
-  guint total_frame_count;
 };
 
 /**
@@ -452,7 +452,6 @@ gst_va_h265_enc_frame_new (void)
   frame = g_new (GstVaH265EncFrame, 1);
   frame->last_frame = FALSE;
   frame->picture = NULL;
-  frame->total_frame_count = 0;
 
   return frame;
 }
@@ -2028,55 +2027,92 @@ _h265_push_one_frame (GstVaBaseEnc * base, GstVideoCodecFrame * gst_frame,
 {
   GstVaH265Enc *self = GST_VA_H265_ENC (base);
   GstVaH265EncFrame *frame;
+  gboolean add_cached_key_frame = FALSE;
 
   g_return_val_if_fail (self->gop.cur_frame_index <= self->gop.idr_period,
       FALSE);
 
   if (gst_frame) {
-    /* Begin a new GOP, should have a empty reorder_list. */
-    if (self->gop.cur_frame_index == self->gop.idr_period) {
-      g_assert (g_queue_is_empty (&base->reorder_list));
-      self->gop.cur_frame_index = 0;
-    }
-
     frame = _enc_frame (gst_frame);
-    frame->poc = self->gop.cur_frame_index;
-    g_assert (self->gop.cur_frame_index <= self->gop.max_pic_order_cnt);
 
-    if (self->gop.cur_frame_index == 0) {
-      g_assert (frame->poc == 0);
-      GST_LOG_OBJECT (self, "system_frame_number: %d, an IDR frame, starts"
-          " a new GOP", gst_frame->system_frame_number);
+    /* Force to insert the key frame inside a GOP, just end the current
+       GOP and start a new one. */
+    if (GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME (gst_frame) &&
+        !(self->gop.cur_frame_index == 0 ||
+            self->gop.cur_frame_index == self->gop.idr_period)) {
+      GST_DEBUG_OBJECT (base, "system_frame_number: %d is a force key "
+          "frame(IDR), begin a new GOP.", gst_frame->system_frame_number);
 
+      frame->poc = 0;
+      frame->type = self->gop.frame_types[0].slice_type;
+      frame->is_ref = self->gop.frame_types[0].is_ref;
+      frame->pyramid_level = self->gop.frame_types[0].pyramid_level;
+      frame->left_ref_poc_diff = self->gop.frame_types[0].left_ref_poc_diff;
+      frame->right_ref_poc_diff = self->gop.frame_types[0].right_ref_poc_diff;
+
+      /* The previous key frame should be already be poped out. */
+      g_assert (self->gop.last_keyframe == NULL);
+
+      /* An empty reorder list, start the new GOP immediately. */
+      if (g_queue_is_empty (&base->reorder_list)) {
+        self->gop.cur_frame_index = 1;
+        g_queue_clear_full (&base->ref_list,
+            (GDestroyNotify) gst_video_codec_frame_unref);
+        last = FALSE;
+      } else {
+        /* Cache the key frame and end the current GOP.
+           Next time calling this push() without frame, start the new GOP. */
+        self->gop.last_keyframe = gst_frame;
+        last = TRUE;
+      }
+
+      add_cached_key_frame = TRUE;
+    } else {
+      /* Begin a new GOP, should have a empty reorder_list. */
+      if (self->gop.cur_frame_index == self->gop.idr_period) {
+        g_assert (g_queue_is_empty (&base->reorder_list));
+        self->gop.cur_frame_index = 0;
+      }
+
+      frame->poc = self->gop.cur_frame_index;
+      g_assert (self->gop.cur_frame_index <= self->gop.max_pic_order_cnt);
+
+      if (self->gop.cur_frame_index == 0) {
+        g_assert (frame->poc == 0);
+        GST_LOG_OBJECT (self, "system_frame_number: %d, an IDR frame, starts"
+            " a new GOP", gst_frame->system_frame_number);
+
+        g_queue_clear_full (&base->ref_list,
+            (GDestroyNotify) gst_video_codec_frame_unref);
+      }
+
+      frame->type = self->gop.frame_types[self->gop.cur_frame_index].slice_type;
+      frame->is_ref = self->gop.frame_types[self->gop.cur_frame_index].is_ref;
+      frame->pyramid_level =
+          self->gop.frame_types[self->gop.cur_frame_index].pyramid_level;
+      frame->left_ref_poc_diff =
+          self->gop.frame_types[self->gop.cur_frame_index].left_ref_poc_diff;
+      frame->right_ref_poc_diff =
+          self->gop.frame_types[self->gop.cur_frame_index].right_ref_poc_diff;
+
+      GST_LOG_OBJECT (self, "Push frame, system_frame_number: %d, poc %d, "
+          "frame type %s", gst_frame->system_frame_number, frame->poc,
+          _h265_slice_type_name (frame->type));
+
+      self->gop.cur_frame_index++;
+      g_queue_push_tail (&base->reorder_list,
+          gst_video_codec_frame_ref (gst_frame));
+    }
+  } else if (self->gop.last_keyframe) {
+    g_assert (self->gop.last_keyframe ==
+        g_queue_peek_tail (&base->reorder_list));
+    if (g_queue_get_length (&base->reorder_list) == 1) {
+      /* The last cached key frame begins a new GOP */
+      self->gop.cur_frame_index = 1;
+      self->gop.last_keyframe = NULL;
       g_queue_clear_full (&base->ref_list,
           (GDestroyNotify) gst_video_codec_frame_unref);
     }
-
-    frame->type = self->gop.frame_types[self->gop.cur_frame_index].slice_type;
-    frame->is_ref = self->gop.frame_types[self->gop.cur_frame_index].is_ref;
-    frame->pyramid_level =
-        self->gop.frame_types[self->gop.cur_frame_index].pyramid_level;
-    frame->left_ref_poc_diff =
-        self->gop.frame_types[self->gop.cur_frame_index].left_ref_poc_diff;
-    frame->right_ref_poc_diff =
-        self->gop.frame_types[self->gop.cur_frame_index].right_ref_poc_diff;
-
-    if (GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME (gst_frame)) {
-      GST_DEBUG_OBJECT (self, "system_frame_number: %d, a force key frame,"
-          " promote its type from %s to %s", gst_frame->system_frame_number,
-          _h265_slice_type_name (frame->type),
-          _h265_slice_type_name (GST_H265_I_SLICE));
-      frame->type = GST_H265_I_SLICE;
-      frame->is_ref = TRUE;
-    }
-
-    GST_LOG_OBJECT (self, "Push frame, system_frame_number: %d, poc %d, "
-        "frame type %s", gst_frame->system_frame_number, frame->poc,
-        _h265_slice_type_name (frame->type));
-
-    self->gop.cur_frame_index++;
-    g_queue_push_tail (&base->reorder_list,
-        gst_video_codec_frame_ref (gst_frame));
   }
 
   /* ensure the last one a non-B and end the GOP. */
@@ -2094,6 +2130,12 @@ _h265_push_one_frame (GstVaBaseEnc * base, GstVideoCodecFrame * gst_frame,
         frame->is_ref = TRUE;
       }
     }
+  }
+
+  /* Insert the cached next key frame after ending the current GOP. */
+  if (add_cached_key_frame) {
+    g_queue_push_tail (&base->reorder_list,
+        gst_video_codec_frame_ref (gst_frame));
   }
 
   return TRUE;
@@ -2117,7 +2159,7 @@ _count_backward_ref_num (gpointer data, gpointer user_data)
 }
 
 static GstVideoCodecFrame *
-_h265_pop_pyramid_b_frame (GstVaH265Enc * self)
+_h265_pop_pyramid_b_frame (GstVaH265Enc * self, guint gop_len)
 {
   GstVaBaseEnc *base = GST_VA_BASE_ENC (self);
   guint i;
@@ -2132,7 +2174,7 @@ _h265_pop_pyramid_b_frame (GstVaH265Enc * self)
   b_vaframe = NULL;
 
   /* Find the highest level with smallest poc. */
-  for (i = 0; i < g_queue_get_length (&base->reorder_list); i++) {
+  for (i = 0; i < gop_len; i++) {
     GstVaH265EncFrame *vaf;
     GstVideoCodecFrame *f;
 
@@ -2164,7 +2206,7 @@ again:
   /* Check whether its refs are already poped. */
   g_assert (b_vaframe->left_ref_poc_diff != 0);
   g_assert (b_vaframe->right_ref_poc_diff != 0);
-  for (i = 0; i < g_queue_get_length (&base->reorder_list); i++) {
+  for (i = 0; i < gop_len; i++) {
     GstVaH265EncFrame *vaf;
     GstVideoCodecFrame *f;
 
@@ -2206,6 +2248,7 @@ _h265_pop_one_frame (GstVaBaseEnc * base, GstVideoCodecFrame ** out_frame)
   GstVaH265Enc *self = GST_VA_H265_ENC (base);
   GstVaH265EncFrame *vaframe;
   GstVideoCodecFrame *frame;
+  guint gop_len;
   struct RefFramesCount count;
 
   g_return_val_if_fail (self->gop.cur_frame_index <= self->gop.idr_period,
@@ -2216,16 +2259,21 @@ _h265_pop_one_frame (GstVaBaseEnc * base, GstVideoCodecFrame ** out_frame)
   if (g_queue_is_empty (&base->reorder_list))
     return TRUE;
 
+  gop_len = g_queue_get_length (&base->reorder_list);
+
+  if (self->gop.last_keyframe && gop_len > 1)
+    gop_len--;
+
   /* Return the last pushed non-B immediately. */
-  frame = g_queue_peek_tail (&base->reorder_list);
+  frame = g_queue_peek_nth (&base->reorder_list, gop_len - 1);
   vaframe = _enc_frame (frame);
   if (vaframe->type != GST_H265_B_SLICE) {
-    frame = g_queue_pop_tail (&base->reorder_list);
+    frame = g_queue_pop_nth (&base->reorder_list, gop_len - 1);
     goto get_one;
   }
 
   if (self->gop.b_pyramid) {
-    frame = _h265_pop_pyramid_b_frame (self);
+    frame = _h265_pop_pyramid_b_frame (self, gop_len);
     if (frame == NULL)
       return TRUE;
 
@@ -2529,6 +2577,7 @@ gst_va_h265_enc_reset_state (GstVaBaseEnc * base)
   self->gop.backward_ref_num = 0;
   self->gop.num_reorder_frames = 0;
   self->gop.max_dpb_size = 0;
+  self->gop.last_keyframe = NULL;
 
   self->rc.max_bitrate = 0;
   self->rc.target_bitrate = 0;
@@ -4603,19 +4652,32 @@ gst_va_h265_enc_flush (GstVideoEncoder * venc)
 
   /* begin from an IDR after flush. */
   self->gop.cur_frame_index = 0;
+  self->gop.last_keyframe = NULL;
 
   return GST_VIDEO_ENCODER_CLASS (parent_class)->flush (venc);
 }
 
 static gboolean
+gst_va_h265_enc_start (GstVideoEncoder * venc)
+{
+  /* Set the minimum pts to some huge value (1000 hours). This keeps
+   * the dts at the start of the stream from needing to be negative. */
+  gst_video_encoder_set_min_pts (venc, GST_SECOND * 60 * 60 * 1000);
+
+  return GST_VIDEO_ENCODER_CLASS (parent_class)->start (venc);
+}
+
+static gboolean
 gst_va_h265_enc_new_frame (GstVaBaseEnc * base, GstVideoCodecFrame * frame)
 {
+  GstVaH265Enc *self = GST_VA_H265_ENC (base);
   GstVaH265EncFrame *frame_in;
 
   frame_in = gst_va_h265_enc_frame_new ();
-  frame_in->total_frame_count = base->input_frame_count++;
   gst_video_codec_frame_set_user_data (frame, frame_in,
       gst_va_h265_enc_frame_free);
+
+  gst_va_base_enc_push_dts (base, frame, self->gop.num_reorder_frames);
 
   return TRUE;
 }
@@ -4624,26 +4686,36 @@ static gboolean
 gst_va_h265_enc_prepare_output (GstVaBaseEnc * base,
     GstVideoCodecFrame * frame, gboolean * complete)
 {
-  GstVaH265Enc *self = GST_VA_H265_ENC (base);
   GstVaH265EncFrame *frame_enc;
   GstBuffer *buf;
 
   frame_enc = _enc_frame (frame);
 
-  frame->pts =
-      base->start_pts + base->frame_duration * frame_enc->total_frame_count;
-  /* The PTS should always be later than the DTS. */
-  frame->dts = base->start_pts + base->frame_duration *
-      ((gint64) base->output_frame_count -
-      (gint64) self->gop.num_reorder_frames);
-  base->output_frame_count++;
-  frame->duration = base->frame_duration;
+  frame->dts = gst_va_base_enc_pop_dts (base);
+  if (!GST_CLOCK_TIME_IS_VALID (frame->dts)) {
+    GST_DEBUG_OBJECT (base, "Pop invalid DTS.");
+  } else if (GST_CLOCK_TIME_IS_VALID (frame->pts) && frame->dts > frame->pts) {
+    GST_WARNING_OBJECT (base, "Pop DTS: %" GST_TIME_FORMAT " > PTS: %"
+        GST_TIME_FORMAT, GST_TIME_ARGS (frame->dts),
+        GST_TIME_ARGS (frame->pts));
+    frame->dts = frame->pts;
+  }
 
   buf = gst_va_base_enc_create_output_buffer (base,
       frame_enc->picture, NULL, 0);
   if (!buf) {
     GST_ERROR_OBJECT (base, "Failed to create output buffer");
     return FALSE;
+  }
+
+  GST_BUFFER_FLAG_SET (buf, GST_BUFFER_FLAG_MARKER);
+  if (frame_enc->poc == 0) {
+    GST_VIDEO_CODEC_FRAME_SET_SYNC_POINT (frame);
+    GST_BUFFER_FLAG_UNSET (buf, GST_BUFFER_FLAG_DELTA_UNIT);
+    GST_BUFFER_FLAG_SET (buf, GST_BUFFER_FLAG_HEADER);
+  } else {
+    GST_VIDEO_CODEC_FRAME_UNSET_SYNC_POINT (frame);
+    GST_BUFFER_FLAG_SET (buf, GST_BUFFER_FLAG_DELTA_UNIT);
   }
 
   gst_buffer_replace (&frame->output_buffer, buf);
@@ -4923,6 +4995,19 @@ gst_va_h265_enc_get_property (GObject * object, guint prop_id,
 }
 
 static void
+gst_va_h265_enc_dispose (GObject * object)
+{
+  GstVaH265Enc *self = GST_VA_H265_ENC (object);
+
+  g_clear_pointer (&self->partition.slice_segment_address, g_free);
+  g_clear_pointer (&self->partition.num_ctu_in_slice, g_free);
+  g_clear_pointer (&self->partition.tile_ctu_cols, g_free);
+  g_clear_pointer (&self->partition.tile_ctu_rows, g_free);
+
+  G_OBJECT_CLASS (parent_class)->dispose (object);
+}
+
+static void
 gst_va_h265_enc_class_init (gpointer g_klass, gpointer class_data)
 {
   GstCaps *src_doc_caps, *sink_doc_caps;
@@ -4982,8 +5067,10 @@ gst_va_h265_enc_class_init (gpointer g_klass, gpointer class_data)
 
   object_class->set_property = gst_va_h265_enc_set_property;
   object_class->get_property = gst_va_h265_enc_get_property;
+  object_class->dispose = gst_va_h265_enc_dispose;
 
   venc_class->flush = GST_DEBUG_FUNCPTR (gst_va_h265_enc_flush);
+  venc_class->start = GST_DEBUG_FUNCPTR (gst_va_h265_enc_start);
 
   va_enc_class->reset_state = GST_DEBUG_FUNCPTR (gst_va_h265_enc_reset_state);
   va_enc_class->reconfig = GST_DEBUG_FUNCPTR (gst_va_h265_enc_reconfig);
