@@ -1,3 +1,9 @@
+gst-plugins-bad1.0 (1.24.6-1deepin1) unstable; urgency=medium
+
+  *This patch fixes this critical warning when registering MSDK.
+
+ -- lichenggang <lichenggang@deepin.org>  Tue, 22 Oct 2024 16:13:02 +0800
+
 gst-plugins-bad1.0 (1.24.6-1) unstable; urgency=medium
 
   * New upstream version 1.24.6
