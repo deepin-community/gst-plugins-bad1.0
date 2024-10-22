@@ -1,2 +1,3 @@
 02_opencv-data-path.patch
 Skip-failing-tests.patch
+fix-ill-format-string.patch
