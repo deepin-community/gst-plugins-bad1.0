@@ -17,6 +17,14 @@
  * Boston, MA 02110-1301, USA.
  */
 
+/**
+ * SECTION:element-asiosink
+ * @title: asiosink
+ * @short_description: ASIO sink
+ *
+ * Since: 1.20
+ */
+
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
@@ -24,7 +32,6 @@
 #include "gstasiosink.h"
 #include "gstasioobject.h"
 #include "gstasioringbuffer.h"
-#include <atlconv.h>
 #include <string.h>
 #include <set>
 #include <vector>
@@ -105,9 +112,9 @@ gst_asio_sink_class_init (GstAsioSinkClass * klass)
               G_PARAM_STATIC_STRINGS)));
   g_object_class_install_property (gobject_class, PROP_OCCUPY_ALL_CHANNELS,
       g_param_spec_boolean ("occupy-all-channels",
-          "Occupy All Channles",
+          "Occupy All Channels",
           "When enabled, ASIO device will allocate resources for all in/output "
-          "channles",
+          "channels",
           DEFAULT_OCCUPY_ALL_CHANNELS,
           (GParamFlags) (GST_PARAM_MUTABLE_READY | G_PARAM_READWRITE |
               G_PARAM_STATIC_STRINGS)));
@@ -240,8 +247,6 @@ gst_asio_sink_create_ringbuffer (GstAudioBaseSink * sink)
   guint i;
   gchar *ringbuffer_name;
 
-  USES_CONVERSION;
-
   GST_DEBUG_OBJECT (self, "Create ringbuffer");
 
   if (gst_asio_enum (&device_infos) == 0) {
@@ -250,7 +255,10 @@ gst_asio_sink_create_ringbuffer (GstAudioBaseSink * sink)
   }
 
   if (self->device_clsid) {
-    hr = CLSIDFromString (A2COLE (self->device_clsid), &clsid);
+    auto clsid_utf16 = g_utf8_to_utf16 (self->device_clsid,
+        -1, nullptr, nullptr, nullptr);
+    hr = CLSIDFromString ((const wchar_t *) clsid_utf16, &clsid);
+    g_free (clsid_utf16);
     if (FAILED (hr)) {
       GST_WARNING_OBJECT (self, "Failed to convert %s to CLSID",
           self->device_clsid);
@@ -298,7 +306,7 @@ gst_asio_sink_create_ringbuffer (GstAudioBaseSink * sink)
     ch = g_strsplit (self->output_channels, ",", 0);
 
     auto num_channels = g_strv_length (ch);
-    if (num_channels > max_output_ch) {
+    if (num_channels > (guint) max_output_ch) {
       GST_WARNING_OBJECT (self, "To many channels %d were requested",
           num_channels);
     } else {
@@ -318,7 +326,7 @@ gst_asio_sink_create_ringbuffer (GstAudioBaseSink * sink)
   }
 
   if (channel_list.size () == 0) {
-    for (i = 0; i < max_output_ch; i++)
+    for (i = 0; i < (guint) max_output_ch; i++)
       channel_indices.push_back (i);
   } else {
     for (auto iter : channel_list)

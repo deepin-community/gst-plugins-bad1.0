@@ -5,19 +5,11 @@ Source: https://gstreamer.freedesktop.org
 Comment: This package was debianized by David I. Lehn <dlehn@debian.org> on
  Mon, 15 Jan 2001 18:21:37 -0500.
 
-Files: ext/gsettings/gstgsettings.h
- ext/gsettings/gstgsettingsaudiosink.c
- ext/gsettings/gstgsettingsaudiosink.h
- ext/gsettings/gstgsettingsaudiosrc.c
- ext/gsettings/gstgsettingsaudiosrc.h
- ext/gsettings/gstgsettingsvideosink.c
- ext/gsettings/gstgsettingsvideosink.h
- ext/gsettings/gstgsettingsvideosrc.c
- ext/gsettings/gstgsettingsvideosrc.h
- ext/gsettings/plugin.c
- ext/opus/gstopuscommon.c
- ext/opus/gstopuscommon.h
- gst/frei0r/gstfrei0r.c
+Files: *
+Copyright: Contributors to the GStreamer project
+License: LGPL-2+
+
+Files: gst/frei0r/gstfrei0r.c
  gst/frei0r/gstfrei0r.h
  gst/frei0r/gstfrei0rfilter.c
  gst/frei0r/gstfrei0rfilter.h
@@ -61,8 +53,6 @@ Files: ext/gsettings/gstgsettings.h
  gst/segmentclip/gstvideosegmentclip.h
  gst/segmentclip/plugin.c
  tests/check/elements/assrender.c
- tests/check/elements/vp8dec.c
- tests/check/elements/vp8enc.c
 Copyright: 2008-2009, Sebastian Dröge <sebastian.droege@collabora.co.uk>
   2009, Sebastian Dröge <sebastian.droege@collabora.co.uk>
   2009-2010, Sebastian Dröge <sebastian.droege@collabora.co.uk>
@@ -70,93 +60,23 @@ Copyright: 2008-2009, Sebastian Dröge <sebastian.droege@collabora.co.uk>
 License: LGPL-2+
 
 Files: gst-libs/gst/codecparsers/gstmpeg4parser.h
- sys/vdpau/basevideodecoder/gstvideoframe.c
- sys/vdpau/basevideodecoder/gstvideoframe.h
- sys/vdpau/gstvdp/gstvdp.c
- sys/vdpau/gstvdp/gstvdp.h
- sys/vdpau/gstvdp/gstvdpbuffer.c
- sys/vdpau/gstvdp/gstvdpbuffer.h
- sys/vdpau/gstvdp/gstvdpbufferpool.c
- sys/vdpau/gstvdp/gstvdpbufferpool.h
- sys/vdpau/gstvdp/gstvdpdecoder.c
- sys/vdpau/gstvdp/gstvdpdecoder.h
- sys/vdpau/gstvdp/gstvdpdevice.c
- sys/vdpau/gstvdp/gstvdpdevice.h
- sys/vdpau/gstvdp/gstvdpoutputbuffer.c
- sys/vdpau/gstvdp/gstvdpoutputbuffer.h
- sys/vdpau/gstvdp/gstvdpoutputsrcpad.c
- sys/vdpau/gstvdp/gstvdpoutputsrcpad.h
- sys/vdpau/gstvdp/gstvdputils.c
- sys/vdpau/gstvdp/gstvdputils.h
- sys/vdpau/gstvdp/gstvdpvideobuffer.c
- sys/vdpau/gstvdp/gstvdpvideobuffer.h
- sys/vdpau/gstvdp/gstvdpvideosrcpad.c
- sys/vdpau/gstvdp/gstvdpvideosrcpad.h
- sys/vdpau/gstvdpvideopostprocess.c
- sys/vdpau/gstvdpvideopostprocess.h
- sys/vdpau/h264/gsth264dpb.c
- sys/vdpau/h264/gsth264dpb.h
- sys/vdpau/h264/gsth264frame.c
- sys/vdpau/h264/gsth264frame.h
- sys/vdpau/h264/gsth264parser.c
- sys/vdpau/h264/gsth264parser.h
- sys/vdpau/h264/gstnalreader.c
- sys/vdpau/h264/gstnalreader.h
- sys/vdpau/h264/gstvdph264dec.c
- sys/vdpau/h264/gstvdph264dec.h
- sys/vdpau/mpeg/gstvdpmpegdec.c
- sys/vdpau/mpeg/gstvdpmpegdec.h
- sys/vdpau/mpeg/gstvdpmpegframe.c
- sys/vdpau/mpeg/gstvdpmpegframe.h
- sys/vdpau/mpeg4/gstmpeg4frame.c
- sys/vdpau/mpeg4/gstmpeg4frame.h
- sys/vdpau/mpeg4/gstvdpmpeg4dec.c
- sys/vdpau/mpeg4/gstvdpmpeg4dec.h
- sys/vdpau/mpeg4/mpeg4util.c
- sys/vdpau/mpeg4/mpeg4util.h
 Copyright: 2009, Carl-Anton Ingmarsson <ca.ingmarsson@gmail.com>
   2010, Carl-Anton Ingmarsson <ca.ingmarsson@gmail.com>
 License: LGPL-2+
 
-Files: ext/cog/gstcog.c
- ext/cog/gstcogmse.c
- ext/cog/gstcogutils.c
- ext/cog/gstcogutils.h
- ext/dirac/gstdiracenc.cc
- ext/flite/gstflite.c
- ext/schroedinger/gstschro.c
- ext/schroedinger/gstschrodec.c
- ext/schroedinger/gstschroenc.c
- ext/schroedinger/gstschroutils.c
- ext/schroedinger/gstschroutils.h
+Files: ext/flite/gstflite.c
  gst-libs/gst/glib-compat-private.h
- gst-libs/gst/video/gstbasevideocodec.c
- gst-libs/gst/video/gstbasevideocodec.h
- gst-libs/gst/video/gstbasevideoutils.c
- gst-libs/gst/video/gstbasevideoutils.h
  gst/bayer/gstbayer.c
  gst/bayer/gstbayer2rgb.c
  gst/debugutils/gstchecksumsink.c
  gst/debugutils/gstchecksumsink.h
  gst/debugutils/gstchopmydata.c
- gst/sdi/gstsdi.c
- gst/sdi/gstsdidemux.c
- gst/sdi/gstsdimux.c
- gst/videofilters/gstvideofilter2.c
- gst/videofilters/gstvideofilter2.h
  gst/videofilters/gstzebrastripe.h
  gst/videoparsers/gstdiracparse.c
  gst/y4m/gsty4mdec.c
  gst/y4m/gsty4mdec.h
  sys/decklink/gstdecklink.cpp
  sys/decklink/gstdecklink.h
- sys/decklink/gstdecklinksink.h
- sys/decklink/gstdecklinksrc.cpp
- sys/decklink/gstdecklinksrc.h
- sys/vdpau/basevideodecoder/gstbasevideodecoder.c
- sys/vdpau/basevideodecoder/gstbasevideodecoder.h
- sys/vdpau/basevideodecoder/gstbasevideoutils.h
- tests/check/elements/logoinsert.c
 Copyright: 2005, David Schleef <ds@schleef.org>
   2006, David Schleef <ds@schleef.org>
   2007, David Schleef <ds@schleef.org>
@@ -166,22 +86,13 @@ Copyright: 2005, David Schleef <ds@schleef.org>
   2011, David Schleef <ds@schleef.org>
 License: LGPL-2+
 
-Files: ext/opencv/gstcvdilate.c
- ext/opencv/gstcvdilate.h
- ext/opencv/gstcvdilateerode.c
+Files: ext/opencv/gstcvdilate.h
  ext/opencv/gstcvdilateerode.h
- ext/opencv/gstcvequalizehist.c
  ext/opencv/gstcvequalizehist.h
- ext/opencv/gstcverode.c
  ext/opencv/gstcverode.h
- ext/opencv/gstcvlaplace.c
  ext/opencv/gstcvlaplace.h
- ext/opencv/gstcvsmooth.c
  ext/opencv/gstcvsmooth.h
- ext/opencv/gstcvsobel.c
  ext/opencv/gstcvsobel.h
- ext/opencv/gstopencvvideofilter.c
- ext/opencv/gstopencvvideofilter.h
  gst/geometrictransform/geometricmath.c
  gst/geometrictransform/geometricmath.h
  gst/geometrictransform/gstcircle.c
@@ -205,41 +116,16 @@ Files: ext/opencv/gstcvdilate.c
  gst/geometrictransform/gstwaterripple.c
  gst/geometrictransform/gstwaterripple.h
 Copyright: 2010, Thiago Santos <thiago.sousa.santos@collabora.co.uk>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
 Files: sys/applemedia/avfvideosrc.h
- sys/applemedia/bufferfactory.h
- sys/applemedia/celapi.c
- sys/applemedia/celapi.h
- sys/applemedia/celvideosrc.c
- sys/applemedia/celvideosrc.h
- sys/applemedia/cmapi.c
- sys/applemedia/cmapi.h
  sys/applemedia/coremediabuffer.c
  sys/applemedia/coremediabuffer.h
- sys/applemedia/coremediactx.c
- sys/applemedia/coremediactx.h
  sys/applemedia/corevideobuffer.c
  sys/applemedia/corevideobuffer.h
- sys/applemedia/cvapi.c
- sys/applemedia/cvapi.h
- sys/applemedia/dynapi-internal.h
- sys/applemedia/dynapi.c
- sys/applemedia/dynapi.h
- sys/applemedia/mioapi.c
- sys/applemedia/mioapi.h
- sys/applemedia/miovideodevice.h
- sys/applemedia/miovideosrc.h
- sys/applemedia/mtapi.c
- sys/applemedia/mtapi.h
- sys/applemedia/qtkitvideosrc.h
- sys/applemedia/vtapi.c
- sys/applemedia/vtapi.h
  sys/applemedia/vtdec.c
  sys/applemedia/vtdec.h
  sys/applemedia/vtenc.h
- sys/applemedia/vth264decbin.h
- sys/applemedia/vth264encbin.h
  sys/applemedia/vtutil.c
  sys/applemedia/vtutil.h
 Copyright: 2009, Ole Andr? Vadla Ravnås <oravnas@cisco.com>
@@ -251,39 +137,18 @@ Files: gst-libs/gst/basecamerabinsrc/gstcamerabin-enum.c
  gst-libs/gst/basecamerabinsrc/gstcamerabinpreview.c
  gst-libs/gst/interfaces/photography.c
  gst-libs/gst/interfaces/photography.h
- gst/camerabin/camerabindebug.h
- gst/camerabin/camerabingeneral.c
- gst/camerabin/camerabingeneral.h
- gst/camerabin/camerabinimage.c
- gst/camerabin/camerabinimage.h
- gst/camerabin/camerabinpreview.c
- gst/camerabin/camerabinpreview.h
- gst/camerabin/camerabinvideo.c
- gst/camerabin/camerabinvideo.h
- gst/camerabin/gstcamerabin-enum.c
- gst/camerabin/gstcamerabin-enum.h
- gst/camerabin/gstcamerabin.c
- gst/camerabin/gstcamerabin.h
- gst/camerabin/gstcamerabincolorbalance.c
- gst/camerabin/gstcamerabincolorbalance.h
  gst/camerabin2/camerabingeneral.c
  gst/camerabin2/camerabingeneral.h
  gst/debugutils/fpsdisplaysink.c
  gst/debugutils/fpsdisplaysink.h
  tests/check/elements/camerabin.c
- tests/examples/camerabin/gst-camera-perf.c
- tests/examples/camerabin/gst-camera.c
- tests/examples/camerabin/gst-camera.h
- tests/examples/camerabin/gst-camerabin-test.c
  tests/examples/camerabin2/gst-camera2.h
 Copyright: 2008, Nokia Corporation <multimedia@maemo.org>
   2009, Nokia Corporation <multimedia@maemo.org>
   2010, Nokia Corporation <multimedia@maemo.org>
 License: LGPL-2+
 
-Files: gst/mpegdemux/mpegtspacketizer.h
- gst/mpegdemux/mpegtsparse.h
- gst/mpegtsdemux/mpegtspacketizer.h
+Files: gst/mpegtsdemux/mpegtspacketizer.h
  gst/mpegtsdemux/mpegtsparse.c
  gst/mpegtsdemux/mpegtsparse.h
  sys/dvb/cam.c
@@ -311,11 +176,7 @@ Files: gst/mpegdemux/mpegtspacketizer.h
 Copyright: 2007, Alessandro Decina
 License: LGPL-2+
 
-Files: ext/opus/gstrtpopusdepay.c
- ext/opus/gstrtpopusdepay.h
- ext/opus/gstrtpopuspay.c
- ext/opus/gstrtpopuspay.h
- gst/mpegtsdemux/gsttsdemux.c
+Files: gst/mpegtsdemux/gsttsdemux.c
  gst/siren/common.c
  gst/siren/common.h
  gst/siren/dct4.c
@@ -338,11 +199,7 @@ Files: ext/opus/gstrtpopusdepay.c
 Copyright: *No copyright*
 License: LGPL-2+
 
-Files: ext/divx/gstdivxdec.c
- ext/divx/gstdivxdec.h
- ext/divx/gstdivxenc.c
- ext/divx/gstdivxenc.h
- ext/dts/gstdtsdec.h
+Files: ext/dts/gstdtsdec.h
  ext/faac/gstfaac.h
  ext/faad/gstfaad.h
  ext/mpeg2enc/gstmpeg2encoptions.cc
@@ -355,104 +212,38 @@ Files: ext/divx/gstdivxdec.c
  ext/musepack/gstmusepackdec.h
  ext/musepack/gstmusepackreader.c
  ext/musepack/gstmusepackreader.h
- ext/sdl/sdlvideosink.c
- ext/sdl/sdlvideosink.h
- ext/xvid/gstxvid.c
- ext/xvid/gstxvid.h
- ext/xvid/gstxviddec.h
- ext/xvid/gstxvidenc.h
 Copyright: 2001-2002, Ronald Bultje <rbultje@ronald.bitfreak.net>
   2003, Ronald Bultje <rbultje@ronald.bitfreak.net>
   2004, Ronald Bultje <rbultje@ronald.bitfreak.net>
 License: LGPL-2+
 
-Files: ext/cdaudio/gstcdaudio.c
- ext/gsm/gstgsmdec.h
+Files: ext/gsm/gstgsmdec.h
  ext/gsm/gstgsmenc.h
  ext/ladspa/gstladspa.h
  ext/lv2/gstlv2.h
  ext/modplug/gstmodplug.cc
  ext/modplug/gstmodplug.h
- ext/nas/nassink.h
- ext/swfdec/gstswfdec.h
  gst/aiff/aiffparse.c
- gst/cdxaparse/gstcdxaparse.c
- gst/cdxaparse/gstcdxaparse.h
- gst/legacyresample/gstlegacyresample.h
  gst/smooth/gstsmooth.c
  gst/smooth/gstsmooth.h
  gst/speed/gstspeed.h
- gst/stereo/gststereo.c
- gst/stereo/gststereo.h
- sys/vcd/vcdsrc.c
- sys/vcd/vcdsrc.h
 Copyright: <1999> Erik Walthinsen <omega@cse.ogi.edu>
 License: LGPL-2+
 
-Files: ext/cog/gstcms.c
- ext/cog/gstcms.h
- ext/cog/gstcolorconvert.c
- ext/cog/gstlogoinsert.c
- gst/bayer/gstrgb2bayer.c
+Files: gst/bayer/gstrgb2bayer.c
  gst/inter/gstinter.c
  gst/inter/gstintersubsink.c
  gst/inter/gstintersubsink.h
  gst/inter/gstintersubsrc.c
  gst/inter/gstintersubsrc.h
- gst/patchdetect/gstpatchdetect.c
- gst/patchdetect/gstpatchdetect.h
  gst/videofilters/gstvideofiltersbad.c
  gst/videofilters/gstzebrastripe.c
- sys/avc/gstavcplugin.cpp
- sys/avc/gstavcsrc.cpp
- sys/decklink/gstdecklinksink.cpp
- sys/linsys/gstlinsyssdisink.c
- sys/linsys/gstlinsyssdisrc.c
 Copyright: 2008, David Schleef <ds@entropywave.com>
   2010, David Schleef <ds@entropywave.com>
   2011, David Schleef <ds@entropywave.com>
 License: LGPL-2+
 
-Files: gst/nsf/dis6502.h
- gst/nsf/fds_snd.c
- gst/nsf/fds_snd.h
- gst/nsf/log.c
- gst/nsf/log.h
- gst/nsf/mmc5_snd.c
- gst/nsf/mmc5_snd.h
- gst/nsf/nes6502.c
- gst/nsf/nes6502.h
- gst/nsf/nes_apu.c
- gst/nsf/nes_apu.h
- gst/nsf/nsf.c
- gst/nsf/nsf.h
- gst/nsf/osd.h
- gst/nsf/types.h
- gst/nsf/vrc7_snd.c
- gst/nsf/vrc7_snd.h
- gst/nsf/vrcvisnd.c
- gst/nsf/vrcvisnd.h
-Copyright: 1998-2000, Matthew Conte (matt@conte.com)
-License: LGPL-2+
-
 Files: sys/d3dvideosink/d3dvideosink.h
- sys/d3dvideosink/directx/d3d.c
- sys/d3dvideosink/directx/d3d.h
- sys/d3dvideosink/directx/directx.h
- sys/d3dvideosink/directx/directx10/dx10.c
- sys/d3dvideosink/directx/directx10/dx10.h
- sys/d3dvideosink/directx/directx10/dx10_d3d.c
- sys/d3dvideosink/directx/directx10/dx10_d3d.h
- sys/d3dvideosink/directx/directx11/dx11.c
- sys/d3dvideosink/directx/directx11/dx11.h
- sys/d3dvideosink/directx/directx11/dx11_d3d.c
- sys/d3dvideosink/directx/directx11/dx11_d3d.h
- sys/d3dvideosink/directx/directx9/dx9.c
- sys/d3dvideosink/directx/directx9/dx9.h
- sys/d3dvideosink/directx/directx9/dx9_d3d.c
- sys/d3dvideosink/directx/directx9/dx9_d3d.h
- sys/d3dvideosink/directx/dx.c
- sys/d3dvideosink/directx/dx.h
 Copyright: 2010, David Hoyt <dhoyt@hoytsoft.org>
   2011, David Hoyt <dhoyt@hoytsoft.org>
 License: LGPL-2+
@@ -467,8 +258,6 @@ Files: gst/pcapparse/gstpcapparse.c
  sys/wasapi/gstwasapisrc.h
  sys/wasapi/gstwasapiutil.c
  sys/wasapi/gstwasapiutil.h
- sys/wininet/gstwininetsrc.c
- sys/wininet/gstwininetsrc.h
  sys/winks/gstksclock.c
  sys/winks/gstksclock.h
  sys/winks/gstksvideodevice.c
@@ -484,10 +273,6 @@ Files: ext/resindvd/plugin.c
  ext/resindvd/resindvdbin.h
  ext/resindvd/resindvdsrc.c
  ext/resindvd/resindvdsrc.h
- ext/resindvd/rsnaudiomunge.c
- ext/resindvd/rsnaudiomunge.h
- ext/resindvd/rsnwrappedbuffer.c
- ext/resindvd/rsnwrappedbuffer.h
  ext/rtmp/gstrtmpsink.c
  ext/rtmp/gstrtmpsink.h
  gst/dvdspu/gstspu-pgs.c
@@ -501,15 +286,13 @@ Copyright: 2008, Jan Schmidt <thaytan@noraisin.net>
   2010, Jan Schmidt <thaytan@noraisin.net>
 License: LGPL-2+
 
-Files: sys/decklink/capture.cpp
- sys/decklink/linux/DeckLinkAPI.h
+Files: sys/decklink/linux/DeckLinkAPI.h
  sys/decklink/linux/DeckLinkAPIDispatch.cpp
  sys/decklink/linux/LinuxCOM.h
  sys/decklink/osx/DeckLinkAPI.h
  sys/decklink/osx/DeckLinkAPIConfiguration.h
  sys/decklink/osx/DeckLinkAPIDeckControl.h
  sys/decklink/osx/DeckLinkAPIDiscovery.h
- sys/decklink/osx/DeckLinkAPIDispatch-osx.cpp
  sys/decklink/osx/DeckLinkAPIModes.h
  sys/decklink/osx/DeckLinkAPIStreaming.h
  sys/decklink/osx/DeckLinkAPITypes.h
@@ -517,22 +300,7 @@ Files: sys/decklink/capture.cpp
  sys/decklink/win/DeckLinkAPIDispatch.cpp
 Copyright: 2009, Blackmagic Design
   2011, Blackmagic Design
-License: UNKNOWN
-
-Files: gst/dccp/gstdccp.c
- gst/dccp/gstdccp.h
- gst/dccp/gstdccp_common.h
- gst/dccp/gstdccpclientsink.c
- gst/dccp/gstdccpclientsink.h
- gst/dccp/gstdccpclientsrc.c
- gst/dccp/gstdccpclientsrc.h
- gst/dccp/gstdccpplugin.c
- gst/dccp/gstdccpserversink.c
- gst/dccp/gstdccpserversink.h
- gst/dccp/gstdccpserversrc.c
- gst/dccp/gstdccpserversrc.h
-Copyright: <2007> Leandro Melo de Sales <leandroal@gmail.com>
-License: LGPL-2+
+License: ISC
 
 Files: gst/geometrictransform/gstbulge.c
  gst/geometrictransform/gstbulge.h
@@ -547,11 +315,9 @@ Files: gst/geometrictransform/gstbulge.c
  gst/geometrictransform/gsttunnel.c
  gst/geometrictransform/gsttunnel.h
 Copyright: 2010, Filippo Argiolas <filippo.argiolas@gmail.com>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
-Files: gst/audiovisualizers/gstbaseaudiovisualizer.c
- gst/audiovisualizers/gstbaseaudiovisualizer.h
- gst/audiovisualizers/gstspacescope.c
+Files: gst/audiovisualizers/gstspacescope.c
  gst/audiovisualizers/gstspacescope.h
  gst/audiovisualizers/gstspectrascope.c
  gst/audiovisualizers/gstspectrascope.h
@@ -563,8 +329,7 @@ Files: gst/audiovisualizers/gstbaseaudiovisualizer.c
 Copyright: <2011> Stefan Kost <ensonic@users.sf.net>
 License: GPL-2+
 
-Files: ext/dirac/gstdirac.cc
- gst/inter/gstinteraudiosink.c
+Files: gst/inter/gstinteraudiosink.c
  gst/inter/gstinteraudiosink.h
  gst/inter/gstinteraudiosrc.c
  gst/inter/gstinteraudiosrc.h
@@ -578,75 +343,33 @@ Copyright: 2004, David A. Schleef <ds@schleef.org>
   2011, David A. Schleef <ds@schleef.org>
 License: LGPL-2+
 
-Files: sys/dshowdecwrapper/gstdshowfakesrc.cpp
- sys/dshowdecwrapper/gstdshowfakesrc.h
- sys/dshowdecwrapper/gstdshowutil.cpp
- sys/dshowsrcwrapper/gstdshow.cpp
- sys/dshowsrcwrapper/gstdshow.h
- sys/dshowsrcwrapper/gstdshowaudiosrc.cpp
- sys/dshowsrcwrapper/gstdshowaudiosrc.h
- sys/dshowsrcwrapper/gstdshowfakesink.cpp
- sys/dshowsrcwrapper/gstdshowfakesink.h
- sys/dshowsrcwrapper/gstdshowsrcwrapper.cpp
- sys/dshowsrcwrapper/gstdshowvideosrc.h
-Copyright: 2007, Sebastien Moutte <sebastien@moutte.net>
-License: LGPL-2+
-
-Files: gst/mpegdemux/flumpegdemux.c
- gst/mpegdemux/flutspatinfo.h
- gst/mpegdemux/flutspmtinfo.h
- gst/mpegdemux/flutspmtstreaminfo.h
- gst/mpegdemux/gstmpegdefs.h
+Files:
  gst/mpegdemux/gstmpegdemux.c
  gst/mpegdemux/gstmpegdemux.h
- gst/mpegdemux/gstmpegtsdemux.h
  gst/mpegdemux/gstpesfilter.c
  gst/mpegdemux/gstpesfilter.h
- gst/mpegdemux/gstsectionfilter.h
 Copyright: 2005
   2005-2009
-License: MPL-1.1 LGPL-2+
+License: MPL-1.1 or LGPL-2+
 
 Files: ext/ladspa/gstladspa.c
- ext/libmms/gstmms.c
  ext/lv2/gstlv2.c
  ext/rtmp/gstrtmp.c
  ext/rtmp/gstrtmpsrc.c
  ext/rtmp/gstrtmpsrc.h
  ext/sndfile/gstsfsrc.c
- gst-libs/gst/signalprocessor/gstsignalprocessor.c
- gst-libs/gst/signalprocessor/gstsignalprocessor.h
  gst/speed/gstspeed.c
 Copyright: 1999, Erik Walthinsen <omega@cse.ogi.edu>
   1999-2000, Erik Walthinsen <omega@cse.ogi.edu>
   1999-2001, Erik Walthinsen <omega@cse.ogi.edu>
 License: LGPL-2+
 
-Files: ext/celt/gstcelt.c
- ext/celt/gstceltdec.h
- ext/celt/gstceltenc.c
- ext/celt/gstceltenc.h
- ext/opus/gstopus.c
- ext/opus/gstopusdec.h
- ext/opus/gstopusenc.h
+Files: ext/opus/gstopus.c
  ext/opus/gstopusheader.h
  ext/opus/gstopusparse.h
 Copyright: <1999> Erik Walthinsen <omega@cse.ogi.edu>
   <2008> Sebastian Dröge <sebastian.droege@collabora.co.uk>
 License: LGPL-2+
-
-Files: sys/qtwrapper/codecmapping.c
- sys/qtwrapper/codecmapping.h
- sys/qtwrapper/imagedescription.c
- sys/qtwrapper/imagedescription.h
- sys/qtwrapper/qtutils.c
- sys/qtwrapper/qtutils.h
- sys/qtwrapper/qtwrapper.c
- sys/qtwrapper/qtwrapper.h
- sys/qtwrapper/videodecoders.c
-Copyright: <2006-2007> Fluendo <gstreamer@fluendo.com>
-  <2006-2007> Pioneers of the Inevitable <songbird@songbirdnest.com>
-License: MIT/X11 (BSD like) LGPL-2+
 
 Files: gst/gaudieffects/gstburn.c
  gst/gaudieffects/gstburn.h
@@ -658,7 +381,7 @@ Files: gst/gaudieffects/gstburn.c
  gst/gaudieffects/gstsolarize.c
  gst/gaudieffects/gstsolarize.h
 Copyright: 2010, Luis de Bethencourt <luis@debethencourt.com>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
 Files: ext/rsvg/gstrsvgdec.c
  ext/rsvg/gstrsvgdec.h
@@ -671,26 +394,12 @@ Files: ext/rsvg/gstrsvgdec.c
 Copyright: <2009> Sebastian Dröge <sebastian.droege@collabora.co.uk>
 License: LGPL-2+
 
-Files: gst/mve/gstmve.c
- gst/mve/gstmvedemux.c
- gst/mve/gstmvedemux.h
- gst/mve/gstmvemux.c
- gst/mve/gstmvemux.h
- gst/mve/mve.h
- gst/mve/mvevideoenc16.c
- gst/mve/mvevideoenc8.c
-Copyright: 2006, Jens Granseuer <jensgr@gmx.net>
-  2006-2008, Jens Granseuer <jensgr@gmx.net>
-License: LGPL-2+
-
 Files: ext/mpeg2enc/gstmpeg2enc.cc
  ext/mpeg2enc/gstmpeg2enc.hh
  ext/mpeg2enc/gstmpeg2encoder.cc
  ext/mpeg2enc/gstmpeg2encoder.hh
  ext/mpeg2enc/gstmpeg2encstreamwriter.cc
  ext/mpeg2enc/gstmpeg2encstreamwriter.hh
- ext/xvid/gstxviddec.c
- ext/xvid/gstxvidenc.c
 Copyright: 2003, Ronald Bultje <rbultje@ronald.bitfreak.net>
   2006, Mark Nauwelaerts <manauw@skynet.be>
 License: LGPL-2+
@@ -715,11 +424,9 @@ Files: gst/mpegpsmux/crc.h
  gst/mpegpsmux/psmuxstream.c
  gst/mpegpsmux/psmuxstream.h
 Copyright: 2008, Lin YANG <oxcsnicho@gmail.com>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
-Files: ext/opencv/gstopencvutils.c
- ext/opencv/gstopencvutils.h
- gst/camerabin2/gstplugin.c
+Files: gst/camerabin2/gstplugin.c
  gst/geometrictransform/gstgeometrictransform.c
  gst/geometrictransform/gstgeometrictransform.h
  gst/geometrictransform/plugin.c
@@ -737,56 +444,24 @@ Files: gst/pnm/gstpnm.c
 Copyright: 2009, Lutz Mueller <lutz@users.sourceforge.net>
 License: LGPL-2+
 
-Files: ext/opencv/gstedgedetect.c
- ext/opencv/gstedgedetect.h
- ext/opencv/gstfaceblur.c
- ext/opencv/gstfaceblur.h
- ext/opencv/gstpyramidsegment.c
- ext/opencv/gstpyramidsegment.h
+Files: ext/opencv/gstedgedetect.h
  ext/opencv/gsttemplatematch.h
 Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
   2005, Thomas Vander Stichele <thomas@apestaart.org>
   2008, Michael Sheldon <mike@mikeasoft.com>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
 Files: ext/resindvd/gstmpegdefs.h
  ext/resindvd/gstmpegdemux.c
  ext/resindvd/gstmpegdemux.h
- ext/resindvd/gstmpegdesc.c
  ext/resindvd/gstmpegdesc.h
  ext/resindvd/gstpesfilter.c
  ext/resindvd/gstpesfilter.h
 Copyright: Copyright (C) 2005 Fluendo, S.L.
 License: MPL-1.1
 
-Files: gst-libs/gst/video/gstsurfaceconverter.c
- gst-libs/gst/video/gstsurfaceconverter.h
- gst-libs/gst/video/gstsurfacemeta.c
- gst-libs/gst/video/gstsurfacemeta.h
- gst-libs/gst/video/videocontext.c
- gst-libs/gst/video/videocontext.h
-Copyright: 2011, Collabora Ltd
-  2011, Intel
-License: LGPL-2+
-
-Files: ext/vp8/gstvp8dec.c
- ext/vp8/gstvp8dec.h
- ext/vp8/gstvp8enc.c
- ext/vp8/gstvp8enc.h
- ext/vp8/gstvp8utils.c
- ext/vp8/gstvp8utils.h
-Copyright: 2006, David Schleef <ds@schleef.org>
-  2008-2010, Entropy Wave Inc
-  2010, Entropy Wave Inc
-  2010, Sebastian Dröge <sebastian.droege@collabora.co.uk>
-License: LGPL-2+
-
 Files: gst/bayer/gstrgb2bayer.h
  gst/videofilters/gstscenechange.h
- sys/avc/gstavcsrc.h
- sys/linsys/gstlinsys.c
- sys/linsys/gstlinsyssdisink.h
- sys/linsys/gstlinsyssdisrc.h
 Copyright: 2010, Entropy Wave Inc
   2011, Entropy Wave Inc
 License: LGPL-2+
@@ -821,15 +496,6 @@ Copyright: 2008, Nokia Corporation.
   2011, Nokia Corporation.
 License: LGPL-2+
 
-Files: sys/acmenc/acmenc.c
- sys/acmmp3dec/acmmp3dec.c
- sys/dshowvideosink/dshowvideofakesrc.cpp
- sys/dshowvideosink/dshowvideofakesrc.h
- sys/dshowvideosink/dshowvideosink.cpp
- sys/dshowvideosink/dshowvideosink.h
-Copyright: 2008, Pioneers of the Inevitable <songbird@songbirdnest.com>
-License: LGPL-2+
-
 Files: gst/camerabin2/gstcamerabin2.c
  gst/camerabin2/gstcamerabin2.h
  gst/camerabin2/gstviewfinderbin.c
@@ -841,7 +507,6 @@ License: LGPL-2+
 
 Files: gst/debugutils/debugutilsbad.c
  gst/id3tag/id3tag.h
- tests/check/elements/dataurisrc.c
  tests/check/elements/id3mux.c
  tests/check/elements/neonhttpsrc.c
  tests/check/elements/zbar.c
@@ -851,36 +516,14 @@ Copyright: 2006, Tim-Philipp Müller <tim centricular net>
   2010, Tim-Philipp Müller <tim centricular net>
 License: LGPL-2+
 
-Files: gst/videomeasure/gstvideomeasure.c
- gst/videomeasure/gstvideomeasure.h
- gst/videomeasure/gstvideomeasure_collector.c
- gst/videomeasure/gstvideomeasure_collector.h
- gst/videomeasure/gstvideomeasure_ssim.c
- gst/videomeasure/gstvideomeasure_ssim.h
-Copyright: <2009> Руслан Ижбулатов <lrn1986 _at_ gmail _dot_ com>
-License: LGPL-2.1+
-
 Files: ext/opencv/MotionCells.cpp
  ext/opencv/MotionCells.h
- ext/opencv/gstmotioncells.c
  ext/opencv/gstmotioncells.h
  ext/opencv/motioncells_wrapper.cpp
  ext/opencv/motioncells_wrapper.h
 Copyright: 2011, Nicola Murino <nicola.murino@gmail.com>
   2011, Robert Jobbagy <jobbagy.robert@gmail.com>
-License: MIT/X11 (BSD like) LGPL-2+
-
-Files: ext/kate/gstkate.c
- ext/kate/gstkatedec.c
- ext/kate/gstkatedec.h
- ext/kate/gstkateenc.h
- ext/kate/gstkatetiger.c
- ext/kate/gstkatetiger.h
-Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-  2005, Thomas Vander Stichele <thomas@apestaart.org>
-  2008, Vincent Penquerc'h <ogg.k.ogg.k@googlemail.com>
-  2008-2009, Vincent Penquerc'h <ogg.k.ogg.k@googlemail.com>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
 Files: sys/shm/gstshm.c
  sys/shm/gstshmsink.c
@@ -902,7 +545,6 @@ Copyright: <2011> Collabora Ltd
 License: LGPL-2+
 
 Files: ext/sndfile/gstsf.c
- ext/sndfile/gstsf.h
  ext/sndfile/gstsfsink.c
  ext/sndfile/gstsfsink.h
  ext/sndfile/gstsfsrc.h
@@ -913,21 +555,10 @@ License: LGPL-2+
 
 Files: gst/debugutils/gstcompare.c
  gst/debugutils/gstcompare.h
- tests/check/elements/rtpmux.c
- tests/check/pipelines/colorspace.c
- tests/check/pipelines/mimic.c
 Copyright: 2009, Collabora Ltd
   2009, Nokia Corp
   2011, Collabora Ltd
   2011, Nokia Corp
-License: LGPL-2+
-
-Files: ext/apexsink/gstapexplugin.c
- ext/apexsink/gstapexraop.c
- ext/apexsink/gstapexraop.h
- ext/apexsink/gstapexsink.c
- ext/apexsink/gstapexsink.h
-Copyright: 2008, J?r?mie Bernard [GRemi
 License: LGPL-2+
 
 Files: ext/bz2/gstbz2.c
@@ -938,90 +569,21 @@ Files: ext/bz2/gstbz2.c
 Copyright: 2006, Lutz Müller <lutz topfrose de>
 License: LGPL-2+
 
-Files: ext/jp2k/gstjasperdec.c
- ext/jp2k/gstjasperdec.h
- ext/jp2k/gstjasperenc.c
- ext/jp2k/gstjasperenc.h
- ext/jp2k/gstjp2k.c
-Copyright: 2008, Mark Nauwelaerts <mnauw@users.sf.net>
-License: LGPL-2+
-
 Files: ext/soundtouch/gstbpmdetect.cc
  ext/soundtouch/gstbpmdetect.hh
- gst/rawparse/gstaudioparse.c
- gst/rawparse/gstaudioparse.h
- tests/check/elements/ofa.c
 Copyright: 2007, Sebastian Dröge <slomo@circular-chaos.org>
   2008, Sebastian Dröge <slomo@circular-chaos.org>
 License: LGPL-2+
 
-Files: gst/mpegtsmux/tsmux/tsmux.c
- gst/mpegtsmux/tsmux/tsmux.h
- gst/mpegtsmux/tsmux/tsmuxcommon.h
+Files: gst/mpegtsmux/tsmux/tsmuxcommon.h
  gst/mpegtsmux/tsmux/tsmuxstream.c
  gst/mpegtsmux/tsmux/tsmuxstream.h
 Copyright: 2006, BBC and Fluendo S.A
-License: MPL-1.1 GPL GPL-2+ LGPL (v2 or later) (with incorrect FSF address)
-
-Files: gst/mpegtsmux/mpegtsmux.h
- gst/mpegtsmux/mpegtsmux_aac.c
- gst/mpegtsmux/mpegtsmux_aac.h
- gst/mpegtsmux/mpegtsmux_h264.c
- gst/mpegtsmux/mpegtsmux_h264.h
-Copyright: 2006-2008, Fluendo S.A
-  2006-2010, Fluendo S.A
-License: MPL-1.1 GPL GPL-2+ LGPL (v2 or later) (with incorrect FSF address)
-
-Files: sys/linsys/include/master.h
- sys/linsys/include/sdi.h
- sys/linsys/include/sdiaudio.h
- sys/linsys/include/sdivideo.h
-Copyright: 2004-2009, Linear Systems Ltd
-  2009, Linear Systems Ltd
-  2009-2010, Linear Systems Ltd
-License: BSD (3 clause)
-
-Files: gst/legacyresample/functable.c
- gst/legacyresample/resample.c
- gst/legacyresample/resample_functable.c
- gst/legacyresample/resample_ref.c
-Copyright: <2001> David A. Schleef <ds@schleef.org>
-License: LGPL
+License: MPL-1.1 or MIT or LGPL-2+
 
 Files: gst/videosignal/gstvideoanalyse.c
  gst/videosignal/gstvideoanalyse.h
- gst/videosignal/gstvideodetect.h
- gst/videosignal/gstvideomark.h
 Copyright: <2006> Wim Taymans <wim@fluendo.com>
-License: LGPL-2+
-
-Files: gst/dtmf/gstrtpdtmfsrc.c
- gst/rtpmux/gstrtpdtmfmux.h
- gst/rtpmux/gstrtpmux.h
- gst/rtpmux/gstrtpmuxer.c
-Copyright: 1999-2000, Erik Walthinsen <omega@cse.ogi.edu>
-  <2007> Nokia Corporation
-License: LGPL-2+
-
-Files: gst/hls/gstfragment.c
- gst/hls/gstfragment.h
- gst/hls/gsturidownloader.c
- gst/hls/gsturidownloader.h
-Copyright: 2011, Andoni Morales Alastruey <ylatuya@gmail.com>
-License: LGPL-2+
-
-Files: gst/tta/gsttta.c
- gst/tta/gstttadec.h
- gst/tta/gstttaparse.c
- gst/tta/gstttaparse.h
-Copyright: 2004, Arwed v. Merkatz <v.merkatz@gmx.net>
-License: LGPL-2+
-
-Files: sys/vdpau/gstvdp/gstvdpoutputbufferpool.c
- sys/vdpau/gstvdp/gstvdpoutputbufferpool.h
- sys/vdpau/gstvdp/gstvdpvideobufferpool.c
- sys/vdpau/gstvdp/gstvdpvideobufferpool.h
-Copyright: Carl-Anton Ingmarsson 2010, <ca.ingmarsson@gmail.com>
 License: LGPL-2+
 
 Files: gst/jp2kdecimator/gstjp2kdecimator.c
@@ -1032,28 +594,9 @@ Copyright: 2010, Collabora Multimedia
   2010, Oblong Industries, Inc
 License: LGPL-2+
 
-Files: gst-libs/gst/video/gstbasevideodecoder.c
- gst-libs/gst/video/gstbasevideodecoder.h
- gst-libs/gst/video/gstbasevideoencoder.c
- gst-libs/gst/video/gstbasevideoencoder.h
-Copyright: 2008, David Schleef <ds@schleef.org>
-  2011, Mark Nauwelaerts <mark.nauwelaerts@collabora.co.uk>
-  2011, Nokia Corporation.
-License: LGPL-2+
-
-Files: sys/directdraw/gstdirectdrawplugin.c
- sys/directdraw/gstdirectdrawsink.c
- sys/directdraw/gstdirectdrawsink.h
- sys/directsound/gstdirectsoundplugin.c
+Files: sys/directsound/gstdirectsoundplugin.c
 Copyright: 2005, Sebastien Moutte <sebastien@moutte.net>
   2007, Pioneers of the Inevitable <songbird@songbirdnest.com>
-License: LGPL-2+
-
-Files: ext/timidity/gsttimidity.c
- ext/timidity/gsttimidity.h
- ext/timidity/gstwildmidi.c
- ext/timidity/gstwildmidi.h
-Copyright: 2007, Wouter Paesen <wouter@blue-gate.be>
 License: LGPL-2+
 
 Files: sys/shm/shmalloc.c
@@ -1062,16 +605,7 @@ Files: sys/shm/shmalloc.c
  sys/shm/shmpipe.h
 Copyright: <2009> Collabora Ltd
   <2009> Nokia Inc
-License: MIT/X11 (BSD like)
-
-Files: sys/dshowdecwrapper/gstdshowaudiodec.cpp
- sys/dshowdecwrapper/gstdshowaudiodec.h
- sys/dshowdecwrapper/gstdshowvideodec.cpp
- sys/dshowdecwrapper/gstdshowvideodec.h
-Copyright: <2006-2008> Pioneers of the Inevitable <songbird@songbirdnest.com>
-  <2006-2010> Fluendo <support@fluendo.com>
-  <2007-2008> Sebastien Moutte <sebastien@moutte.net>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT
 
 Files: gst/mpegpsmux/mpegpsmux_aac.c
  gst/mpegpsmux/mpegpsmux_aac.h
@@ -1079,35 +613,14 @@ Files: gst/mpegpsmux/mpegpsmux_aac.c
  gst/mpegpsmux/mpegpsmux_h264.h
 Copyright: 2006-2008, Fluendo S.A
   2008, Lin YANG <oxcsnicho@gmail.com>
-License: MPL-1.1 GPL GPL-2+ LGPL (v2 or later) (with incorrect FSF address)
-
-Files: common/coverage/coverage-report-entry.pl
- common/coverage/coverage-report.pl
- common/coverage/coverage-report.xsl
-Copyright: 2006, Daniel Berrange
-License: GPL-2+
-
-Files: tests/examples/scaletempo/demo-gui.c
- tests/examples/scaletempo/demo-main.c
- tests/examples/scaletempo/demo-player.c
-Copyright: 2008, Rov Juvano <rovjuvano@users.sourceforge.net>
-License: GPL-3+
+License: MPL-1.1 or MIT or LGPL-2+
 
 Files: gst/mpegtsdemux/gstmpegdefs.h
- gst/mpegtsdemux/gstmpegdesc.c
  gst/mpegtsdemux/gstmpegdesc.h
 Copyright: 2005
 License: LGPL-2+
 
-Files: ext/sdl/gstsdl.c
- ext/sdl/sdlaudiosink.c
- ext/sdl/sdlaudiosink.h
-Copyright: <2005> Edgard Lima <edgard.lima@indt.org.br>
-License: LGPL-2+
-
-Files: gst/videosignal/gstvideodetect.c
- gst/videosignal/gstvideomark.c
- gst/videosignal/gstvideosignal.c
+Files: gst/videosignal/gstvideosignal.c
 Copyright: <2007> Wim Taymans <wim@fluendo.com>
 License: LGPL-2+
 
@@ -1144,14 +657,10 @@ Copyright: <2011> Collabora Ltd
 License: LGPL-2+
 
 Files: ext/curl/gstcurl.c
- ext/curl/gstcurlsink.c
- ext/curl/gstcurlsink.h
 Copyright: 2011, Axis Communications <dev-gstreamer@axis.com>
 License: LGPL-2+
 
 Files: ext/gme/gstgme.h
- ext/spc/gstspc.c
- ext/spc/gstspc.h
 Copyright: 2004-2005, 2009 Michael Pyne <michael dot pyne at kdemail net>
   2004-2005, Michael Pyne <michael dot pyne at kdemail net>
   2004-2006, Chris Lee <clee at kde org>
@@ -1173,38 +682,16 @@ Files: ext/spandsp/gstspandsp.c
 Copyright: 2011, Collabora Ltd
 License: LGPL-2+
 
-Files: gst/dtmf/gstdtmfdetect.c
- gst/dtmf/gstdtmfdetect.h
- gst/liveadder/liveadder.h
-Copyright: 2008, Collabora Ltd
-  2008, Nokia Corporation
-  2009, Collabora Ltd
-  2009, Nokia Corporation
-License: LGPL-2+
-
 Files: ext/voamrwbenc/gstvoamrwb.c
  ext/voamrwbenc/gstvoamrwbenc.c
  ext/voamrwbenc/gstvoamrwbenc.h
 Copyright: 2006, Edgard Lima <edgard.lima@indt.org.br>
 License: LGPL-2+
 
-Files: gst/hdvparse/gsthdvparse.c
- gst/hdvparse/gsthdvparse.h
- gst/real/gstreal.c
-Copyright: 2009, Edward Hervey <bilboed@bilboed.com>
-  Edward Hervey <bilboed@bilboed.com>
-License: LGPL-2+
-
 Files: gst/dvdspu/gstdvdspu.c
  gst/dvdspu/gstdvdspu.h
  gst/dvdspu/gstspu-common.h
 Copyright: 2007, Fluendo S.A. <info@fluendo.com>
-License: LGPL-2+
-
-Files: ext/mimic/gstmimdec.h
- ext/mimic/gstmimenc.h
- ext/mimic/gstmimic.c
-Copyright: 2005, INdT
 License: LGPL-2+
 
 Files: ext/voaacenc/gstvoaac.c
@@ -1214,7 +701,6 @@ Copyright: 2011, Kan Hu <kan.hu@linaro.org>
 License: LGPL-2+
 
 Files: gst-libs/gst/basecamerabinsrc/gstcamerabinpreview.h
- tests/check/elements/camerabin2.c
  tests/examples/camerabin2/gst-camerabin2-test.c
 Copyright: 2008, Nokia Corporation <multimedia@maemo.org>
   2010, Nokia Corporation <multimedia@maemo.org>
@@ -1229,8 +715,6 @@ Copyright: 2005, Philippe Khalaf <burger@speedy.org>
 License: LGPL-2+
 
 Files: ext/faad/gstfaad.c
- gst/cdxaparse/gstvcdparse.c
- gst/cdxaparse/gstvcdparse.h
 Copyright: 2003, Ronald Bultje <rbultje@ronald.bitfreak.net>
   2004, Ronald Bultje <rbultje@ronald.bitfreak.net>
   2006, Tim-Philipp Müller <tim centricular net>
@@ -1243,9 +727,7 @@ Files: gst/autoconvert/gstautovideoconvert.c
 Copyright: 2010, ST-Ericsson SA
 License: LGPL-2+
 
-Files: ext/celt/gstceltdec.c
- ext/opus/gstopusdec.c
- ext/opus/gstopusparse.c
+Files: ext/opus/gstopusparse.c
 Copyright: 2004, Wim Taymans <wim@fluendo.com>
   2006, Tim-Philipp Müller <tim centricular net>
   2008, Sebastian Dröge <sebastian.droege@collabora.co.uk>
@@ -1261,12 +743,7 @@ Files: gst/gaudieffects/gstchromium.h
  gst/gaudieffects/gstdodge.h
  gst/gaudieffects/gstexclusion.h
 Copyright: 2010, Luis de Bethencourt <luis@debethencourt.com>>
-License: MIT/X11 (BSD like) LGPL-2+
-
-Files: gst/librfb/vncauth.c
- gst/librfb/vncauth.h
-Copyright: 1999, AT&T Laboratories Cambridge.
-License: GPL-2+
+License: MIT or LGPL-2+
 
 Files: sys/dvb/camconditionalaccess.c
  sys/dvb/camconditionalaccess.h
@@ -1274,24 +751,8 @@ Copyright: 2007, Alessandro Decina
 License: GPL-2+
 
 Files: tests/examples/opencv/gstmotioncells_dynamic_test.c
- tests/examples/opencv/gstmotioncells_dynamic_test.h
 Copyright: 2011, Robert Jobbagy <jobbagy.robert@gmail.com>
 License: GPL-3+
-
-Files: tests/examples/opencv/gst_element_print_properties.c
- tests/examples/opencv/gst_element_print_properties.h
-Copyright: 2010, Wesley Miller <wmiller@sdr.com>
-License: GPL-3+
-
-Files: gst/legacyresample/functable.h
- gst/legacyresample/resample.h
-Copyright: <2001> David Schleef <ds@schleef.org>
-License: LGPL
-
-Files: sys/pvr2d/gstpvr.c
- sys/pvr2d/gstpvr.h
-Copyright: 2010, Texas Instruments Incorporated
-License: LGPL
 
 Files: gst/festival/gstfestival.c
  gst/festival/gstfestival.h
@@ -1299,14 +760,7 @@ Copyright: 1999, */
   <1999> Erik Walthinsen <omega@cse.ogi.edu>
 License: LGPL-2+
 
-Files: ext/cog/gstcogcolorspace.c
- ext/cog/gstcogdownsample.c
-Copyright: <1999> Erik Walthinsen <omega@cse.ogi.edu>
-  <2003> David Schleef <ds@schleef.org>
-License: LGPL-2+
-
-Files: ext/opus/gstopusenc.c
- ext/opus/gstopusheader.c
+Files: ext/opus/gstopusheader.c
 Copyright: <1999> Erik Walthinsen <omega@cse.ogi.edu>
   <2008> Sebastian Dröge <sebastian.droege@collabora.co.uk>
   <2011> Vincent Penquerc'h <vincent.penquerch@collabora.co.uk>
@@ -1317,24 +771,6 @@ Files: ext/neon/gstneonhttpsrc.c
 Copyright: <2005> Edgard Lima <edgard.lima@indt.org.br>
   <2006> Andre Moreira Magalhaes <andre.magalhaes@indt.org.br>
   <2006> Rosfran Borges <rosfran.borges@indt.org.br>
-License: LGPL-2+
-
-Files: ext/dc1394/gstdc1394.c
- ext/dc1394/gstdc1394.h
-Copyright: <2006> Antoine Tremblay <hexa00@gmail.com>
-  <2006> Eric Jonas <jonas@mit.edu>
-License: LGPL-2+
-
-Files: gst/nuvdemux/gstnuvdemux.c
- gst/nuvdemux/gstnuvdemux.h
-Copyright: <2006> Renato Araujo Oliveira Filho <renato.filho@indt.org.br>
-License: LGPL-2+
-
-Files: gst/rtpmux/gstrtpdtmfmux.c
- gst/rtpmux/gstrtpmux.c
-Copyright: 1999-2000, Erik Walthinsen <omega@cse.ogi.edu>
-  <2007-2010> Collabora Ltd
-  <2007-2010> Nokia Corporation
 License: LGPL-2+
 
 Files: gst-libs/gst/codecparsers/gstmpegvideoparser.c
@@ -1418,34 +854,11 @@ Copyright: 2008, Benjamin Schmitz <vortex@wolpzone.de>
   2009, Sebastian Dröge <sebastian.droege@collabora.co.uk>
 License: LGPL-2+
 
-Files: ext/spc/tag.c
- ext/spc/tag.h
-Copyright: 2007, Brian Koropoff <bkoropoff at gmail com>
-License: LGPL-2+
-
-Files: sys/vdpau/mpeg/mpegutil.c
- sys/vdpau/mpeg/mpegutil.h
-Copyright: 2007, Jan Schmidt <thaytan@mad.scientist.com>
-  2009, Carl-Anton Ingmarsson <ca.ingmarsson@gmail.com>
-License: LGPL-2+
-
-Files: sys/vdpau/gstvdpsink.c
- sys/vdpau/gstvdpsink.h
-Copyright: 2005, Julien Moutte <julien@moutte.net>
-  2009, Carl-Anton Ingmarsson <ca.ingmarsson@gmail.com>
-License: LGPL-2+
-
 Files: ext/openal/gstopenal.c
  ext/openal/gstopenalsink.c
 Copyright: 2005, Wim Taymans <wim@fluendo.com>
   2006, Tim-Philipp Müller <tim centricular net>
   2009-2010, Chris Robinson <chris.kcat@gmail.com>
-License: LGPL-2+
-
-Files: gst/dtmf/gstrtpdtmfdepay.c
- gst/dtmf/gstrtpdtmfdepay.h
-Copyright: 2008, Collabora Limited
-  2008, Nokia Corporation
 License: LGPL-2+
 
 Files: gst/autoconvert/gstautoconvert.c
@@ -1455,31 +868,10 @@ Copyright: 2007, Collabora Ltd
   2007-2012, Collabora Ltd
 License: LGPL-2+
 
-Files: sys/pvr2d/gstpvrvideosink.c
- sys/pvr2d/gstpvrvideosink.h
-Copyright: 2011, - Collabora Ltda
-  2011, - Texas Instruments
-  2011, Collabora Ltda
-  2011, Texas Instruments
-License: LGPL-2+
-
 Files: gst/rawparse/gstvideoparse.c
  gst/rawparse/gstvideoparse.h
 Copyright: 2006, David A. Schleef <ds@schleef.org>
   2007,2009, Sebastian Dröge <sebastian.droege@collabora.co.uk>
-License: LGPL-2+
-
-Files: gst/rawparse/gstrawparse.c
- gst/rawparse/gstrawparse.h
-Copyright: 2006, David A. Schleef <ds@schleef.org>
-  2007, Sebastian Dröge <slomo@circular-chaos.org>
-License: LGPL-2+
-
-Files: gst/real/gstrealaudiodec.c
- gst/real/gstrealvideodec.c
-Copyright: 2005, Lutz Mueller <lutz@topfrose.de>
-  2006, Edward Hervey <bilboed@bilboed.com>
-  2006, Lutz Mueller <lutz@topfrose.de>
 License: LGPL-2+
 
 Files: gst/mpegtsdemux/pesparse.c
@@ -1496,21 +888,13 @@ Copyright: 1999, Erik Walthinsen <omega@cse.ogi.edu>
   2010, Sebastian Dröge <sebastian.droege@collabora.co.uk>
 License: LGPL-2+
 
-Files: ext/ofa/gstofa.c
- ext/ofa/gstofa.h
-Copyright: 2006, M. Derezynski
-  2008, Eric Buehl
-  2008, Sebastian Dröge <slomo@circular-chaos.org>
-License: LGPL-2+
-
 Files: gst/adpcmdec/adpcmdec.c
  gst/adpcmenc/adpcmenc.c
 Copyright: 1999-2002, Erik de Castro Lopo <erikd@zip.com.au
   2009, Pioneers of the Inevitable <songbird@songbirdnest.com>
 License: LGPL-2+
 
-Files: gst/dvdspu/gstdvdspu-render.c
- gst/dvdspu/gstspu-vobsub-render.c
+Files: gst/dvdspu/gstspu-vobsub-render.c
 Copyright: 2007, Fluendo S.A. <info@fluendo.com>
   2009, Jan Schmidt <thaytan@noraisin.net>
 License: LGPL-2+
@@ -1522,22 +906,10 @@ Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
   2011, Igalia S.L
 License: LGPL-2+
 
-Files: gst/dataurisrc/gstdataurisrc.c
- gst/dataurisrc/gstdataurisrc.h
-Copyright: 2009, Igalia S.L
-  2009, Sebastian Dröge <sebastian.droege@collabora.co.uk>
-License: LGPL-2+
-
 Files: ext/wayland/gstwaylandsink.c
  ext/wayland/gstwaylandsink.h
 Copyright: 2011, Intel Corporation
   2011, Sreerenj Balachandran <sreerenj.balachandran@intel.com>
-License: LGPL-2+
-
-Files: gst/mve/mvevideodec16.c
- gst/mve/mvevideodec8.c
-Copyright: 2003, the ffmpeg project, Mike Melanson
-  2006, Jens Granseuer
 License: LGPL-2+
 
 Files: ext/directfb/dfbvideosink.c
@@ -1585,11 +957,6 @@ Copyright: 2011, Paulo Pizarro <paulo.pizarro@gmail.com>
   2011, Tiago Katcipis <tiagokatcipis@gmail.com>
 License: LGPL-2+
 
-Files: gst/scaletempo/gstscaletempo.c
- gst/scaletempo/gstscaletempo.h
-Copyright: 2008, Rov Juvano <rovjuvano@users.sourceforge.net>
-License: LGPL-2+
-
 Files: ext/zbar/gstzbar.c
  ext/zbar/gstzbar.h
 Copyright: 2009, Stefan Kost <ensonic@users.sf.net>
@@ -1606,12 +973,6 @@ Copyright: 2010, Texas Instruments, Inc
   2011, Thiago Santos <thiago.sousa.santos@collabora.com>
 License: LGPL-2+
 
-Files: ext/kate/gstkatespu.c
- ext/kate/gstkateutil.c
-Copyright: 2008, Vincent Penquerc'h <ogg.k.ogg.k@googlemail.com>
-  2009, Vincent Penquerc'h <ogg.k.ogg.k@googlemail.com>
-License: LGPL-2+
-
 Files: gst/mpegtsdemux/tsdemux.h
  sys/dvb/parsechannels.c
 Copyright: 2008, Zaheer Abbas Merali
@@ -1619,24 +980,7 @@ Copyright: 2008, Zaheer Abbas Merali
 License: LGPL-2+
 
 Files: gst/jpegformat/gstjpegformat.c
- gst/jpegformat/gstjpegformat.h
 Copyright: <2010> Stefan Kost <ensonic@users.sf.net>
-License: LGPL-2.1+
-
-Files: gst/tta/crc32.h
- gst/tta/ttadec.h
-Copyright: 1999-2004, Alexander Djourik.
-License: LGPL-2.1+
-
-Files: gst/rtpvp8/gstrtpvp8depay.c
- gst/rtpvp8/gstrtpvp8pay.c
-Copyright: 2011, Collabora Ltd
-  2011, Sjoerd Simons <sjoerd@luon.net>
-License: LGPL-2.1+
-
-Files: gst/rtpvp8/gstrtpvp8depay.h
- gst/rtpvp8/gstrtpvp8pay.h
-Copyright: 2011, Sjoerd Simons <sjoerd@luon.net>
 License: LGPL-2.1+
 
 Files: gst/jpegformat/gstjifmux.c
@@ -1649,129 +993,80 @@ Files: ext/soundtouch/gstpitch.cc
 Copyright: 2006, Wouter Paesen <wouter@blue-gate.be>
 License: LGPL-2.1+
 
-Files: gst/freeze/gstfreeze.c
- gst/freeze/gstfreeze.h
-Copyright: 2005, Gergely Nagy <gergely.nagy@neteyes.hu>
-License: LGPL-2.1,
-
 Files: sys/directsound/gstdirectsoundsrc.c
  sys/directsound/gstdirectsoundsrc.h
 Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
   2005, S?bastien Moutte <sebastien@moutte.net>
   2005, Thomas Vander Stichele <thomas@apestaart.org>
   2006, Joni Valtanen <joni.valtanen@movial.fi>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
 Files: gst/faceoverlay/gstfaceoverlay.c
  gst/faceoverlay/gstfaceoverlay.h
 Copyright: 2011, Laura Lucas Alday <lauralucas@gmail.com>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
 Files: gst/gaudieffects/gstplugin.c
- gst/gaudieffects/gstplugin.h
 Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
   2005, Thomas Vander Stichele <thomas@apestaart.org>
   2010, Luis de Bethencourt <luis@debethencourt.com>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
-Files: ext/opencv/gstfacedetect.c
- ext/opencv/gstfacedetect.h
+Files: ext/opencv/gstfacedetect.h
 Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
   2005, Thomas Vander Stichele <thomas@apestaart.org>
   2008, Michael Sheldon <mike@mikeasoft.com>
   2011, Stefan Sauer <ensonic@users.sf.net>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
 Files: gst/fieldanalysis/gstfieldanalysis.c
  gst/fieldanalysis/gstfieldanalysis.h
 Copyright: 2010, Robert Swain <robert.swain@collabora.co.uk>
   2011, Robert Swain <robert.swain@collabora.co.uk>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
 Files: gst/aiff/aiffmux.c
  gst/aiff/aiffmux.h
 Copyright: 2009, Robert Swain <robert.swain@gmail.com>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
-Files: ext/opencv/gsttextoverlay.c
- ext/opencv/gsttextoverlay.h
+Files: ext/opencv/gsttextoverlay.h
 Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
   2005, Thomas Vander Stichele <thomas@apestaart.org>
   2010, Sreerenj Balachandran <bsreerenj@gmail.com>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
 Files: ext/openal/gstopenalsrc.c
  ext/openal/gstopenalsrc.h
 Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
   2005, Thomas Vander Stichele <thomas@apestaart.org>
   2008, Victor Lin <bornstub@gmail.com>
-License: MIT/X11 (BSD like) LGPL-2+
+License: MIT or LGPL-2+
 
 Files: gst/librfb/d3des.c
  gst/librfb/d3des.h
 Copyright: 1988-1992, Richard Outerbridge
   1999, AT&T Laboratories Cambridge.
-License: MIT/X11 (BSD like)
+License: MIT
 
 Files: ext/resindvd/rsnparsetter.c
  ext/resindvd/rsnparsetter.h
 Copyright: 2008, Jan Schmidt <thaytan@noraisin.net>
 License: LGPL-2+
 
-Files: gst/dtmf/tone_detect.c
- gst/dtmf/tone_detect.h
-Copyright: 2001, Steve Underwood <steveu@coppice.org>
-License: LGPL-2+
-
-Files: gst/rtpvp8/dboolhuff.c
- gst/rtpvp8/dboolhuff.h
-Copyright: 2010, The WebM project authors.
-License: BSD (3 clause)
-
 Files: gst/inter/gstintertest.c
 Copyright: 2010, Entropy Wave Inc
   2011, David Schleef <ds@schleef.org>
-License: BSD (2 clause)
-
-Files: sys/linsys/include/asi.h
-Copyright: 1999, Tony Bolger <d7v@indigo.ie>
-  2000-2009, Linear Systems Ltd
-License: BSD (3 clause)
-
-Files: ltmain.sh
-Copyright: 1996-2001, 2003-2006
-License: GPL-2+
+License: BSD-2-clause
 
 Files: gst/audiovisualizers/gstdrawhelpers.h
 Copyright: <2011> Stefan Sauer <ensonic@users.sf.net>
-License: GPL-2+
-
-Files: gst/tta/filters.h
-Copyright: 1999-2004, Alexander Djourik.
 License: GPL-2+
 
 Files: gst/mpegpsmux/bits.h
 Copyright: 2001-2002, the VideoLAN team
   2008, Lin YANG <oxcsnicho@gmail.com>
 License: GPL-2+
-
-Files: tests/examples/scaletempo/demo-gui.h
-Copyright: 2008, Rov Juvano <rovjuvano@users.sourceforge.net>
-License: GPL-3+
-
-Files: tests/examples/scaletempo/demo-player.h
-Copyright: 2008, Rov Juvano <rovjuvano@users.sourceforge.net>
-License: GPL-3+
-
-Files: sys/pvr2d/gstpvrbufferpool.c
-Copyright: 2010, Texas Instruments Incorporated
-  2011, Collabora Ltd
-License: LGPL
-
-Files: sys/pvr2d/gstpvrbufferpool.h
-Copyright: 2010-2011, Texas Instruments Incorporated
-  2011, Collabora Ltda
-License: LGPL
 
 Files: gst/librfb/gstrfbsrc.h
 Copyright: <1999> Erik Walthinsen <omega@cse.ogi.edu>
@@ -1786,87 +1081,12 @@ Copyright: <1999> Erik Walthinsen <omega@cse.ogi.edu>
   <2007> Thijs Vermeir <thijsvermeir@gmail.com>
 License: LGPL-2+
 
-Files: gst/nsf/gstnsf.c
-Copyright: <1999> Erik Walthinsen <omega@cse.ogi.edu>
-  <2004> Johan Dahlin <johan@gnome.org>
-  <2006> Wim Taymans <wim@fluendo.com>
-License: LGPL-2+
-
-Files: ext/swfdec/gstswfdec.c
-Copyright: 2002-2003,2006, David A. Schleef <ds@schleef.org>
-  <1999> Erik Walthinsen <omega@cse.ogi.edu>
-License: LGPL-2+
-
-Files: ext/cog/gstcogscale.c
-Copyright: 2005, David Schleef <ds@schleef.org>
-  <1999> Erik Walthinsen <omega@cse.ogi.edu>
-License: LGPL-2+
-
-Files: ext/nas/nassink.c
-Copyright: <2001> Richard Boulton <richard-gst@tartarus.org>
-  <2003> Laurent Vivier <Laurent.Vivier@bull.net>
-  <2004> Arwed v. Merkatz <v.merkatz@gmx.net>
-License: LGPL-2+
-
-Files: ext/kate/gstkateparse.h
-Copyright: <2004> Thomas Vander Stichele <thomas at apestaart dot org>
-  <2008> Vincent Penquerc'h <ogg.k.ogg.k at googlemail dot com>
-License: LGPL-2+
-
-Files: ext/kate/gstkateparse.c
-Copyright: 2006, Andy Wingo <wingo@pobox.com>
-  2008, Vincent Penquerc'h <ogg.k.ogg.k@googlemail.com>
-  <2004> Thomas Vander Stichele <thomas at apestaart dot org>
-License: LGPL-2+
-
 Files: tests/check/generic/states.c
 Copyright: <2005> Thomas Vander Stichele <thomas at apestaart dot org>
 License: LGPL-2+
 
-Files: tests/check/elements/legacyresample.c
-Copyright: <2005> Thomas Vander Stichele <thomas at apestaart dot org>
-  <2006> Tim-Philipp Müller <tim at centricular net>
-License: LGPL-2+
-
-Files: gst/dtmf/gstdtmfsrc.h
-Copyright: <2005> Wim Taymans <wim@fluendo.com>
-  <2007> Collabora
-  <2007> Nokia Corporation
-License: LGPL-2+
-
-Files: gst/dtmf/gstrtpdtmfsrc.h
-Copyright: <2005> Wim Taymans <wim@fluendo.com>
-  <2007> Nokia Corporation
-License: LGPL-2+
-
-Files: sys/dshowdecwrapper/gstdshowutil.h
-Copyright: 2007, Sebastien Moutte <sebastien@moutte.net>
-  <2006-2010> Fluendo <support@fluendo.com>
-License: LGPL-2+
-
-Files: ext/mythtv/gstmythtvsrc.h
-Copyright: <2006> INdT - Rosfran Borges <rosfran.borges@indt.org.br>
-  <2007> INdT - Rentao Filho <renato.filho@indt.org.br>
-License: LGPL-2+
-
-Files: ext/kate/gstkatetag.h
-Copyright: <2006> James Livingston <doclivingston@gmail.com>
-  <2008> Vincent Penquerc'h <ogg.k.ogg.k@googlemail.com>
-License: LGPL-2+
-
 Files: tests/check/elements/mpeg2enc.c
 Copyright: <2006> Mark Nauwelaerts <manauw@skynet.be>
-License: LGPL-2+
-
-Files: ext/mythtv/gstmythtvsrc.c
-Copyright: <2006> Rosfran Borges <rosfran.borges@indt.org.br>
-  <2007> Renato Filho <renato.filho@indt.org.br>
-License: LGPL-2+
-
-Files: gst/dtmf/gstdtmfsrc.c
-Copyright: 1999-2000, Erik Walthinsen <omega@cse.ogi.edu>
-  <2007> Collabora
-  <2007> Nokia Corporation
 License: LGPL-2+
 
 Files: gst/videoparsers/gstmpeg4videoparse.h
@@ -1883,15 +1103,6 @@ Copyright: <2007> Julien Moutte <julien@fluendo.com>
   <2011> Thibault Saunier <thibault.saunier@collabora.com>
 License: LGPL-2+
 
-Files: tests/check/elements/timidity.c
-Copyright: <2007> Stefan Kost <ensonic@users.sf.net>
-License: LGPL-2+
-
-Files: tests/check/elements/kate.c
-Copyright: <2007> Stefan Kost <ensonic@users.sf.net>
-  <2008> ogg.k.ogg.k <ogg.k.ogg.k@googlemail.com>
-License: LGPL-2+
-
 Files: gst/sdp/gstsdpdemux.c
 Copyright: <2007> Wim Taymans <wim dot taymans at gmail dot com>
 License: LGPL-2+
@@ -1904,10 +1115,6 @@ Files: tests/check/elements/asfmux.c
 Copyright: <2008> Thiago Santos <thiagoss@embedded.ufcg.edu.br>
 License: LGPL-2+
 
-Files: ext/kate/gstkateutil.h
-Copyright: <2008> Vincent Penquerc'h <ogg.k.ogg.k at googlemail dot com>
-License: LGPL-2+
-
 Files: ext/resindvd/rsndec.h
 Copyright: <2009> Jan Schmidt <thaytan@noraisin.net>
 License: LGPL-2+
@@ -1917,29 +1124,13 @@ Copyright: <2009> Jan Schmidt <thaytan@noraisin.net>
   <2009> Sebastian Dröge <sebastian.droege@collabora.co.uk>
 License: LGPL-2+
 
-Files: ext/opencv/gstopencv.c
-Copyright: <2009> Kapil Agrawal <kapil@mediamagictechnologies.com>
-License: LGPL-2+
-
 Files: ext/rsvg/gstrsvg.c
 Copyright: 2010, Olivier Aubert <olivier.aubert@liris.cnrs.fr>
   <2009> Sebastian Dröge <sebastian.droege@collabora.co.uk>
 License: LGPL-2+
 
-Files: ext/kate/gstkatespu.h
-Copyright: <2009> ogg.k.ogg.k <ogg.k.ogg.k at googlemail dot com>
-License: LGPL-2+
-
 Files: tests/check/elements/voamrwbenc.c
 Copyright: <2011> Mark Nauwelaerts <mark.nauwelaerts@collabora.co.uk>
-License: LGPL-2+
-
-Files: tests/check/elements/baseaudiovisualizer.c
-Copyright: <2011> Stefan Kost <ensonic@users.sf.net>
-License: LGPL-2+
-
-Files: tests/check/elements/opus.c
-Copyright: <2011> Vincent Penquerc'h <vincent.penquerch@collbaora.co.uk>
 License: LGPL-2+
 
 Files: gst/mpegtsdemux/mpegtsbase.c
@@ -1947,63 +1138,13 @@ Copyright: 2007, Alessandro Decina
   2011, Hewlett-Packard Development Company, L.P
 License: LGPL-2+
 
-Files: tests/check/elements/mpegtsmux.c
-Copyright: 2011, Alessandro Decina <alessandro.d@gmail.com>
-License: LGPL-2+
-
 Files: gst/mpegtsdemux/mpegtspacketizer.c
 Copyright: 2007-2008, Alessandro Decina, Zaheer Merali
-License: LGPL-2+
-
-Files: gst/mve/mveaudioenc.c
-Copyright: 2003-2004, Alexander Belyakov <abel@krasu.ru>
-  2006, Jens Granseuer <jensgr@gmx.net>
-License: LGPL-2+
-
-Files: gst/tta/gstttadec.c
-Copyright: 1999-2004, Alexander Djourik <sasha@iszf.irk.ru>
-  2004, Arwed v. Merkatz <v.merkatz@gmx.net>
-License: LGPL-2+
-
-Files: sys/osxvideo/osxvideosrc.c
-Copyright: 2007, Ali Sabil <ali.sabil@tandberg.com>
-  2007, Ole Andr? Vadla Ravnås <ole.andre.ravnas@tandberg.com>
-  2008, Barracuda Networks <justin@affinix.com>
-License: LGPL-2+
-
-Files: sys/osxvideo/osxvideosrc.h
-Copyright: 2007, Ali Sabil <ali.sabil@tandberg.com>
-  2007, Ole Andr? Vadla Ravnås <ole.andre.ravnas@tandberg.com>
 License: LGPL-2+
 
 Files: sys/d3dvideosink/d3dvideosink.c
 Copyright: 2010, Andoni Morales <ylatuya@gmail.com>
   2010-2011, David Hoyt <dhoyt@hoytsoft.org>
-License: LGPL-2+
-
-Files: gst/hls/gsthlsdemux.c
-Copyright: 2010, Andoni Morales Alastruey <ylatuya@gmail.com>
-  2010, Marc-Andre Lureau <marcandre.lureau@gmail.com>
-  2011, Hewlett-Packard Development Company, L.P
-License: LGPL-2+
-
-Files: gst/hls/gsthlsdemux.h
-Copyright: 2010, Andoni Morales Alastruey <ylatuya@gmail.com>
-  2010, Marc-Andre Lureau <marcandre.lureau@gmail.com>
-License: LGPL-2+
-
-Files: gst/hls/m3u8.h
-Copyright: 2010, Andoni Morales Alastruey <ylatuya@gmail.com>
-  2010, Marc-Andre Lureau <marcandre.lureau@gmail.com>
-License: LGPL-2+
-
-Files: gst/camerabin/gstinputselector.c
-Copyright: 2003, Julien Moutte <julien@moutte.net>
-  2005, Jan Schmidt <thaytan@mad.scientist.com>
-  2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-  2007, Andy Wingo <wingo@pobox.com>
-  2007, Wim Taymans <wim.taymans@gmail.com>
-  2008, Nokia Corporation. (contact <stefan.kost@nokia.com>)
 License: LGPL-2+
 
 Files: ext/gme/gstgme.c
@@ -2018,11 +1159,6 @@ Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
   2009-2010, Chris Robinson <chris.kcat@gmail.com>
 License: LGPL-2+
 
-Files: ext/mimic/gstmimenc.c
-Copyright: 2005, INdT
-  2009, Collabora Ltd
-License: LGPL-2+
-
 Files: ext/chromaprint/gstchromaprint.c
 Copyright: 2006, M. Derezynski
   2008, Eric Buehl
@@ -2031,39 +1167,14 @@ Copyright: 2006, M. Derezynski
   2012, Collabora Ltd. <tim.muller@collabora.co.uk>
 License: LGPL-2+
 
-Files: gst/legacyresample/gstlegacyresample.c
-Copyright: 1999, Erik Walthinsen <omega@cse.ogi.edu>
-  2003-2004, David A. Schleef <ds@schleef.org>
-License: LGPL-2+
-
 Files: gst/interlace/gstinterlace.c
 Copyright: 2010, David A. Schleef <ds@schleef.org>
   2010, Robert Swain <robert.swain@collabora.co.uk>
 License: LGPL-2+
 
-Files: ext/dirac/gstdiracdec.h
-Copyright: 2004, David A. Schleef <ds@schleef.org>
-  2004, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-License: LGPL-2+
-
-Files: ext/vp8/plugin.c
-Copyright: 2006, David Schleef <ds@schleef.org>
-  2010, Entropy Wave Inc
-License: LGPL-2+
-
-Files: tests/check/elements/schroenc.c
-Copyright: 2010, David Schleef <ds@schleef.org>
-  2010, Sebastian Dröge <sebastian.droege@collabora.co.uk>
-License: LGPL-2+
-
 Files: ext/flite/gstflitetestsrc.c
 Copyright: 2005, Stefan Kost <ensonic@users.sf.net>
   2010, David Schleef <ds@schleef.org>
-License: LGPL-2+
-
-Files: gst/real/gstrealvideodec.h
-Copyright: 2006, Edward Hervey <bilboed@bilbod.com>
-  2006, Lutz Mueller <lutz@topfrose.de>
 License: LGPL-2+
 
 Files: gst/mpegtsdemux/mpegtsbase.h
@@ -2082,64 +1193,9 @@ Copyright: 2006, M. Derezynski
   2011, Lukáš Lalinský <<user@hostname.org>>
 License: LGPL-2+
 
-Files: gst-libs/gst/gettext.h
-Copyright: 1995-1998, 2000-2002, Free Software Foundation, Inc
-License: LGPL-2+
-
-Files: gst/real/gstreal.h
-Copyright: 2007, Hans de Goede <j.w.r.degoede@hhs.nl>
-License: LGPL-2+
-
 Files: gst/mpegtsdemux/tsdemux.c
 Copyright: 2009, Zaheer Abbas Merali
   2011, Hewlett-Packard Development Company, L.P
-License: LGPL-2+
-
-Files: ext/mimic/gstmimdec.c
-Copyright: 2005, INdT
-  Vadla Ravnås <oleavr@gmail.com>
-License: LGPL-2+
-
-Files: ext/musicbrainz/gsttrm.c
-Copyright: 2004, Jeremy Simon <jsimon13@yahoo.fr>
-  2006, James Livingston <doclivingston gmail com>
-License: LGPL-2+
-
-Files: ext/kate/gstkatetag.c
-Copyright: 2006, James Livingston <doclivingston@gmail.com>
-  2008, Vincent Penquerc'h <ogg.k.ogg.k@googlemail.com>
-License: LGPL-2+
-
-Files: ext/resindvd/rsnstreamselector.c
-Copyright: 2003, Julien Moutte <julien@moutte.net>
-  2005, Jan Schmidt <thaytan@mad.scientist.com>
-  2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-  2007, Wim Taymans <wim.taymans@gmail.com>
-License: LGPL-2+
-
-Files: ext/gsettings/gstswitchsink.h
-Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-  2007, Jan Schmidt <thaytan@mad.scientist.com>
-License: LGPL-2+
-
-Files: ext/gsettings/gstswitchsrc.h
-Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-  2005, Tim-Philipp Müller <tim centricular net>
-  2007, Jan Schmidt <thaytan@mad.scientist.com>
-  2010, Sebastian Dröge <sebastian.droege@collabora.co.uk>
-License: LGPL-2+
-
-Files: ext/gsettings/gstswitchsink.c
-Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-  2006, Jürg Billeter <j@bitron.ch>
-  2007, Jan Schmidt <thaytan@noraisin.net>
-License: LGPL-2+
-
-Files: ext/gsettings/gstswitchsrc.c
-Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-  2006, Jürg Billeter <j@bitron.ch>
-  2007, Jan Schmidt <thaytan@noraisin.net>
-  2010, Sebastian Dröge <sebastian.droege@collabora.co.uk>
 License: LGPL-2+
 
 Files: ext/dts/gstdtsdec.c
@@ -2152,38 +1208,6 @@ Copyright: 2009, Jan Schmidt <thaytan@noraisin.net>
   2010, ST-Ericsson SA
 License: LGPL-2+
 
-Files: ext/musicbrainz/gsttrm.h
-Copyright: 2004, Jeremy Simon <jsimon13@yahoo.fr>
-License: LGPL-2+
-
-Files: gst/nsf/gstnsf.h
-Copyright: 2003, Johan Dahlin <johan@gnome.org>
-License: LGPL-2+
-
-Files: sys/dshowsrcwrapper/gstdshowvideosrc.cpp
-Copyright: 2007, Sebastien Moutte <sebastien@moutte.net>
-  2009, Julien Isorce <julien.isorce@gmail.com>
-License: LGPL-2+
-
-Files: gst/camerabin/gstinputselector.h
-Copyright: 2003, Julien Moutte <julien@moutte.net>
-  2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-  2008, Nokia Corporation. (contact <stefan.kost@nokia.com>)
-License: LGPL-2+
-
-Files: ext/resindvd/rsnstreamselector.h
-Copyright: 2003, Julien Moutte <julien@moutte.net>
-  2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-License: LGPL-2+
-
-Files: gst/real/gstrealaudiodec.h
-Copyright: 2006, Lutz Mueller <lutz@topfrose.de>
-License: LGPL-2+
-
-Files: gst/hls/m3u8.c
-Copyright: 2010, Marc-Andre Lureau <marcandre.lureau@gmail.com>
-License: LGPL-2+
-
 Files: gst/videoparsers/plugin.c
 Copyright: 2009, Tim-Philipp Müller <tim centricular net>
   2011, Mark Nauwelaerts <mark.nauwelaerts@collabora.co.uk>
@@ -2191,11 +1215,6 @@ License: LGPL-2+
 
 Files: gst/vmnc/vmncdec.c
 Copyright: 2007, Michael Smith <msmith@xiph.org>
-License: LGPL-2+
-
-Files: sys/osxvideo/osxvideoplugin.c
-Copyright: 2004-6 Zaheer Abbas Merali <zaheerabbas at merali dot org>
-  2007, Pioneers of the Inevitable <songbird@songbirdnest.com>
 License: LGPL-2+
 
 Files: ext/musepack/gstmusepackdec.c
@@ -2221,20 +1240,8 @@ Copyright: 2010, Texas Instruments, Inc
   2010, Thiago Santos <thiago.sousa.santos@collabora.co.uk>
 License: LGPL-2+
 
-Files: gst/mve/mveaudiodec.c
-Copyright: 2003, The ffmpeg Project, Mike Melanson
-License: LGPL-2+
-
 Files: gst/asfmux/gstasf.c
 Copyright: 2009, Thiago Santos <thiagoss@embeddeed.ufcg.edu.br>
-License: LGPL-2+
-
-Files: tests/icles/pitch-test.c
-Copyright: 2006, Thomas Vander Stichele <thomas at apestaart dot org>
-License: LGPL-2+
-
-Files: gst-libs/gst/gst-i18n-plugin.h
-Copyright: 2004, Thomas Vander Stichele <thomas@apestaart.org>
 License: LGPL-2+
 
 Files: sys/dvb/gstdvbsrc.c
@@ -2244,12 +1251,6 @@ License: LGPL-2+
 Files: ext/teletextdec/gstteletextdec.c
 Copyright: 2009, Sebastian Pölsterl <sebp@k-d-w.org>
   2010, Andoni Morales Alastruey <ylatuya@gmail.com>
-License: LGPL-2.1+
-
-Files: gst/liveadder/liveadder.c
-Copyright: 1999-2000, Erik Walthinsen <omega@cse.ogi.edu>
-  2008, Collabora Ltd
-  2008, Nokia Corporation
 License: LGPL-2.1+
 
 Files: gst/dvbsuboverlay/dvb-sub.c
@@ -2268,78 +1269,600 @@ License: LGPL-2.1+
 
 Files: tests/examples/directfb/gstdfb.c
 Copyright: 2000-2002, convergence integrated media GmbH
-License: MIT/X11 (BSD like)
-
-Files: sys/qtwrapper/audiodecoders.c
-Copyright: <2006-2007> Fluendo <gstreamer@fluendo.com>
-  <2006-2008> Pioneers of the Inevitable
-License: MIT/X11 (BSD like) LGPL-2+
-
-Files: sys/dshowdecwrapper/gstdshowdecwrapper.cpp
-Copyright: <2006-2008> Fluendo <gstreamer@fluendo.com>
-  <2006-2008> Pioneers of the Inevitable <songbird@songbirdnest.com>
-  <2007-2008> Sebastien Moutte <sebastien@moutte.net>
-License: MIT/X11 (BSD like) LGPL-2+
-
-Files: ext/kate/gstkateenc.c
-Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-  2005, Thomas Vander Stichele <thomas@apestaart.org>
-  2007, Fluendo S.A. <info@fluendo.com>
-  2008-2009, Vincent Penquerc'h <ogg.k.ogg.k@googlemail.com>
-License: MIT/X11 (BSD like) LGPL-2+
-
-Files: ext/opencv/gsttemplatematch.c
-Copyright: 2005, Ronald S. Bultje <rbultje@ronald.bitfreak.net>
-  2005, Thomas Vander Stichele <thomas@apestaart.org>
-  2008, Michael Sheldon <mike@mikeasoft.com>
-  2009, Noam Lewis <jones.noamle@gmail.com>
-License: MIT/X11 (BSD like) LGPL-2+
-
-Files: gst/scaletempo/gstscaletempoplugin.c
-Copyright: 2008, Rov Juvano <rovjuvano@users.sourceforge.net>
-License: MIT/X11 (BSD like) LGPL-2+
-
-Files: ext/kate/gstkate.h
-Copyright: 2008, Vincent Penquerc'h <ogg.k.ogg.k@googlemail.com>
-License: MIT/X11 (BSD like) LGPL-2+
-
-Files: gst/mpegdemux/gstmpegdesc.h
-Copyright: 2005
-License: MPL-1.1 GPL
-
-Files: gst/mpegtsmux/mpegtsmux.c
-Copyright: 2006-2010, Fluendo S.A
-  2011, Jan Schmidt <thaytan@noraisin.net>
-License: MPL-1.1 GPL GPL-2+ LGPL (v2 or later) (with incorrect FSF address)
+License: MIT
 
 Files: ext/teletextdec/gstteletextdec.h
 Copyright: 2009, Sebastian Pölsterl <sebp@k-d-w.org>
   2010, Andoni Morales Alastruey <ylatuya@gmail.com>
 License: LGPL-2+
 
-Files: ext/teletextdec/teletext.c
-Copyright: 2009, Sebastian Pölsterl <sebp@k-d-w.org>
+License: BSD-2-clause
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions are met:
+ .
+ • Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+ • Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+ .
+ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ POSSIBILITY OF SUCH DAMAGE.
+
+License: ISC
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+License: GPL-3+
+ GnuPG is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 3 of the License, or
+ (at your option) any later version.
+ .
+ GnuPG is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this program; if not, see <https://www.gnu.org/licenses/>.
+ .
+ On Debian systems, the full text of the GNU General Public
+ License version 3 can be found in the file
+ `/usr/share/common-licenses/GPL-3'.
+
+License: GPL-2+
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this program. If not, see <http://www.gnu.org/licenses/>
+ .
+ On Debian systems, the complete text of the GNU General
+ Public License version 2 can be found in "/usr/share/common-licenses/GPL-2".
+
 License: LGPL-2+
+ This package is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published
+ by the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser
+ General Public License for more details.
+ .
+ You should have received a copy of the GNU Lesser General Public License
+ along with this package; if not, see http://www.gnu.org/licenses/.
+ .
+ On Debian GNU/Linux systems, the complete text of the GNU Lesser General
+ Public License can be found in `/usr/share/common-licenses/LGPL'.
 
-Files: gst/nsf/fmopl.c
-Copyright: 1999, Tatsuyuki Satoh , MultiArcadeMachineEmurator development
-License: LGPL-2+
+License: LGPL-2.1+
+ This library is free software; you can redistribute it and/or
+ modify it under the terms of the GNU Lesser General Public
+ License as published by the Free Software Foundation; either
+ version 2.1 of the License, or (at your option) any later version.
+ .
+ This library is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ Lesser General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ .
+ On Debian systems, the complete text of the GNU Lesser General Public License
+ version 2.1 can be found in "/usr/share/common-licenses/LGPL-2.1".
 
-License:
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
 
-    This package is free software; you can redistribute it and/or
-    modify it under the terms of the GNU Lesser General Public
-    License as published by the Free Software Foundation; either
-    version 2 of the License, or (at your option) any later version.
-
-    This package is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-    Lesser General Public License for more details.
-
-    You should have received a copy of the GNU Lesser General Public
-    License along with this package; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
-
-On Debian GNU/Linux systems, the complete text of the GNU Lesser General
-Public License can be found in `/usr/share/common-licenses/LGPL'.
+License: MPL-1.1
+ Mozilla Public License Version 1.1
+ .
+ 1. Definitions.
+ .
+     1.0.1. "Commercial Use" means distribution or otherwise making the
+     Covered Code available to a third party.
+ .
+     1.1. "Contributor" means each entity that creates or contributes to
+     the creation of Modifications.
+ .
+     1.2. "Contributor Version" means the combination of the Original
+     Code, prior Modifications used by a Contributor, and the Modifications
+     made by that particular Contributor.
+ .
+     1.3. "Covered Code" means the Original Code or Modifications or the
+     combination of the Original Code and Modifications, in each case
+     including portions thereof.
+ .
+     1.4. "Electronic Distribution Mechanism" means a mechanism generally
+     accepted in the software development community for the electronic
+     transfer of data.
+ .
+     1.5. "Executable" means Covered Code in any form other than Source
+     Code.
+ .
+     1.6. "Initial Developer" means the individual or entity identified
+     as the Initial Developer in the Source Code notice required by Exhibit
+     A.
+ .
+     1.7. "Larger Work" means a work which combines Covered Code or
+     portions thereof with code not governed by the terms of this License.
+ .
+     1.8. "License" means this document.
+ .
+     1.8.1. "Licensable" means having the right to grant, to the maximum
+     extent possible, whether at the time of the initial grant or
+     subsequently acquired, any and all of the rights conveyed herein.
+ .
+     1.9. "Modifications" means any addition to or deletion from the
+     substance or structure of either the Original Code or any previous
+     Modifications. When Covered Code is released as a series of files, a
+     Modification is:
+          A. Any addition to or deletion from the contents of a file
+          containing Original Code or previous Modifications.
+ .
+          B. Any new file that contains any part of the Original Code or
+          previous Modifications.
+ .
+     1.10. "Original Code" means Source Code of computer software code
+     which is described in the Source Code notice required by Exhibit A as
+     Original Code, and which, at the time of its release under this
+     License is not already Covered Code governed by this License.
+ .
+     1.10.1. "Patent Claims" means any patent claim(s), now owned or
+     hereafter acquired, including without limitation,  method, process,
+     and apparatus claims, in any patent Licensable by grantor.
+ .
+     1.11. "Source Code" means the preferred form of the Covered Code for
+     making modifications to it, including all modules it contains, plus
+     any associated interface definition files, scripts used to control
+     compilation and installation of an Executable, or source code
+     differential comparisons against either the Original Code or another
+     well known, available Covered Code of the Contributor's choice. The
+     Source Code can be in a compressed or archival form, provided the
+     appropriate decompression or de-archiving software is widely available
+     for no charge.
+ .
+     1.12. "You" (or "Your")  means an individual or a legal entity
+     exercising rights under, and complying with all of the terms of, this
+     License or a future version of this License issued under Section 6.1.
+     For legal entities, "You" includes any entity which controls, is
+     controlled by, or is under common control with You. For purposes of
+     this definition, "control" means (a) the power, direct or indirect,
+     to cause the direction or management of such entity, whether by
+     contract or otherwise, or (b) ownership of more than fifty percent
+     (50%) of the outstanding shares or beneficial ownership of such
+     entity.
+ .
+ 2. Source Code License.
+ .
+     2.1. The Initial Developer Grant.
+     The Initial Developer hereby grants You a world-wide, royalty-free,
+     non-exclusive license, subject to third party intellectual property
+     claims:
+          (a)  under intellectual property rights (other than patent or
+          trademark) Licensable by Initial Developer to use, reproduce,
+          modify, display, perform, sublicense and distribute the Original
+          Code (or portions thereof) with or without Modifications, and/or
+          as part of a Larger Work; and
+ .
+          (b) under Patents Claims infringed by the making, using or
+          selling of Original Code, to make, have made, use, practice,
+          sell, and offer for sale, and/or otherwise dispose of the
+          Original Code (or portions thereof).
+ .
+          (c) the licenses granted in this Section 2.1(a) and (b) are
+          effective on the date Initial Developer first distributes
+          Original Code under the terms of this License.
+ .
+          (d) Notwithstanding Section 2.1(b) above, no patent license is
+          granted: 1) for code that You delete from the Original Code; 2)
+          separate from the Original Code;  or 3) for infringements caused
+          by: i) the modification of the Original Code or ii) the
+          combination of the Original Code with other software or devices.
+ .
+     2.2. Contributor Grant.
+     Subject to third party intellectual property claims, each Contributor
+     hereby grants You a world-wide, royalty-free, non-exclusive license
+ .
+          (a)  under intellectual property rights (other than patent or
+          trademark) Licensable by Contributor, to use, reproduce, modify,
+          display, perform, sublicense and distribute the Modifications
+          created by such Contributor (or portions thereof) either on an
+          unmodified basis, with other Modifications, as Covered Code
+          and/or as part of a Larger Work; and
+ .
+          (b) under Patent Claims infringed by the making, using, or
+          selling of  Modifications made by that Contributor either alone
+          and/or in combination with its Contributor Version (or portions
+          of such combination), to make, use, sell, offer for sale, have
+          made, and/or otherwise dispose of: 1) Modifications made by that
+          Contributor (or portions thereof); and 2) the combination of
+          Modifications made by that Contributor with its Contributor
+          Version (or portions of such combination).
+ .
+          (c) the licenses granted in Sections 2.2(a) and 2.2(b) are
+          effective on the date Contributor first makes Commercial Use of
+          the Covered Code.
+ .
+          (d)    Notwithstanding Section 2.2(b) above, no patent license is
+          granted: 1) for any code that Contributor has deleted from the
+          Contributor Version; 2)  separate from the Contributor Version;
+          3)  for infringements caused by: i) third party modifications of
+          Contributor Version or ii)  the combination of Modifications made
+          by that Contributor with other software  (except as part of the
+          Contributor Version) or other devices; or 4) under Patent Claims
+          infringed by Covered Code in the absence of Modifications made by
+          that Contributor.
+ .
+ 3. Distribution Obligations.
+ .
+     3.1. Application of License.
+     The Modifications which You create or to which You contribute are
+     governed by the terms of this License, including without limitation
+     Section 2.2. The Source Code version of Covered Code may be
+     distributed only under the terms of this License or a future version
+     of this License released under Section 6.1, and You must include a
+     copy of this License with every copy of the Source Code You
+     distribute. You may not offer or impose any terms on any Source Code
+     version that alters or restricts the applicable version of this
+     License or the recipients' rights hereunder. However, You may include
+     an additional document offering the additional rights described in
+     Section 3.5.
+ .
+     3.2. Availability of Source Code.
+     Any Modification which You create or to which You contribute must be
+     made available in Source Code form under the terms of this License
+     either on the same media as an Executable version or via an accepted
+     Electronic Distribution Mechanism to anyone to whom you made an
+     Executable version available; and if made available via Electronic
+     Distribution Mechanism, must remain available for at least twelve (12)
+     months after the date it initially became available, or at least six
+     (6) months after a subsequent version of that particular Modification
+     has been made available to such recipients. You are responsible for
+     ensuring that the Source Code version remains available even if the
+     Electronic Distribution Mechanism is maintained by a third party.
+ .
+     3.3. Description of Modifications.
+     You must cause all Covered Code to which You contribute to contain a
+     file documenting the changes You made to create that Covered Code and
+     the date of any change. You must include a prominent statement that
+     the Modification is derived, directly or indirectly, from Original
+     Code provided by the Initial Developer and including the name of the
+     Initial Developer in (a) the Source Code, and (b) in any notice in an
+     Executable version or related documentation in which You describe the
+     origin or ownership of the Covered Code.
+ .
+     3.4. Intellectual Property Matters
+          (a) Third Party Claims.
+          If Contributor has knowledge that a license under a third party's
+          intellectual property rights is required to exercise the rights
+          granted by such Contributor under Sections 2.1 or 2.2,
+          Contributor must include a text file with the Source Code
+          distribution titled "LEGAL" which describes the claim and the
+          party making the claim in sufficient detail that a recipient will
+          know whom to contact. If Contributor obtains such knowledge after
+          the Modification is made available as described in Section 3.2,
+          Contributor shall promptly modify the LEGAL file in all copies
+          Contributor makes available thereafter and shall take other steps
+          (such as notifying appropriate mailing lists or newsgroups)
+          reasonably calculated to inform those who received the Covered
+          Code that new knowledge has been obtained.
+ .
+          (b) Contributor APIs.
+          If Contributor's Modifications include an application programming
+          interface and Contributor has knowledge of patent licenses which
+          are reasonably necessary to implement that API, Contributor must
+          also include this information in the LEGAL file.
+ .
+               (c)    Representations.
+          Contributor represents that, except as disclosed pursuant to
+          Section 3.4(a) above, Contributor believes that Contributor's
+          Modifications are Contributor's original creation(s) and/or
+          Contributor has sufficient rights to grant the rights conveyed by
+          this License.
+ .
+     3.5. Required Notices.
+     You must duplicate the notice in Exhibit A in each file of the Source
+     Code.  If it is not possible to put such notice in a particular Source
+     Code file due to its structure, then You must include such notice in a
+     location (such as a relevant directory) where a user would be likely
+     to look for such a notice.  If You created one or more Modification(s)
+     You may add your name as a Contributor to the notice described in
+     Exhibit A.  You must also duplicate this License in any documentation
+     for the Source Code where You describe recipients' rights or ownership
+     rights relating to Covered Code.  You may choose to offer, and to
+     charge a fee for, warranty, support, indemnity or liability
+     obligations to one or more recipients of Covered Code. However, You
+     may do so only on Your own behalf, and not on behalf of the Initial
+     Developer or any Contributor. You must make it absolutely clear than
+     any such warranty, support, indemnity or liability obligation is
+     offered by You alone, and You hereby agree to indemnify the Initial
+     Developer and every Contributor for any liability incurred by the
+     Initial Developer or such Contributor as a result of warranty,
+     support, indemnity or liability terms You offer.
+ .
+     3.6. Distribution of Executable Versions.
+     You may distribute Covered Code in Executable form only if the
+     requirements of Section 3.1-3.5 have been met for that Covered Code,
+     and if You include a notice stating that the Source Code version of
+     the Covered Code is available under the terms of this License,
+     including a description of how and where You have fulfilled the
+     obligations of Section 3.2. The notice must be conspicuously included
+     in any notice in an Executable version, related documentation or
+     collateral in which You describe recipients' rights relating to the
+     Covered Code. You may distribute the Executable version of Covered
+     Code or ownership rights under a license of Your choice, which may
+     contain terms different from this License, provided that You are in
+     compliance with the terms of this License and that the license for the
+     Executable version does not attempt to limit or alter the recipient's
+     rights in the Source Code version from the rights set forth in this
+     License. If You distribute the Executable version under a different
+     license You must make it absolutely clear that any terms which differ
+     from this License are offered by You alone, not by the Initial
+     Developer or any Contributor. You hereby agree to indemnify the
+     Initial Developer and every Contributor for any liability incurred by
+     the Initial Developer or such Contributor as a result of any such
+     terms You offer.
+ .
+     3.7. Larger Works.
+     You may create a Larger Work by combining Covered Code with other code
+     not governed by the terms of this License and distribute the Larger
+     Work as a single product. In such a case, You must make sure the
+     requirements of this License are fulfilled for the Covered Code.
+ .
+ 4. Inability to Comply Due to Statute or Regulation.
+ .
+     If it is impossible for You to comply with any of the terms of this
+     License with respect to some or all of the Covered Code due to
+     statute, judicial order, or regulation then You must: (a) comply with
+     the terms of this License to the maximum extent possible; and (b)
+     describe the limitations and the code they affect. Such description
+     must be included in the LEGAL file described in Section 3.4 and must
+     be included with all distributions of the Source Code. Except to the
+     extent prohibited by statute or regulation, such description must be
+     sufficiently detailed for a recipient of ordinary skill to be able to
+     understand it.
+ .
+ 5. Application of this License.
+ .
+     This License applies to code to which the Initial Developer has
+     attached the notice in Exhibit A and to related Covered Code.
+ .
+ 6. Versions of the License.
+ .
+     6.1. New Versions.
+     Netscape Communications Corporation ("Netscape") may publish revised
+     and/or new versions of the License from time to time. Each version
+     will be given a distinguishing version number.
+ .
+     6.2. Effect of New Versions.
+     Once Covered Code has been published under a particular version of the
+     License, You may always continue to use it under the terms of that
+     version. You may also choose to use such Covered Code under the terms
+     of any subsequent version of the License published by Netscape. No one
+     other than Netscape has the right to modify the terms applicable to
+     Covered Code created under this License.
+ .
+     6.3. Derivative Works.
+     If You create or use a modified version of this License (which you may
+     only do in order to apply it to code which is not already Covered Code
+     governed by this License), You must (a) rename Your license so that
+     the phrases "Mozilla", "MOZILLAPL", "MOZPL", "Netscape",
+     "MPL", "NPL" or any confusingly similar phrase do not appear in your
+     license (except to note that your license differs from this License)
+     and (b) otherwise make it clear that Your version of the license
+     contains terms which differ from the Mozilla Public License and
+     Netscape Public License. (Filling in the name of the Initial
+     Developer, Original Code or Contributor in the notice described in
+     Exhibit A shall not of themselves be deemed to be modifications of
+     this License.)
+ .
+ 7. DISCLAIMER OF WARRANTY.
+ .
+     COVERED CODE IS PROVIDED UNDER THIS LICENSE ON AN "AS IS" BASIS,
+     WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING,
+     WITHOUT LIMITATION, WARRANTIES THAT THE COVERED CODE IS FREE OF
+     DEFECTS, MERCHANTABLE, FIT FOR A PARTICULAR PURPOSE OR NON-INFRINGING.
+     THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE COVERED CODE
+     IS WITH YOU. SHOULD ANY COVERED CODE PROVE DEFECTIVE IN ANY RESPECT,
+     YOU (NOT THE INITIAL DEVELOPER OR ANY OTHER CONTRIBUTOR) ASSUME THE
+     COST OF ANY NECESSARY SERVICING, REPAIR OR CORRECTION. THIS DISCLAIMER
+     OF WARRANTY CONSTITUTES AN ESSENTIAL PART OF THIS LICENSE. NO USE OF
+     ANY COVERED CODE IS AUTHORIZED HEREUNDER EXCEPT UNDER THIS DISCLAIMER.
+ .
+ 8. TERMINATION.
+ .
+     8.1.  This License and the rights granted hereunder will terminate
+     automatically if You fail to comply with terms herein and fail to cure
+     such breach within 30 days of becoming aware of the breach. All
+     sublicenses to the Covered Code which are properly granted shall
+     survive any termination of this License. Provisions which, by their
+     nature, must remain in effect beyond the termination of this License
+     shall survive.
+ .
+     8.2.  If You initiate litigation by asserting a patent infringement
+     claim (excluding declatory judgment actions) against Initial Developer
+     or a Contributor (the Initial Developer or Contributor against whom
+     You file such action is referred to as "Participant")  alleging that:
+ .
+     (a)  such Participant's Contributor Version directly or indirectly
+     infringes any patent, then any and all rights granted by such
+     Participant to You under Sections 2.1 and/or 2.2 of this License
+     shall, upon 60 days notice from Participant terminate prospectively,
+     unless if within 60 days after receipt of notice You either: (i)
+     agree in writing to pay Participant a mutually agreeable reasonable
+     royalty for Your past and future use of Modifications made by such
+     Participant, or (ii) withdraw Your litigation claim with respect to
+     the Contributor Version against such Participant.  If within 60 days
+     of notice, a reasonable royalty and payment arrangement are not
+     mutually agreed upon in writing by the parties or the litigation claim
+     is not withdrawn, the rights granted by Participant to You under
+     Sections 2.1 and/or 2.2 automatically terminate at the expiration of
+     the 60 day notice period specified above.
+ .
+     (b)  any software, hardware, or device, other than such Participant's
+     Contributor Version, directly or indirectly infringes any patent, then
+     any rights granted to You by such Participant under Sections 2.1(b)
+     and 2.2(b) are revoked effective as of the date You first made, used,
+     sold, distributed, or had made, Modifications made by that
+     Participant.
+ .
+     8.3.  If You assert a patent infringement claim against Participant
+     alleging that such Participant's Contributor Version directly or
+     indirectly infringes any patent where such claim is resolved (such as
+     by license or settlement) prior to the initiation of patent
+     infringement litigation, then the reasonable value of the licenses
+     granted by such Participant under Sections 2.1 or 2.2 shall be taken
+     into account in determining the amount or value of any payment or
+     license.
+ .
+     8.4.  In the event of termination under Sections 8.1 or 8.2 above,
+     all end user license agreements (excluding distributors and resellers)
+     which have been validly granted by You or any distributor hereunder
+     prior to termination shall survive termination.
+ .
+ 9. LIMITATION OF LIABILITY.
+ .
+     UNDER NO CIRCUMSTANCES AND UNDER NO LEGAL THEORY, WHETHER TORT
+     (INCLUDING NEGLIGENCE), CONTRACT, OR OTHERWISE, SHALL YOU, THE INITIAL
+     DEVELOPER, ANY OTHER CONTRIBUTOR, OR ANY DISTRIBUTOR OF COVERED CODE,
+     OR ANY SUPPLIER OF ANY OF SUCH PARTIES, BE LIABLE TO ANY PERSON FOR
+     ANY INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES OF ANY
+     CHARACTER INCLUDING, WITHOUT LIMITATION, DAMAGES FOR LOSS OF GOODWILL,
+     WORK STOPPAGE, COMPUTER FAILURE OR MALFUNCTION, OR ANY AND ALL OTHER
+     COMMERCIAL DAMAGES OR LOSSES, EVEN IF SUCH PARTY SHALL HAVE BEEN
+     INFORMED OF THE POSSIBILITY OF SUCH DAMAGES. THIS LIMITATION OF
+     LIABILITY SHALL NOT APPLY TO LIABILITY FOR DEATH OR PERSONAL INJURY
+     RESULTING FROM SUCH PARTY'S NEGLIGENCE TO THE EXTENT APPLICABLE LAW
+     PROHIBITS SUCH LIMITATION. SOME JURISDICTIONS DO NOT ALLOW THE
+     EXCLUSION OR LIMITATION OF INCIDENTAL OR CONSEQUENTIAL DAMAGES, SO
+     THIS EXCLUSION AND LIMITATION MAY NOT APPLY TO YOU.
+ .
+ 10. U.S. GOVERNMENT END USERS.
+ .
+     The Covered Code is a "commercial item," as that term is defined in
+     48 C.F.R. 2.101 (Oct. 1995), consisting of "commercial computer
+     software" and "commercial computer software documentation," as such
+     terms are used in 48 C.F.R. 12.212 (Sept. 1995). Consistent with 48
+     C.F.R. 12.212 and 48 C.F.R. 227.7202-1 through 227.7202-4 (June 1995),
+     all U.S. Government End Users acquire Covered Code with only those
+     rights set forth herein.
+ .
+ 11. MISCELLANEOUS.
+ .
+     This License represents the complete agreement concerning subject
+     matter hereof. If any provision of this License is held to be
+     unenforceable, such provision shall be reformed only to the extent
+     necessary to make it enforceable. This License shall be governed by
+     California law provisions (except to the extent applicable law, if
+     any, provides otherwise), excluding its conflict-of-law provisions.
+     With respect to disputes in which at least one party is a citizen of,
+     or an entity chartered or registered to do business in the United
+     States of America, any litigation relating to this License shall be
+     subject to the jurisdiction of the Federal Courts of the Northern
+     District of California, with venue lying in Santa Clara County,
+     California, with the losing party responsible for costs, including
+     without limitation, court costs and reasonable attorneys' fees and
+     expenses. The application of the United Nations Convention on
+     Contracts for the International Sale of Goods is expressly excluded.
+     Any law or regulation which provides that the language of a contract
+     shall be construed against the drafter shall not apply to this
+     License.
+ .
+ 12. RESPONSIBILITY FOR CLAIMS.
+ .
+     As between Initial Developer and the Contributors, each party is
+     responsible for claims and damages arising, directly or indirectly,
+     out of its utilization of rights under this License and You agree to
+     work with Initial Developer and Contributors to distribute such
+     responsibility on an equitable basis. Nothing herein is intended or
+     shall be deemed to constitute any admission of liability.
+ .
+ 13. MULTIPLE-LICENSED CODE.
+ .
+     Initial Developer may designate portions of the Covered Code as
+     "Multiple-Licensed".  "Multiple-Licensed" means that the Initial
+     Developer permits you to utilize portions of the Covered Code under
+     Your choice of the NPL or the alternative licenses, if any, specified
+     by the Initial Developer in the file described in Exhibit A.
+ .
+ EXHIBIT A -Mozilla Public License.
+ .
+     ``The contents of this file are subject to the Mozilla Public License
+     Version 1.1 (the "License"); you may not use this file except in
+     compliance with the License. You may obtain a copy of the License at
+     http://www.mozilla.org/MPL/
+ .
+     Software distributed under the License is distributed on an "AS IS"
+     basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
+     License for the specific language governing rights and limitations
+     under the License.
+ .
+     The Original Code is ______________________________________.
+ .
+     The Initial Developer of the Original Code is ________________________.
+     Portions created by ______________________ are Copyright (C) ______
+     _______________________. All Rights Reserved.
+ .
+     Contributor(s): ______________________________________.
+ .
+     Alternatively, the contents of this file may be used under the terms
+     of the _____ license (the  "[___] License"), in which case the
+     provisions of [______] License are applicable instead of those
+     above.  If you wish to allow use of your version of this file only
+     under the terms of the [____] License and not to allow others to use
+     your version of this file under the MPL, indicate your decision by
+     deleting  the provisions above and replace  them with the notice and
+     other provisions required by the [___] License.  If you do not delete
+     the provisions above, a recipient may use your version of this file
+     under either the MPL or the [___] License."
+ .
+     [NOTE: The text of this Exhibit A may differ slightly from the text of
+     the notices in the Source Code files of the Original Code. You should
+     use the text of this Exhibit A rather than the text found in the
+     Original Code Source Code for Your Modifications.]

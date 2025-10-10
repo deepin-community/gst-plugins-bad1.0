@@ -51,7 +51,7 @@
 #include "gstmsdkcaps.h"
 
 #ifndef _WIN32
-#include <libdrm/drm_fourcc.h>
+#include <drm_fourcc.h>
 #include "gstmsdkallocator_libva.h"
 #include <gst/va/gstvaallocator.h>
 #else
@@ -133,17 +133,15 @@ gst_msdkenc_set_context (GstElement * element, GstContext * context)
     gst_object_unref (msdk_context);
   } else
 #ifndef _WIN32
-    if (gst_msdk_context_from_external_va_display (context,
-          thiz->hardware, 0 /* GST_MSDK_JOB_ENCODER will be set later */ ,
-          &msdk_context)) {
+  if (gst_msdk_context_from_external_va_display (context,
+          thiz->hardware, GST_MSDK_JOB_ENCODER, &msdk_context)) {
     gst_object_replace ((GstObject **) & thiz->context,
         (GstObject *) msdk_context);
     gst_object_unref (msdk_context);
   }
 #else
-    if (gst_msdk_context_from_external_d3d11_device (context,
-          thiz->hardware, 0 /* GST_MSDK_JOB_ENCODER will be set later */ ,
-          &msdk_context)) {
+  if (gst_msdk_context_from_external_d3d11_device (context,
+          thiz->hardware, GST_MSDK_JOB_ENCODER, &msdk_context)) {
     gst_object_replace ((GstObject **) & thiz->context,
         (GstObject *) msdk_context);
     gst_object_unref (msdk_context);
@@ -191,6 +189,7 @@ ensure_bitrate_control (GstMsdkEnc * thiz)
 
     case MFX_RATECONTROL_LA_ICQ:
       option2->LookAheadDepth = thiz->lookahead_depth;
+      /* FALLTHROUGH */
     case MFX_RATECONTROL_ICQ:
       mfx->ICQQuality = CLAMP (thiz->qpi, 1, 51);
       break;
@@ -502,11 +501,6 @@ gst_msdkenc_init_encoder (GstMsdkEnc * thiz)
   guint i;
   mfxExtVideoSignalInfo ext_vsi;
 
-  if (thiz->initialized) {
-    GST_DEBUG_OBJECT (thiz, "Already initialized");
-    return TRUE;
-  }
-
   if (!thiz->context) {
     GST_WARNING_OBJECT (thiz, "No MSDK Context");
     return FALSE;
@@ -524,6 +518,12 @@ gst_msdkenc_init_encoder (GstMsdkEnc * thiz)
   }
 
   GST_OBJECT_LOCK (thiz);
+  if (thiz->initialized) {
+    GST_DEBUG_OBJECT (thiz, "Already initialized");
+    GST_OBJECT_UNLOCK (thiz);
+    return TRUE;
+  }
+
   session = gst_msdk_context_get_session (thiz->context);
   thiz->codename = msdk_get_platform_codename (session);
 
@@ -603,6 +603,7 @@ gst_msdkenc_init_encoder (GstMsdkEnc * thiz)
       break;
 #endif
     case GST_VIDEO_FORMAT_BGRA:
+    case GST_VIDEO_FORMAT_BGRx:
       thiz->param.mfx.FrameInfo.FourCC = MFX_FOURCC_RGB4;
       thiz->param.mfx.FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV444;
       thiz->param.mfx.FrameInfo.BitDepthLuma = 8;
@@ -624,6 +625,13 @@ gst_msdkenc_init_encoder (GstMsdkEnc * thiz)
     case GST_VIDEO_FORMAT_P012_LE:
       thiz->param.mfx.FrameInfo.FourCC = MFX_FOURCC_P016;
       thiz->param.mfx.FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV420;
+      thiz->param.mfx.FrameInfo.BitDepthLuma = 12;
+      thiz->param.mfx.FrameInfo.BitDepthChroma = 12;
+      thiz->param.mfx.FrameInfo.Shift = 1;
+      break;
+    case GST_VIDEO_FORMAT_Y212_LE:
+      thiz->param.mfx.FrameInfo.FourCC = MFX_FOURCC_Y216;
+      thiz->param.mfx.FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV422;
       thiz->param.mfx.FrameInfo.BitDepthLuma = 12;
       thiz->param.mfx.FrameInfo.BitDepthChroma = 12;
       thiz->param.mfx.FrameInfo.Shift = 1;
@@ -666,6 +674,8 @@ gst_msdkenc_init_encoder (GstMsdkEnc * thiz)
         gst_video_transfer_function_to_iso (info.colorimetry.transfer);
     ext_vsi.MatrixCoefficients =
         gst_video_color_matrix_to_iso (info.colorimetry.matrix);
+    ext_vsi.VideoFullRange =
+        (info.colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255);
     gst_msdkenc_add_extra_param (thiz, (mfxExtBuffer *) & ext_vsi);
   }
 
@@ -1198,7 +1208,8 @@ gst_msdk_create_va_pool (GstMsdkEnc * thiz, GstVideoInfo * info,
   if (thiz->use_dmabuf && thiz->modifier != DRM_FORMAT_MOD_INVALID) {
     aligned_caps = gst_msdkcaps_video_info_to_drm_caps (info, thiz->modifier);
     gst_caps_set_features (aligned_caps, 0,
-        gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
+        gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_DMABUF,
+            NULL));
   } else
     aligned_caps = gst_video_info_to_caps (info);
 
@@ -1418,7 +1429,8 @@ gst_msdkenc_set_format (GstVideoEncoder * encoder, GstVideoCodecState * state)
   if (!thiz->use_va && sinkpad_can_dmabuf (thiz)) {
     thiz->input_state->caps = gst_caps_make_writable (thiz->input_state->caps);
     gst_caps_set_features (thiz->input_state->caps, 0,
-        gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
+        gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_DMABUF,
+            NULL));
     thiz->use_dmabuf = TRUE;
     thiz->modifier = get_msdkcaps_get_modifier (state->caps);
   }

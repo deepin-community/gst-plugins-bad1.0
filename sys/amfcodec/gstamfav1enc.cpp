@@ -927,6 +927,7 @@ gst_amf_av1_enc_set_property (GObject * object, guint prop_id,
       break;
     case PROP_PA_FRAME_SAD:
       update_bool (self, &self->pa.frame_sad, value);
+      break;
     case PROP_PA_LTR:
       update_bool (self, &self->pa.ltr, value);
       break;
@@ -1742,7 +1743,8 @@ gst_amf_av1_enc_create_class_data (GstD3D11Device * device, AMFComponent * comp)
   system_caps = gst_caps_from_string (sink_caps_str.c_str ());
   sink_caps = gst_caps_copy (system_caps);
   gst_caps_set_features (sink_caps, 0,
-      gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY, nullptr));
+      gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY,
+          nullptr));
   gst_caps_append (sink_caps, system_caps);
 
   cdata = g_new0 (GstAmfAv1EncClassData, 1);

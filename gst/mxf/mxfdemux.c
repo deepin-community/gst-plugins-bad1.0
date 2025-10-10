@@ -2497,11 +2497,11 @@ find_entry_for_offset (GstMXFDemux * demux, GstMXFDemuxEssenceTrack * etrack,
 
   /* Find the segment that covers the given stream offset (the highest one that
    * covers that offset) */
-  for (i = index_table->segments->len - 1; i >= 0; i--) {
+  for (i = index_table->segments->len; i > 0; i--) {
     index_segment =
-        &g_array_index (index_table->segments, MXFIndexTableSegment, i);
+        &g_array_index (index_table->segments, MXFIndexTableSegment, i - 1);
     GST_DEBUG_OBJECT (demux,
-        "Checking segment #%d (essence_offset %" G_GUINT64_FORMAT ")", i,
+        "Checking segment #%d (essence_offset %" G_GUINT64_FORMAT ")", i - 1,
         index_segment->segment_start_offset);
     /* Not in the right segment yet */
     if (offset >= index_segment->segment_start_offset) {
@@ -2875,6 +2875,9 @@ gst_mxf_demux_handle_generic_container_essence_element (GstMXFDemux * demux,
     return ret;
   }
 
+  if (!etrack->offsets)
+    etrack->offsets = g_array_new (FALSE, TRUE, sizeof (GstMXFDemuxIndex));
+
   if (!index_entry.initialized) {
     /* This can happen when doing scanning without entry tables */
     index_entry.duration = 1;
@@ -2890,11 +2893,10 @@ gst_mxf_demux_handle_generic_container_essence_element (GstMXFDemux * demux,
         etrack->track_id, index_entry.dts, index_entry.offset,
         index_entry.keyframe);
 
-    if (!etrack->offsets)
-      etrack->offsets = g_array_new (FALSE, TRUE, sizeof (GstMXFDemuxIndex));
-
     /* We only ever append to the track offset entry. */
     g_assert (etrack->position <= etrack->offsets->len);
+    g_array_insert_val (etrack->offsets, etrack->position, index_entry);
+  } else if (etrack->position == etrack->offsets->len) {
     g_array_insert_val (etrack->offsets, etrack->position, index_entry);
   }
 
@@ -5059,8 +5061,7 @@ collect_index_table_segments (GstMXFDemux * demux)
         MXFIndexEntry *entry = &s->index_entries[entidx];
         gint8 offs = -entry->temporal_offset;
         /* Check we don't exceed boundaries */
-        if ((start + entidx + entry->temporal_offset) < 0 ||
-            (start + entidx + entry->temporal_offset) >
+        if (start + entidx + entry->temporal_offset >
             table->reverse_temporal_offsets->len) {
           GST_ERROR_OBJECT (demux,
               "Temporal offset exceeds boundaries. entry:%d offset:%d max:%d",

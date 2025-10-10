@@ -45,7 +45,18 @@ G_MODULE_EXPORT void extension_initialize (WebKitWebExtension * extension);
 
 static WebKitWebExtension *global_extension = NULL;
 
-#if !USE_WPE2
+#ifndef WEBKIT_CHECK_VERSION
+#define WEBKIT_MAJOR_VERSION (WPE_VERSION_MAJOR)
+#define WEBKIT_MINOR_VERSION (WPE_VERSION_MINOR)
+#define WEBKIT_MICRO_VERSION (WPE_VERSION_MICRO)
+#define WEBKIT_CHECK_VERSION(major, minor, micro)                              \
+  (WEBKIT_MAJOR_VERSION > (major) ||                                           \
+   (WEBKIT_MAJOR_VERSION == (major) && WEBKIT_MINOR_VERSION > (minor)) ||      \
+   (WEBKIT_MAJOR_VERSION == (major) && WEBKIT_MINOR_VERSION == (minor) &&      \
+    WEBKIT_MICRO_VERSION >= (micro)))
+#endif
+
+#if !USE_WPE2 || WEBKIT_CHECK_VERSION(2, 46, 0)
 static void
 console_message_cb (WebKitWebPage * page,
     WebKitConsoleMessage * console_message, gpointer data)
@@ -62,8 +73,8 @@ static void
 web_page_created_callback (WebKitWebExtension * extension,
     WebKitWebPage * web_page, gpointer data)
 {
-  // WebKitConsoleMessage is deprecated in wpe1 and has no replacement in wpe2.
-#if !USE_WPE2
+  // WebKitConsoleMessage comes and goes.
+#if !USE_WPE2 || WEBKIT_CHECK_VERSION(2, 46, 0)
   g_signal_connect (web_page, "console-message-sent",
       G_CALLBACK (console_message_cb), NULL);
 #endif

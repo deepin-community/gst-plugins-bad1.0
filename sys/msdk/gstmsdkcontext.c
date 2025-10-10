@@ -92,7 +92,8 @@ get_device_path (void)
     if (fd >= 0) {
       drmVersionPtr drm_version = drmGetVersion (fd);
 
-      if (!drm_version || strncmp (drm_version->name, "i915", 4)) {
+      if (!drm_version || (strncmp (drm_version->name, "i915", 4)
+              && strncmp (drm_version->name, "xe", 2))) {
         GST_ERROR ("The specified device isn't an Intel device");
         drmFreeVersion (drm_version);
         close (fd);
@@ -130,8 +131,9 @@ get_device_path (void)
       dev = (GUdevDevice *) l->data;
 
       parent = g_udev_device_get_parent (dev);
-      if (strcmp (g_udev_device_get_subsystem (parent), "pci") != 0 ||
-          strcmp (g_udev_device_get_driver (parent), "i915") != 0) {
+      if (g_strcmp0 (g_udev_device_get_subsystem (parent), "pci") != 0
+          || (g_strcmp0 (g_udev_device_get_driver (parent), "i915") != 0
+              && g_strcmp0 (g_udev_device_get_driver (parent), "xe") != 0)) {
         g_object_unref (parent);
         continue;
       }
@@ -376,6 +378,10 @@ gst_msdk_context_finalize (GObject * obj)
 
   /* child sessions will be closed when the parent session is closed */
   if (priv->parent_context) {
+    /* A context with parent_context can also be a parent to others,
+     * and we need to check its child_session_list */
+    if (priv->child_session_list)
+      g_list_free_full (priv->child_session_list, release_child_session);
     gst_object_unref (priv->parent_context);
     goto done;
   } else

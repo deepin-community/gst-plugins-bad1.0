@@ -8,9 +8,20 @@ Uploaders: Sebastian Dröge <slomo@debian.org>,
 Build-Depends: debhelper-compat (= 13),
                dh-sequence-gir,
                flite-dev,
+               gir1.2-gobject-2.0-dev,
+               gir1.2-gst-1.0-dev,
+               gir1.2-gstaudio-1.0-dev,
+               gir1.2-gstbase-1.0-dev,
+               gir1.2-gstgl-1.0-dev,
+               gir1.2-gstpbutils-1.0-dev,
+               gir1.2-gstsdp-1.0-dev,
+               gir1.2-gsttag-1.0-dev,
+               gir1.2-gstvideo-1.0-dev,
+               gir1.2-vulkan-1.0-dev,
                glslc,
-               gstreamer1.0-plugins-base (>= 1.24.0),
-               gstreamer1.0-plugins-good (>= 1.24.0),
+               gobject-introspection (>= 1.80),
+               gstreamer1.0-plugins-base (>= 1.26.0),
+               gstreamer1.0-plugins-good (>= 1.26.0) <!nocheck>,
                gstreamer1.0-tools,
                ladspa-sdk,
                libaom-dev,
@@ -26,7 +37,6 @@ Build-Depends: debhelper-compat (= 13),
                libdc1394-dev (>= 2.2.5) [linux-any],
                libdca-dev,
                libde265-dev (>= 0.9),
-               libdirectfb-dev,
                libdrm-dev (>= 2.4.98) [linux-any],
                libdvdnav-dev (>= 4.1.2) [!hurd-any],
                libexempi-dev,
@@ -34,16 +44,14 @@ Build-Depends: debhelper-compat (= 13),
                libfaad-dev (>= 2.7),
                libfluidsynth-dev (>= 1.0),
                libfreeaptx-dev (>= 0.1.1),
-               libgirepository1.0-dev (>= 0.9.12-4~),
                libglib2.0-dev (>= 2.68),
                libgme-dev,
                libgnutls28-dev (>= 2.11.3),
                libgsm1-dev,
-               libgstreamer-plugins-base1.0-dev (>= 1.24.0),
-               libgstreamer1.0-dev (>= 1.24.0),
+               libgstreamer-plugins-base1.0-dev (>= 1.26.0),
+               libgstreamer1.0-dev (>= 1.26.0),
                libgtk-3-dev (>= 3.15.0),
                libgudev-1.0-dev (>= 143) [linux-any],
-               libiptcdata0-dev (>= 1.0.2),
                libjson-glib-dev,
                libkate-dev (>= 0.1.7),
                liblc3-dev,
@@ -52,12 +60,12 @@ Build-Depends: debhelper-compat (= 13),
                liblilv-dev (>= 0.22),
                liblrdf0-dev,
                libltc-dev (>= 1.1.4),
-               libmfx-dev [amd64],
                libmjpegtools-dev (>= 2.0.0),
                libmodplug-dev,
                libmpcdec-dev,
                libneon27-dev,
                libnice-dev (>= 0.1.20),
+               libonnxruntime-dev [amd64 arm64 armhf riscv64],
                libopenal-dev (>= 1:1.14),
                libopencv-dev (>= 3.0.0) [amd64 arm64 armel armhf mips64el ppc64el riscv64 s390x alpha powerpc ppc64 sparc64],
                libopenexr-dev,
@@ -88,6 +96,7 @@ Build-Depends: debhelper-compat (= 13),
                libvulkan-dev [linux-any],
                libwayland-dev (>= 1.11.0) [linux-any],
                libwebp-dev (>= 0.2.1),
+               libwebrtc-audio-processing-dev (>= 0.2),
                libwildmidi-dev (>= 0.4.2),
                libwpebackend-fdo-1.0-dev (>= 1.8.0) [linux-any],
                libwpewebkit-2.0-dev [amd64 arm64 armel armhf i386 mips64el ppc64el riscv64 s390x ia64 loong64 powerpc sparc64 x32],
@@ -118,7 +127,6 @@ Architecture: any
 Section: utils
 Depends: gstreamer1.0-plugins-bad (= ${binary:Version}),
          ${misc:Depends},
-         ${perl:Depends},
          ${shlibs:Depends}
 Conflicts: pitivi (<< 0.9999)
 Description: GStreamer helper programs from the "bad" set
@@ -138,8 +146,8 @@ Description: GStreamer helper programs from the "bad" set
 Package: gstreamer1.0-plugins-bad
 Architecture: any
 Multi-Arch: same
-Depends: gstreamer1.0-plugins-base (>= 1.24.0),
-         gstreamer1.0-plugins-good (>= 1.24.0),
+Depends: gstreamer1.0-plugins-base (>= 1.26.0),
+         gstreamer1.0-plugins-good (>= 1.26.0),
          libgstreamer-plugins-bad1.0-0 (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
@@ -187,10 +195,6 @@ Replaces: gstreamer1.0-plugins-bad (<< 1.17.2~)
 Recommends: opencv-data
 XB-GStreamer-Version: ${gstreamer:Version}
 XB-GStreamer-Elements: ${gstreamer:Elements}
-XB-GStreamer-URI-Sources: ${gstreamer:URISources}
-XB-GStreamer-URI-Sinks: ${gstreamer:URISinks}
-XB-GStreamer-Encoders: ${gstreamer:Encoders}
-XB-GStreamer-Decoders: ${gstreamer:Decoders}
 Description: GStreamer OpenCV plugins
  GStreamer is a streaming media framework, based on graphs of filters
  which operate on media data.  Applications using this library can do
@@ -283,8 +287,10 @@ Depends: gir1.2-gst-plugins-bad-1.0 (= ${binary:Version}),
          libgstreamer-plugins-base1.0-dev,
          libgstreamer1.0-dev,
          libopencv-dev (>= 2.3.0) [amd64 arm64 armel armhf mips64el ppc64el riscv64 s390x alpha powerpc ppc64 sparc64],
+         ${gir:Depends},
          ${misc:Depends}
 Conflicts: pitivi (<< 0.9999)
+Provides: ${gir:Provides}
 Description: GStreamer development files for libraries from the "bad" set
  GStreamer is a streaming media framework, based on graphs of filters
  which operate on media data.  Applications using this library can do
@@ -305,7 +311,8 @@ Package: gir1.2-gst-plugins-bad-1.0
 Section: introspection
 Architecture: any
 Multi-Arch: same
-Depends: ${gir:Depends}, ${misc:Depends}, ${shlibs:Depends}
+Depends: ${gir:Depends}, ${misc:Depends}
+Provides: ${gir:Provides}
 Description: GObject introspection data for the GStreamer libraries from the "bad" set
  GStreamer is a streaming media framework, based on graphs of filters
  which operate on media data.  Applications using this library can do

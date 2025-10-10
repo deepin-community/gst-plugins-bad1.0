@@ -522,7 +522,8 @@ gst_x265_enc_class_init (GstX265EncClass * klass)
   g_object_class_install_property (gobject_class, PROP_KEY_INT_MAX,
       g_param_spec_int ("key-int-max", "Max key frame",
           "Maximal distance between two key-frames (0 = x265 default / 250)",
-          0, G_MAXINT32, PROP_KEY_INT_MAX_DEFAULT, G_PARAM_READWRITE));
+          0, G_MAXINT32, PROP_KEY_INT_MAX_DEFAULT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_static_metadata (element_class,
       "x265enc", "Codec/Encoder/Video", "H265 Encoder",
@@ -948,8 +949,13 @@ gst_x265_enc_init_encoder_locked (GstX265Enc * encoder)
        * HEVC uses gbr order
        * See spec D.3.28 display_primaries_x and display_primaries_y
        */
-      encoder->x265param.masteringDisplayColorVolume =
-          g_strdup_printf ("G(%hu,%hu)B(%hu,%hu)R(%hu,%hu)WP(%hu,%hu)L(%u,%u)",
+#if X265_BUILD < 214
+      encoder->x265param.masteringDisplayColorVolume = g_strdup_printf (
+#else
+      snprintf (encoder->x265param.masteringDisplayColorVolume,
+          X265_MAX_STRING_SIZE,
+#endif
+          "G(%hu,%hu)B(%hu,%hu)R(%hu,%hu)WP(%hu,%hu)L(%u,%u)",
           minfo.display_primaries[1].x, minfo.display_primaries[1].y,
           minfo.display_primaries[2].x, minfo.display_primaries[2].y,
           minfo.display_primaries[0].x, minfo.display_primaries[0].y,

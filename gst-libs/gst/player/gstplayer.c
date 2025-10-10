@@ -49,6 +49,7 @@
 
 #include "gstplayer.h"
 #include "gstplayer-signal-dispatcher-private.h"
+#include "gstplayer-g-main-context-signal-dispatcher.h"
 #include "gstplayer-video-renderer-private.h"
 #include "gstplayer-media-info-private.h"
 #include "gstplayer-wrapped-video-renderer-private.h"
@@ -83,28 +84,6 @@ gst_player_error_quark (void)
 {
   return g_quark_from_static_string ("gst-player-error-quark");
 }
-
-static GQuark QUARK_CONFIG;
-
-/* Keep ConfigQuarkId and _config_quark_strings ordered and synced */
-typedef enum
-{
-  CONFIG_QUARK_USER_AGENT = 0,
-  CONFIG_QUARK_POSITION_INTERVAL_UPDATE,
-  CONFIG_QUARK_ACCURATE_SEEK,
-
-  CONFIG_QUARK_MAX
-} ConfigQuarkId;
-
-static const gchar *_config_quark_strings[] = {
-  "user-agent",
-  "position-interval-update",
-  "accurate-seek",
-};
-
-static GQuark _config_quark_table[CONFIG_QUARK_MAX];
-
-#define CONFIG_QUARK(q) _config_quark_table[CONFIG_QUARK_##q]
 
 enum
 {
@@ -182,23 +161,6 @@ static void
 gst_player_init (GstPlayer * self)
 {
   self->play = gst_play_new (NULL);
-}
-
-static void
-config_quark_initialize (void)
-{
-  gint i;
-
-  QUARK_CONFIG = g_quark_from_static_string ("player-config");
-
-  if (G_N_ELEMENTS (_config_quark_strings) != CONFIG_QUARK_MAX)
-    g_warning ("the quark table is not consistent! %d != %d",
-        (int) G_N_ELEMENTS (_config_quark_strings), CONFIG_QUARK_MAX);
-
-  for (i = 0; i < CONFIG_QUARK_MAX; i++) {
-    _config_quark_table[i] =
-        g_quark_from_static_string (_config_quark_strings[i]);
-  }
 }
 
 static void
@@ -370,8 +332,6 @@ gst_player_class_init (GstPlayerClass * klass)
       g_signal_new ("seek-done", G_TYPE_FROM_CLASS (klass),
       G_SIGNAL_RUN_LAST | G_SIGNAL_NO_RECURSE | G_SIGNAL_NO_HOOKS, 0, NULL,
       NULL, NULL, G_TYPE_NONE, 1, GST_TYPE_CLOCK_TIME);
-
-  config_quark_initialize ();
 }
 
 static void
@@ -401,9 +361,11 @@ gst_player_set_property (GObject * object, guint prop_id,
 
   switch (prop_id) {
     case PROP_SIGNAL_DISPATCHER:
+      /* G_PARAM_CONSTRUCT_ONLY */
       self->signal_dispatcher = g_value_dup_object (value);
       break;
     case PROP_VIDEO_RENDERER:
+      /* G_PARAM_CONSTRUCT_ONLY */
       self->video_renderer = g_value_dup_object (value);
       break;
     default:
@@ -576,11 +538,16 @@ gst_player_constructed (GObject * object)
   if (self->signal_dispatcher != NULL) {
     GMainContext *context = NULL;
 
-    g_object_get (self->signal_dispatcher, "application-context", &context,
-        NULL);
-    self->signal_adapter =
-        gst_play_signal_adapter_new_with_main_context (self->play, context);
-    g_main_context_unref (context);
+    if (GST_IS_PLAYER_G_MAIN_CONTEXT_SIGNAL_DISPATCHER
+        (self->signal_dispatcher)) {
+      g_object_get (self->signal_dispatcher, "application-context", &context,
+          NULL);
+      self->signal_adapter =
+          gst_play_signal_adapter_new_with_main_context (self->play, context);
+      g_main_context_unref (context);
+    } else {
+      self->signal_adapter = gst_play_signal_adapter_new (self->play);
+    }
   } else {
     self->signal_adapter = gst_play_signal_adapter_new_sync_emit (self->play);
   }
@@ -1626,8 +1593,8 @@ gst_player_config_set_user_agent (GstStructure * config, const gchar * agent)
   g_return_if_fail (config != NULL);
   g_return_if_fail (agent != NULL);
 
-  gst_structure_id_set (config,
-      CONFIG_QUARK (USER_AGENT), G_TYPE_STRING, agent, NULL);
+  gst_structure_set_static_str (config,
+      "user-agent", G_TYPE_STRING, agent, NULL);
 }
 
 /**
@@ -1648,8 +1615,7 @@ gst_player_config_get_user_agent (const GstStructure * config)
 
   g_return_val_if_fail (config != NULL, NULL);
 
-  gst_structure_id_get (config,
-      CONFIG_QUARK (USER_AGENT), G_TYPE_STRING, &agent, NULL);
+  gst_structure_get (config, "user-agent", G_TYPE_STRING, &agent, NULL);
 
   return agent;
 }
@@ -1671,8 +1637,8 @@ gst_player_config_set_position_update_interval (GstStructure * config,
   g_return_if_fail (config != NULL);
   g_return_if_fail (interval <= 10000);
 
-  gst_structure_id_set (config,
-      CONFIG_QUARK (POSITION_INTERVAL_UPDATE), G_TYPE_UINT, interval, NULL);
+  gst_structure_set_static_str (config,
+      "position-interval-update", G_TYPE_UINT, interval, NULL);
 }
 
 /**
@@ -1690,8 +1656,8 @@ gst_player_config_get_position_update_interval (const GstStructure * config)
 
   g_return_val_if_fail (config != NULL, DEFAULT_POSITION_UPDATE_INTERVAL_MS);
 
-  gst_structure_id_get (config,
-      CONFIG_QUARK (POSITION_INTERVAL_UPDATE), G_TYPE_UINT, &interval, NULL);
+  gst_structure_get (config,
+      "position-interval-update", G_TYPE_UINT, &interval, NULL);
 
   return interval;
 }
@@ -1718,8 +1684,8 @@ gst_player_config_set_seek_accurate (GstStructure * config, gboolean accurate)
 {
   g_return_if_fail (config != NULL);
 
-  gst_structure_id_set (config,
-      CONFIG_QUARK (ACCURATE_SEEK), G_TYPE_BOOLEAN, accurate, NULL);
+  gst_structure_set_static_str (config,
+      "accurate-seek", G_TYPE_BOOLEAN, accurate, NULL);
 }
 
 /**
@@ -1737,8 +1703,7 @@ gst_player_config_get_seek_accurate (const GstStructure * config)
 
   g_return_val_if_fail (config != NULL, FALSE);
 
-  gst_structure_id_get (config,
-      CONFIG_QUARK (ACCURATE_SEEK), G_TYPE_BOOLEAN, &accurate, NULL);
+  gst_structure_get (config, "accurate-seek", G_TYPE_BOOLEAN, &accurate, NULL);
 
   return accurate;
 }

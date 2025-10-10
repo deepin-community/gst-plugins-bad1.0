@@ -1,0 +1,21 @@
+#!/bin/sh
+
+set -e
+
+# Define cleanup function
+cleanup() {
+    exit_code=$?
+    cp -afr obj-*/meson-logs "$AUTOPKGTEST_ARTIFACTS"
+    exit $exit_code
+}
+
+trap cleanup EXIT
+
+echo "debian/rules override_dh_auto_configure"
+debian/rules override_dh_auto_configure
+
+echo "dh_auto_build"
+dh_auto_build
+
+echo "debian/rules override_dh_auto_test"
+debian/rules override_dh_auto_test

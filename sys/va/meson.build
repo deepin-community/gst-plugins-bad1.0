@@ -7,6 +7,7 @@ va_sources = [
   'gstvabaseenc.c',
   'gstvabasetransform.c',
   'gstvacaps.c',
+  'gstvacodecalphadecodebin.c',
   'gstvacompositor.c',
   'gstvadecoder.c',
   'gstvadeinterlace.c',
@@ -18,12 +19,49 @@ va_sources = [
   'gstvah265dec.c',
   'gstvah265enc.c',
   'gstvajpegdec.c',
+  'gstvajpegenc.c',
   'gstvampeg2dec.c',
   'gstvapluginutils.c',
   'gstvaprofile.c',
   'gstvavp8dec.c',
+  'gstvavp8enc.c',
   'gstvavp9dec.c',
+  'gstvavp9enc.c',
   'gstvavpp.c',
+]
+
+va_headers = [
+  'gstjpegdecoder.h',
+  'gstvaav1dec.h',
+  'gstvaav1enc.h',
+  'gstvabasedec.h',
+  'gstvabaseenc.h',
+  'gstvabase.h',
+  'gstvabasetransform.h',
+  'gstvacaps.h',
+  'gstvacompositor.h',
+  'gstvadecoder.h',
+  'gstvadeinterlace.h',
+  'gstvadevice.h',
+  'gstvadisplay_priv.h',
+  'gstvaencoder.h',
+  'gstvafilter.h',
+  'gstvah264dec.h',
+  'gstvah264enc.h',
+  'gstvah265dec.h',
+  'gstvah265enc.h',
+  'gstvajpegdec.h',
+  'gstvajpegenc.h',
+  'gstvampeg2dec.h',
+  'gstvapluginutils.h',
+  'gstvaprofile.h',
+  'gstvavp8dec.h',
+  'gstvavp8enc.h',
+  'gstvavp9dec.h',
+  'gstvavp9enc.h',
+  'gstvavpp.h',
+  'vacompat.h',
+  'gstvacodecalphadecodebin.h'
 ]
 
 va_linux_sources = [
@@ -33,6 +71,23 @@ va_linux_sources = [
 va_win32_sources = [
   'gstvadevice_win32.cpp'
 ]
+
+va_av1enc_sources = [
+  'gstvaav1enc.c'
+]
+
+va_h266dec_sources = [
+  'gstvah266dec.c'
+]
+
+doc_sources = []
+foreach s: va_sources + va_linux_sources + va_win32_sources + va_av1enc_sources + va_headers
+  doc_sources += meson.current_source_dir() / s
+endforeach
+
+plugin_sources += {
+  'va': pathsep.join(doc_sources)
+}
 
 if host_system not in ['linux', 'windows']
   subdir_done()
@@ -72,15 +127,19 @@ if cc.get_id() == 'msvc'
 endif
 
 if libva_dep.version().version_compare('>= 1.15')
-  va_sources += 'gstvaav1enc.c'
+  va_sources += va_av1enc_sources
+endif
+
+if libva_dep.version().version_compare('>= 1.22')
+  va_sources += va_h266dec_sources
 endif
 
 gstva = library('gstva',
   va_sources,
   c_args : gst_plugins_bad_args + extra_args,
   cpp_args : gst_plugins_bad_args + extra_args,
-  include_directories : [configinc],
-  dependencies : [gstcodecs_dep, gstva_dep, libgudev_dep] + extra_dep,
+  include_directories : [configinc, libsinc],
+  dependencies : [gstcodecs_dep, gstva_dep, libgudev_dep, libm, gstpbutils_dep] + extra_dep,
   override_options : c_std_arg,
   install : true,
   install_dir : plugins_install_dir,

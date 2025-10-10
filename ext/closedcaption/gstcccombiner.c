@@ -63,11 +63,48 @@ enum
   PROP_SCHEDULE,
   PROP_OUTPUT_PADDING,
   PROP_MAX_SCHEDULED,
+  PROP_CEA608_PADDING_STRATEGY,
+  PROP_CEA608_VALID_PADDING_TIMEOUT,
+  PROP_SCHEDULE_TIMEOUT,
+  PROP_INPUT_META_PROCESSING,
 };
 
 #define DEFAULT_MAX_SCHEDULED 30
 #define DEFAULT_SCHEDULE TRUE
 #define DEFAULT_OUTPUT_PADDING TRUE
+#define DEFAULT_CEA608_PADDING_STRATEGY CC_BUFFER_CEA608_PADDING_STRATEGY_VALID
+#define DEFAULT_CEA608_VALID_PADDING_TIMEOUT GST_CLOCK_TIME_NONE
+#define DEFAULT_SCHEDULE_TIMEOUT GST_CLOCK_TIME_NONE
+#define DEFAULT_INPUT_META_PROCESSING CCCOMBINER_INPUT_PROCESSING_APPEND
+
+#define GST_TYPE_CCCOMBINER_INPUT_META_PROCESSING (gst_cccombiner_input_meta_processing_get_type())
+static GType
+gst_cccombiner_input_meta_processing_get_type (void)
+{
+  static GType cccombiner_input_meta_processing_type = 0;
+  static const GEnumValue cccombiner_input_meta_processing[] = {
+    {CCCOMBINER_INPUT_PROCESSING_APPEND,
+        "append aggregated CC to existing metas on video buffer", "append"},
+    {CCCOMBINER_INPUT_PROCESSING_DROP,
+        "drop existing CC metas on input video buffer", "drop"},
+    {CCCOMBINER_INPUT_PROCESSING_FAVOR,
+          "discard aggregated CC when input video buffers hold CC metas already",
+        "favor"},
+    {CCCOMBINER_INPUT_PROCESSING_FORCE,
+          "discard aggregated CC even when input video buffers do not hold CC",
+        "force"},
+    {0, NULL, NULL},
+  };
+
+  if (!cccombiner_input_meta_processing_type) {
+    cccombiner_input_meta_processing_type =
+        g_enum_register_static ("GstCCCombinerInputProcessing",
+        cccombiner_input_meta_processing);
+  }
+  return cccombiner_input_meta_processing_type;
+}
+
+#define FALLBACK_FRAME_DURATION (50 * GST_MSECOND)
 
 typedef struct
 {
@@ -92,6 +129,8 @@ static void
 gst_cc_combiner_finalize (GObject * object)
 {
   GstCCCombiner *self = GST_CCCOMBINER (object);
+
+  gst_clear_object (&self->caption_pad);
 
   g_array_unref (self->current_frame_captions);
   self->current_frame_captions = NULL;
@@ -156,8 +195,7 @@ write_cc_data_to (GstCCCombiner * self, GstBuffer * buffer)
 
   gst_buffer_map (buffer, &map, GST_MAP_WRITE);
   len = map.size;
-  cc_buffer_take_cc_data (self->cc_buffer, self->cdp_fps_entry, TRUE, map.data,
-      &len);
+  cc_buffer_take_cc_data (self->cc_buffer, self->cdp_fps_entry, map.data, &len);
   gst_buffer_unmap (buffer, &map);
   gst_buffer_set_size (buffer, len);
 }
@@ -183,12 +221,13 @@ static void
 take_s334_both_fields (GstCCCombiner * self, GstBuffer * buffer)
 {
   GstMapInfo out = GST_MAP_INFO_INIT;
-  guint s334_len, cc_data_len, i;
+  gint s334_len;
+  guint cc_data_len, i;
 
   gst_buffer_map (buffer, &out, GST_MAP_READWRITE);
 
   cc_data_len = out.size;
-  cc_buffer_take_cc_data (self->cc_buffer, self->cdp_fps_entry, FALSE,
+  cc_buffer_take_cc_data (self->cc_buffer, self->cdp_fps_entry,
       out.data, &cc_data_len);
   s334_len = drop_ccp_from_cc_data (out.data, cc_data_len);
   if (s334_len < 0) {
@@ -207,7 +246,7 @@ out:
   gst_buffer_set_size (buffer, s334_len);
 }
 
-static void
+static CCBufferPushReturn
 schedule_cdp (GstCCCombiner * self, const GstVideoTimeCode * tc,
     const guint8 * data, guint len, GstClockTime pts, GstClockTime duration)
 {
@@ -215,11 +254,10 @@ schedule_cdp (GstCCCombiner * self, const GstVideoTimeCode * tc,
   guint cc_data_len;
 
   cc_data_len = extract_cdp (self, data, len, cc_data);
-  if (cc_buffer_push_cc_data (self->cc_buffer, cc_data, cc_data_len))
-    self->current_scheduled++;
+  return cc_buffer_push_cc_data (self->cc_buffer, cc_data, cc_data_len);
 }
 
-static void
+static CCBufferPushReturn
 schedule_cea608_s334_1a (GstCCCombiner * self, guint8 * data, guint len,
     GstClockTime pts, GstClockTime duration)
 {
@@ -249,50 +287,68 @@ schedule_cea608_s334_1a (GstCCCombiner * self, guint8 * data, guint len,
     }
   }
 
-  if (cc_buffer_push_separated (self->cc_buffer, field0_data, field0_len,
-          field1_data, field1_len, NULL, 0))
-    self->current_scheduled++;
+  return cc_buffer_push_separated (self->cc_buffer, field0_data, field0_len,
+      field1_data, field1_len, NULL, 0);
 }
 
-static void
+static CCBufferPushReturn
 schedule_cea708_raw (GstCCCombiner * self, guint8 * data, guint len,
     GstClockTime pts, GstClockTime duration)
 {
-  if (cc_buffer_push_cc_data (self->cc_buffer, data, len))
-    self->current_scheduled++;
+  return cc_buffer_push_cc_data (self->cc_buffer, data, len);
 }
 
-static void
+static CCBufferPushReturn
 schedule_cea608_raw (GstCCCombiner * self, guint8 * data, guint len)
 {
-  if (cc_buffer_push_separated (self->cc_buffer, data, len, NULL, 0, NULL, 0))
-    self->current_scheduled++;
+  return cc_buffer_push_separated (self->cc_buffer, data, len,
+      NULL, 0, NULL, 0);
 }
 
 static void
-schedule_caption (GstCCCombiner * self, GstBuffer * caption_buf,
-    const GstVideoTimeCode * tc)
+schedule_caption (GstCCCombiner * self, GstAggregatorPad * caption_pad,
+    GstBuffer * caption_buf, const GstVideoTimeCode * tc)
 {
   GstMapInfo map;
-  GstClockTime pts, duration;
+  GstClockTime pts, duration, running_time;
+  CCBufferPushReturn push_ret = CC_BUFFER_PUSH_NO_DATA;
 
   pts = GST_BUFFER_PTS (caption_buf);
   duration = GST_BUFFER_DURATION (caption_buf);
 
-  if (self->current_scheduled + 1 >= self->max_scheduled) {
-    GstClockTime stream_time, running_time;
-    GstAggregatorPad *caption_pad;
+  running_time =
+      gst_segment_to_running_time (&caption_pad->segment, GST_FORMAT_TIME, pts);
 
-    caption_pad =
-        GST_AGGREGATOR_PAD_CAST (gst_element_get_static_pad (GST_ELEMENT_CAST
-            (self), "caption"));
+  self->last_caption_ts = running_time;
 
-    GST_WARNING_OBJECT (self,
-        "scheduled queue runs too long, discarding stored");
+  gst_buffer_map (caption_buf, &map, GST_MAP_READ);
 
-    running_time =
-        gst_segment_to_running_time (&caption_pad->segment, GST_FORMAT_TIME,
-        pts);
+  switch (self->caption_type) {
+    case GST_VIDEO_CAPTION_TYPE_CEA708_CDP:
+      push_ret = schedule_cdp (self, tc, map.data, map.size, pts, duration);
+      break;
+    case GST_VIDEO_CAPTION_TYPE_CEA708_RAW:
+      push_ret = schedule_cea708_raw (self, map.data, map.size, pts, duration);
+      break;
+    case GST_VIDEO_CAPTION_TYPE_CEA608_S334_1A:
+      push_ret =
+          schedule_cea608_s334_1a (self, map.data, map.size, pts, duration);
+      break;
+    case GST_VIDEO_CAPTION_TYPE_CEA608_RAW:
+      push_ret = schedule_cea608_raw (self, map.data, map.size);
+      break;
+    default:
+      break;
+  }
+
+  gst_buffer_unmap (caption_buf, &map);
+
+  if (push_ret == CC_BUFFER_PUSH_OVERFLOW) {
+    GstClockTime stream_time;
+
+    GST_WARNING_OBJECT (self, "CC buffer overflowed with %" GST_PTR_FORMAT,
+        caption_buf);
+
     stream_time =
         gst_segment_to_stream_time (&caption_pad->segment, GST_FORMAT_TIME,
         pts);
@@ -300,33 +356,7 @@ schedule_caption (GstCCCombiner * self, GstBuffer * caption_buf,
     gst_element_post_message (GST_ELEMENT_CAST (self),
         gst_message_new_qos (GST_OBJECT_CAST (self), FALSE,
             running_time, stream_time, pts, duration));
-
-    cc_buffer_discard (self->cc_buffer);
-    self->current_scheduled = 0;
-
-    gst_clear_object (&caption_pad);
   }
-
-  gst_buffer_map (caption_buf, &map, GST_MAP_READ);
-
-  switch (self->caption_type) {
-    case GST_VIDEO_CAPTION_TYPE_CEA708_CDP:
-      schedule_cdp (self, tc, map.data, map.size, pts, duration);
-      break;
-    case GST_VIDEO_CAPTION_TYPE_CEA708_RAW:
-      schedule_cea708_raw (self, map.data, map.size, pts, duration);
-      break;
-    case GST_VIDEO_CAPTION_TYPE_CEA608_S334_1A:
-      schedule_cea608_s334_1a (self, map.data, map.size, pts, duration);
-      break;
-    case GST_VIDEO_CAPTION_TYPE_CEA608_RAW:
-      schedule_cea608_raw (self, map.data, map.size);
-      break;
-    default:
-      break;
-  }
-
-  gst_buffer_unmap (caption_buf, &map);
 }
 
 static void
@@ -343,6 +373,24 @@ dequeue_caption (GstCCCombiner * self, GstVideoTimeCode * tc, gboolean drain)
   if (drain && cc_buffer_is_empty (self->cc_buffer))
     return;
 
+  if (self->schedule_timeout != GST_CLOCK_TIME_NONE) {
+    if (self->last_caption_ts == GST_CLOCK_TIME_NONE) {
+      return;
+    }
+
+    if (self->current_video_running_time > self->last_caption_ts
+        && self->current_video_running_time - self->last_caption_ts
+        > self->schedule_timeout) {
+      GST_LOG_OBJECT (self, "Not outputting caption as last caption buffer ts %"
+          GST_TIME_FORMAT " is more than the schedule timeout %" GST_TIME_FORMAT
+          " from the current output time %" GST_TIME_FORMAT,
+          GST_TIME_ARGS (self->last_caption_ts),
+          GST_TIME_ARGS (self->schedule_timeout),
+          GST_TIME_ARGS (self->current_video_running_time));
+      return;
+    }
+  }
+
   caption_data.caption_type = self->caption_type;
   switch (self->caption_type) {
     case GST_VIDEO_CAPTION_TYPE_CEA708_CDP:
@@ -351,7 +399,7 @@ dequeue_caption (GstCCCombiner * self, GstVideoTimeCode * tc, gboolean drain)
       if (GST_BUFFER_FLAG_IS_SET (self->current_video_buffer,
               GST_VIDEO_BUFFER_FLAG_INTERLACED)) {
         if (!GST_VIDEO_BUFFER_IS_BOTTOM_FIELD (self->current_video_buffer)) {
-          cc_buffer_take_cc_data (self->cc_buffer, self->cdp_fps_entry, TRUE,
+          cc_buffer_take_cc_data (self->cc_buffer, self->cdp_fps_entry,
               cc_data, &cc_data_len);
           caption_data.buffer =
               make_cdp_buffer (self, cc_data, cc_data_len, self->cdp_fps_entry,
@@ -359,7 +407,7 @@ dequeue_caption (GstCCCombiner * self, GstVideoTimeCode * tc, gboolean drain)
           g_array_append_val (self->current_frame_captions, caption_data);
         }
       } else {
-        cc_buffer_take_cc_data (self->cc_buffer, self->cdp_fps_entry, TRUE,
+        cc_buffer_take_cc_data (self->cc_buffer, self->cdp_fps_entry,
             cc_data, &cc_data_len);
         caption_data.buffer =
             make_cdp_buffer (self, cc_data, cc_data_len, self->cdp_fps_entry,
@@ -446,6 +494,15 @@ dequeue_caption (GstCCCombiner * self, GstVideoTimeCode * tc, gboolean drain)
   }
 }
 
+static gboolean
+remove_caption_meta (GstBuffer * buffer, GstMeta ** meta, gpointer user_data)
+{
+  if ((*meta)->info->api == GST_VIDEO_CAPTION_META_API_TYPE)
+    *meta = NULL;
+
+  return TRUE;
+}
+
 static GstFlowReturn
 gst_cc_combiner_collect_captions (GstCCCombiner * self, gboolean timeout)
 {
@@ -456,12 +513,14 @@ gst_cc_combiner_collect_captions (GstCCCombiner * self, gboolean timeout)
   GstVideoTimeCodeMeta *tc_meta;
   GstVideoTimeCode *tc = NULL;
   gboolean caption_pad_is_eos = FALSE;
+  GstFlowReturn flow_ret = GST_FLOW_OK;
 
   g_assert (self->current_video_buffer != NULL);
 
-  caption_pad =
-      GST_AGGREGATOR_PAD_CAST (gst_element_get_static_pad (GST_ELEMENT_CAST
-          (self), "caption"));
+  GST_OBJECT_LOCK (self);
+  caption_pad = self->caption_pad ? gst_object_ref (self->caption_pad) : NULL;
+  GST_OBJECT_UNLOCK (self);
+
   /* No caption pad, forward buffer directly */
   if (!caption_pad) {
     GST_LOG_OBJECT (self, "No caption pad, passing through video");
@@ -588,7 +647,7 @@ gst_cc_combiner_collect_captions (GstCCCombiner * self, gboolean timeout)
       caption_data.buffer = caption_buf;
       g_array_append_val (self->current_frame_captions, caption_data);
     } else {
-      schedule_caption (self, caption_buf, tc);
+      schedule_caption (self, caption_pad, caption_buf, tc);
       gst_buffer_unref (caption_buf);
     }
   } while (TRUE);
@@ -602,14 +661,37 @@ gst_cc_combiner_collect_captions (GstCCCombiner * self, gboolean timeout)
       GST_BUFFER_DTS (self->current_video_buffer),
       GST_BUFFER_DURATION (self->current_video_buffer), NULL);
 
-  GST_LOG_OBJECT (self, "Attaching %u captions to buffer %p",
+  GST_LOG_OBJECT (self, "Collected %u captions for buffer %p",
       self->current_frame_captions->len, self->current_video_buffer);
+
+  switch (self->prop_input_meta_processing) {
+    case CCCOMBINER_INPUT_PROCESSING_APPEND:
+      break;
+    case CCCOMBINER_INPUT_PROCESSING_DROP:
+      self->current_video_buffer =
+          gst_buffer_make_writable (self->current_video_buffer);
+      gst_buffer_foreach_meta (self->current_video_buffer, remove_caption_meta,
+          NULL);
+      break;
+    case CCCOMBINER_INPUT_PROCESSING_FAVOR:
+      if (gst_buffer_get_meta (self->current_video_buffer,
+              GST_VIDEO_CAPTION_META_API_TYPE)) {
+        GST_LOG_OBJECT (self,
+            "Video buffer already has captions, dropping %d dequeued captions",
+            self->current_frame_captions->len);
+        g_array_set_size (self->current_frame_captions, 0);
+      }
+      break;
+    case CCCOMBINER_INPUT_PROCESSING_FORCE:
+      GST_LOG_OBJECT (self,
+          "Forced input captions, dropping %d dequeued captions",
+          self->current_frame_captions->len);
+      g_array_set_size (self->current_frame_captions, 0);
+      break;
+  }
 
   if (self->current_frame_captions->len > 0) {
     guint i;
-
-    if (self->schedule)
-      self->current_scheduled = MAX (1, self->current_scheduled) - 1;
 
     video_buf = gst_buffer_make_writable (self->current_video_buffer);
     self->current_video_buffer = NULL;
@@ -618,6 +700,9 @@ gst_cc_combiner_collect_captions (GstCCCombiner * self, gboolean timeout)
       CaptionData *caption_data =
           &g_array_index (self->current_frame_captions, CaptionData, i);
       GstMapInfo map;
+
+      if (gst_buffer_get_size (caption_data->buffer) == 0)
+        continue;
 
       gst_buffer_map (caption_data->buffer, &map, GST_MAP_READ);
       gst_buffer_add_video_caption_meta (video_buf, caption_data->caption_type,
@@ -639,7 +724,41 @@ done:
   src_pad->segment.position =
       GST_BUFFER_PTS (video_buf) + GST_BUFFER_DURATION (video_buf);
 
-  return gst_aggregator_finish_buffer (GST_AGGREGATOR_CAST (self), video_buf);
+  flow_ret =
+      gst_aggregator_finish_buffer (GST_AGGREGATOR_CAST (self), video_buf);
+
+  if (self->pending_video_caps) {
+    GST_DEBUG_OBJECT (self, "Setting pending video caps %" GST_PTR_FORMAT,
+        self->pending_video_caps);
+    gst_aggregator_set_src_caps (GST_AGGREGATOR_CAST (self),
+        self->pending_video_caps);
+    gst_clear_caps (&self->pending_video_caps);
+  }
+
+  return flow_ret;
+}
+
+static GstClockTime
+gst_cc_combiner_get_next_time (GstAggregator * aggregator)
+{
+  GstCCCombiner *self = GST_CCCOMBINER (aggregator);
+
+  GST_OBJECT_LOCK (self);
+  /* No point timing out if we can't combine captions */
+  if (!self->caption_pad)
+    goto wait_for_data;
+
+  /* We need a video buffer */
+  if (!self->current_video_buffer &&
+      !gst_aggregator_pad_has_buffer (self->video_pad))
+    goto wait_for_data;
+  GST_OBJECT_UNLOCK (self);
+
+  return gst_aggregator_simple_get_next_time (aggregator);
+
+wait_for_data:
+  GST_OBJECT_UNLOCK (self);
+  return GST_CLOCK_TIME_NONE;
 }
 
 static GstFlowReturn
@@ -657,18 +776,16 @@ gst_cc_combiner_aggregate (GstAggregator * aggregator, gboolean timeout)
     GstClockTime video_start;
     GstBuffer *video_buf;
 
-    video_pad =
-        GST_AGGREGATOR_PAD_CAST (gst_element_get_static_pad (GST_ELEMENT_CAST
-            (aggregator), "sink"));
+    video_pad = self->video_pad;
     video_buf = gst_aggregator_pad_peek_buffer (video_pad);
     if (!video_buf) {
       if (gst_aggregator_pad_is_eos (video_pad)) {
         GST_DEBUG_OBJECT (aggregator, "Video pad is EOS, we're done");
 
-        /* Assume that this buffer ends where it started +50ms (25fps) and handle it */
+        /* Assume that this buffer ends where it started +50ms (20fps) and handle it */
         if (self->current_video_buffer) {
           self->current_video_running_time_end =
-              self->current_video_running_time + 50 * GST_MSECOND;
+              self->current_video_running_time + FALLBACK_FRAME_DURATION;
           flow_ret = gst_cc_combiner_collect_captions (self, timeout);
         }
 
@@ -683,14 +800,12 @@ gst_cc_combiner_aggregate (GstAggregator * aggregator, gboolean timeout)
         flow_ret = GST_FLOW_OK;
       }
 
-      gst_object_unref (video_pad);
       return flow_ret;
     }
 
     video_start = GST_BUFFER_PTS (video_buf);
     if (!GST_CLOCK_TIME_IS_VALID (video_start)) {
       gst_buffer_unref (video_buf);
-      gst_object_unref (video_pad);
 
       GST_ERROR_OBJECT (aggregator, "Video buffer without PTS");
 
@@ -704,7 +819,6 @@ gst_cc_combiner_aggregate (GstAggregator * aggregator, gboolean timeout)
       GST_DEBUG_OBJECT (aggregator, "Buffer outside segment, dropping");
       gst_aggregator_pad_drop_buffer (video_pad);
       gst_buffer_unref (video_buf);
-      gst_object_unref (video_pad);
       return GST_FLOW_OK;
     }
 
@@ -753,15 +867,15 @@ gst_cc_combiner_aggregate (GstAggregator * aggregator, gboolean timeout)
           GST_TIME_ARGS (self->current_video_running_time),
           GST_TIME_ARGS (self->current_video_running_time_end));
     }
-
-    gst_object_unref (video_pad);
   }
+
+  if (!GST_CLOCK_TIME_IS_VALID (self->current_video_running_time_end))
+    return GST_FLOW_OK;
 
   /* At this point we have a video buffer queued and can start collecting
    * caption buffers for it */
   g_assert (self->current_video_buffer != NULL);
   g_assert (GST_CLOCK_TIME_IS_VALID (self->current_video_running_time));
-  g_assert (GST_CLOCK_TIME_IS_VALID (self->current_video_running_time_end));
 
   flow_ret = gst_cc_combiner_collect_captions (self, timeout);
 
@@ -811,6 +925,7 @@ gst_cc_combiner_sink_event (GstAggregator * aggregator,
       } else {
         gint fps_n, fps_d;
         const gchar *interlace_mode;
+        GstClockTime frame_duration = GST_CLOCK_TIME_NONE;
 
         fps_n = fps_d = 0;
 
@@ -821,11 +936,14 @@ gst_cc_combiner_sink_event (GstAggregator * aggregator,
         self->progressive = !interlace_mode
             || !g_strcmp0 (interlace_mode, "progressive");
 
-        if (fps_n != self->video_fps_n || fps_d != self->video_fps_d) {
-          GstClockTime latency;
+        if (fps_n > 0 && fps_d > 0)
+          frame_duration = gst_util_uint64_scale (GST_SECOND, fps_d, fps_n);
+        if (!GST_CLOCK_TIME_IS_VALID (frame_duration) || frame_duration == 0)
+          frame_duration = FALLBACK_FRAME_DURATION;
 
-          latency = gst_util_uint64_scale (GST_SECOND, fps_d, fps_n);
-          gst_aggregator_set_latency (aggregator, latency, latency);
+        if (fps_n != self->video_fps_n || fps_d != self->video_fps_d) {
+          gst_aggregator_set_latency (aggregator, frame_duration,
+              frame_duration);
         }
 
         self->video_fps_n = fps_n;
@@ -842,7 +960,16 @@ gst_cc_combiner_sink_event (GstAggregator * aggregator,
           self->cdp_fps_entry = cdp_fps_entry_from_fps (60, 1);
         }
 
-        gst_aggregator_set_src_caps (aggregator, caps);
+        cc_buffer_set_max_buffer_time (self->cc_buffer,
+            frame_duration * self->max_scheduled);
+
+        if (self->current_video_buffer) {
+          GST_DEBUG_OBJECT (self, "Storing new caps %" GST_PTR_FORMAT, caps);
+          gst_caps_replace (&self->pending_video_caps, caps);
+        } else {
+          gst_clear_caps (&self->pending_video_caps);
+          gst_aggregator_set_src_caps (aggregator, caps);
+        }
       }
 
       break;
@@ -855,6 +982,11 @@ gst_cc_combiner_sink_event (GstAggregator * aggregator,
         gst_aggregator_update_segment (aggregator, segment);
       }
       break;
+    }
+    case GST_EVENT_STREAM_START:{
+      if (strcmp (GST_OBJECT_NAME (agg_pad), "caption") == 0) {
+        self->last_caption_ts = GST_CLOCK_TIME_NONE;
+      }
     }
     default:
       break;
@@ -873,12 +1005,12 @@ gst_cc_combiner_stop (GstAggregator * aggregator)
   self->current_video_running_time = self->current_video_running_time_end =
       self->previous_video_running_time_end = GST_CLOCK_TIME_NONE;
   gst_buffer_replace (&self->current_video_buffer, NULL);
+  gst_clear_caps (&self->pending_video_caps);
 
   g_array_set_size (self->current_frame_captions, 0);
   self->caption_type = GST_VIDEO_CAPTION_TYPE_UNKNOWN;
 
   cc_buffer_discard (self->cc_buffer);
-  self->current_scheduled = 0;
   self->cdp_fps_entry = &null_fps_entry;
 
   return TRUE;
@@ -894,6 +1026,7 @@ gst_cc_combiner_flush (GstAggregator * aggregator)
   self->current_video_running_time = self->current_video_running_time_end =
       self->previous_video_running_time_end = GST_CLOCK_TIME_NONE;
   gst_buffer_replace (&self->current_video_buffer, NULL);
+  gst_clear_caps (&self->pending_video_caps);
 
   g_array_set_size (self->current_frame_captions, 0);
 
@@ -902,7 +1035,6 @@ gst_cc_combiner_flush (GstAggregator * aggregator)
   self->cdp_hdr_sequence_cntr = 0;
 
   cc_buffer_discard (self->cc_buffer);
-  self->current_scheduled = 0;
 
   return GST_FLOW_OK;
 }
@@ -927,16 +1059,30 @@ gst_cc_combiner_create_new_pad (GstAggregator * aggregator,
   agg_pad = g_object_new (GST_TYPE_AGGREGATOR_PAD,
       "name", "caption", "direction", GST_PAD_SINK, "template", templ, NULL);
   self->caption_type = GST_VIDEO_CAPTION_TYPE_UNKNOWN;
+  self->caption_pad = gst_object_ref (agg_pad);
   GST_OBJECT_UNLOCK (self);
 
   return agg_pad;
 }
 
+static void
+gst_cc_combiner_release_pad (GstElement * element, GstPad * pad)
+{
+  GstCCCombiner *self = GST_CCCOMBINER (element);
+
+  GST_OBJECT_LOCK (self);
+  if (pad == GST_PAD_CAST (self->caption_pad)) {
+    gst_clear_object (&self->caption_pad);
+  }
+  GST_OBJECT_UNLOCK (self);
+
+  GST_ELEMENT_CLASS (parent_class)->release_pad (element, pad);
+}
+
 static gboolean
 gst_cc_combiner_src_query (GstAggregator * aggregator, GstQuery * query)
 {
-  GstPad *video_sinkpad =
-      gst_element_get_static_pad (GST_ELEMENT_CAST (aggregator), "sink");
+  GstCCCombiner *self = GST_CCCOMBINER (aggregator);
   gboolean ret;
 
   switch (GST_QUERY_TYPE (query)) {
@@ -945,7 +1091,7 @@ gst_cc_combiner_src_query (GstAggregator * aggregator, GstQuery * query)
     case GST_QUERY_URI:
     case GST_QUERY_CAPS:
     case GST_QUERY_ALLOCATION:
-      ret = gst_pad_peer_query (video_sinkpad, query);
+      ret = gst_pad_peer_query (GST_PAD_CAST (self->video_pad), query);
       break;
     case GST_QUERY_ACCEPT_CAPS:{
       GstCaps *caps;
@@ -963,8 +1109,6 @@ gst_cc_combiner_src_query (GstAggregator * aggregator, GstQuery * query)
       break;
   }
 
-  gst_object_unref (video_sinkpad);
-
   return ret;
 }
 
@@ -972,8 +1116,7 @@ static gboolean
 gst_cc_combiner_sink_query (GstAggregator * aggregator,
     GstAggregatorPad * aggpad, GstQuery * query)
 {
-  GstPad *video_sinkpad =
-      gst_element_get_static_pad (GST_ELEMENT_CAST (aggregator), "sink");
+  GstCCCombiner *self = GST_CCCOMBINER (aggregator);
   GstPad *srcpad = GST_AGGREGATOR_SRC_PAD (aggregator);
 
   gboolean ret;
@@ -983,7 +1126,7 @@ gst_cc_combiner_sink_query (GstAggregator * aggregator,
     case GST_QUERY_DURATION:
     case GST_QUERY_URI:
     case GST_QUERY_ALLOCATION:
-      if (GST_PAD_CAST (aggpad) == video_sinkpad) {
+      if (aggpad == self->video_pad) {
         ret = gst_pad_peer_query (srcpad, query);
       } else {
         ret =
@@ -992,7 +1135,7 @@ gst_cc_combiner_sink_query (GstAggregator * aggregator,
       }
       break;
     case GST_QUERY_CAPS:
-      if (GST_PAD_CAST (aggpad) == video_sinkpad) {
+      if (aggpad == self->video_pad) {
         ret = gst_pad_peer_query (srcpad, query);
       } else {
         GstCaps *filter;
@@ -1013,7 +1156,7 @@ gst_cc_combiner_sink_query (GstAggregator * aggregator,
       }
       break;
     case GST_QUERY_ACCEPT_CAPS:
-      if (GST_PAD_CAST (aggpad) == video_sinkpad) {
+      if (aggpad == self->video_pad) {
         ret = gst_pad_peer_query (srcpad, query);
       } else {
         GstCaps *caps;
@@ -1032,8 +1175,6 @@ gst_cc_combiner_sink_query (GstAggregator * aggregator,
       break;
   }
 
-  gst_object_unref (video_sinkpad);
-
   return ret;
 }
 
@@ -1041,18 +1182,11 @@ static GstSample *
 gst_cc_combiner_peek_next_sample (GstAggregator * agg,
     GstAggregatorPad * aggpad)
 {
-  GstAggregatorPad *caption_pad, *video_pad;
   GstCCCombiner *self = GST_CCCOMBINER (agg);
   GstSample *res = NULL;
 
-  caption_pad =
-      GST_AGGREGATOR_PAD_CAST (gst_element_get_static_pad (GST_ELEMENT_CAST
-          (self), "caption"));
-  video_pad =
-      GST_AGGREGATOR_PAD_CAST (gst_element_get_static_pad (GST_ELEMENT_CAST
-          (self), "sink"));
-
-  if (aggpad == caption_pad) {
+  if (aggpad != self->video_pad) {
+    /* Must be the caption pad */
     if (self->current_frame_captions->len > 0) {
       GstCaps *caps = gst_pad_get_current_caps (GST_PAD (aggpad));
       GstBufferList *buflist = gst_buffer_list_new ();
@@ -1070,7 +1204,7 @@ gst_cc_combiner_peek_next_sample (GstAggregator * agg,
       gst_sample_set_buffer_list (res, buflist);
       gst_buffer_list_unref (buflist);
     }
-  } else if (aggpad == video_pad) {
+  } else {
     if (self->current_video_buffer) {
       GstCaps *caps = gst_pad_get_current_caps (GST_PAD (aggpad));
       res = gst_sample_new (self->current_video_buffer,
@@ -1078,12 +1212,6 @@ gst_cc_combiner_peek_next_sample (GstAggregator * agg,
       gst_caps_unref (caps);
     }
   }
-
-  if (caption_pad)
-    gst_object_unref (caption_pad);
-
-  if (video_pad)
-    gst_object_unref (video_pad);
 
   return res;
 }
@@ -1097,10 +1225,14 @@ gst_cc_combiner_change_state (GstElement * element, GstStateChange transition)
     case GST_STATE_CHANGE_READY_TO_PAUSED:
       self->schedule = self->prop_schedule;
       self->max_scheduled = self->prop_max_scheduled;
-      self->output_padding = self->prop_output_padding;
+      self->schedule_timeout = self->prop_schedule_timeout;
       cc_buffer_set_max_buffer_time (self->cc_buffer, GST_CLOCK_TIME_NONE);
       cc_buffer_set_output_padding (self->cc_buffer, self->prop_output_padding,
           self->prop_output_padding);
+      cc_buffer_set_cea608_padding_strategy (self->cc_buffer,
+          self->prop_cea608_padding_strategy);
+      cc_buffer_set_cea608_valid_timeout (self->cc_buffer,
+          self->prop_cea608_valid_padding_timeout);
       break;
     default:
       break;
@@ -1125,6 +1257,18 @@ gst_cc_combiner_set_property (GObject * object, guint prop_id,
     case PROP_OUTPUT_PADDING:
       self->prop_output_padding = g_value_get_boolean (value);
       break;
+    case PROP_CEA608_PADDING_STRATEGY:
+      self->prop_cea608_padding_strategy = g_value_get_flags (value);
+      break;
+    case PROP_CEA608_VALID_PADDING_TIMEOUT:
+      self->prop_cea608_valid_padding_timeout = g_value_get_uint64 (value);
+      break;
+    case PROP_SCHEDULE_TIMEOUT:
+      self->prop_schedule_timeout = g_value_get_uint64 (value);
+      break;
+    case PROP_INPUT_META_PROCESSING:
+      self->prop_input_meta_processing = g_value_get_enum (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -1146,6 +1290,18 @@ gst_cc_combiner_get_property (GObject * object, guint prop_id, GValue * value,
       break;
     case PROP_OUTPUT_PADDING:
       g_value_set_boolean (value, self->prop_output_padding);
+      break;
+    case PROP_CEA608_PADDING_STRATEGY:
+      g_value_set_flags (value, self->prop_cea608_padding_strategy);
+      break;
+    case PROP_CEA608_VALID_PADDING_TIMEOUT:
+      g_value_set_uint64 (value, self->prop_cea608_valid_padding_timeout);
+      break;
+    case PROP_SCHEDULE_TIMEOUT:
+      g_value_set_uint64 (value, self->prop_schedule_timeout);
+      break;
+    case PROP_INPUT_META_PROCESSING:
+      g_value_set_enum (value, self->prop_input_meta_processing);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1240,6 +1396,73 @@ gst_cc_combiner_class_init (GstCCCombinerClass * klass)
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
           GST_PARAM_MUTABLE_READY));
 
+  /**
+   * GstCCCombiner:cea608-padding-strategy:
+   *
+   * Controls the transformations that may be done on padding CEA-608 data.
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (G_OBJECT_CLASS (klass),
+      PROP_CEA608_PADDING_STRATEGY,
+      g_param_spec_flags ("cea608-padding-strategy",
+          "CEA-608 Padding Strategy",
+          "What transformations to perform on CEA-608 padding data",
+          GST_TYPE_CC_BUFFER_CEA608_PADDING_STRATEGY,
+          DEFAULT_CEA608_PADDING_STRATEGY,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+          GST_PARAM_MUTABLE_READY));
+
+  /**
+   * GstCCCombiner:cea608-padding-valid-timeout:
+   *
+   * Timeout to apply when padding strategy contains "valid".  After this time
+   * hase passed, CEA-608 padding will be signalled as invalid until new valid
+   * CEA-608 non-padding data is received.
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (G_OBJECT_CLASS (klass),
+      PROP_CEA608_VALID_PADDING_TIMEOUT,
+      g_param_spec_uint64 ("cea608-padding-valid-timeout",
+          "CEA-608 Padding Valid Timeout",
+          "How long after receiving valid non-padding CEA-608 data to keep writing valid CEA-608 padding bytes",
+          0, G_MAXUINT64, DEFAULT_CEA608_VALID_PADDING_TIMEOUT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+          GST_PARAM_MUTABLE_READY));
+
+  /**
+   * GstCCCombiner:schedule-timeout:
+   *
+   * Timeout to apply when the caption pad is EOS and schedule=true.  On
+   * reaching the timeout, no caption data will be placed on the outgoing
+   * buffers until receiving a new stream.
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (G_OBJECT_CLASS (klass),
+      PROP_SCHEDULE_TIMEOUT,
+      g_param_spec_uint64 ("schedule-timeout",
+          "Schedule Timeout",
+          "How long after not receiving caption data on the caption pad to continue adding (padding) caption data on output buffers",
+          0, G_MAXUINT64, DEFAULT_SCHEDULE_TIMEOUT,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+          GST_PARAM_MUTABLE_READY));
+
+  /**
+   * GstCCCombiner:input-meta-processing
+   *
+   * Controls how input closed caption meta is processed.
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (G_OBJECT_CLASS (klass),
+      PROP_INPUT_META_PROCESSING, g_param_spec_enum ("input-meta-processing",
+          "Input Meta Processing",
+          "Controls how input closed caption meta is processed",
+          GST_TYPE_CCCOMBINER_INPUT_META_PROCESSING,
+          DEFAULT_INPUT_META_PROCESSING,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_add_static_pad_template_with_gtype (gstelement_class,
       &sinktemplate, GST_TYPE_AGGREGATOR_PAD);
@@ -1250,6 +1473,8 @@ gst_cc_combiner_class_init (GstCCCombinerClass * klass)
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_cc_combiner_change_state);
+  gstelement_class->release_pad =
+      GST_DEBUG_FUNCPTR (gst_cc_combiner_release_pad);
 
   aggregator_class->aggregate = gst_cc_combiner_aggregate;
   aggregator_class->stop = gst_cc_combiner_stop;
@@ -1257,26 +1482,27 @@ gst_cc_combiner_class_init (GstCCCombinerClass * klass)
   aggregator_class->create_new_pad = gst_cc_combiner_create_new_pad;
   aggregator_class->sink_event = gst_cc_combiner_sink_event;
   aggregator_class->negotiate = NULL;
-  aggregator_class->get_next_time = gst_aggregator_simple_get_next_time;
+  aggregator_class->get_next_time = gst_cc_combiner_get_next_time;
   aggregator_class->src_query = gst_cc_combiner_src_query;
   aggregator_class->sink_query = gst_cc_combiner_sink_query;
   aggregator_class->peek_next_sample = gst_cc_combiner_peek_next_sample;
 
   GST_DEBUG_CATEGORY_INIT (gst_cc_combiner_debug, "cccombiner",
       0, "Closed Caption combiner");
+
+  gst_type_mark_as_plugin_api (GST_TYPE_CCCOMBINER_INPUT_META_PROCESSING, 0);
 }
 
 static void
 gst_cc_combiner_init (GstCCCombiner * self)
 {
   GstPadTemplate *templ;
-  GstAggregatorPad *agg_pad;
 
   templ = gst_static_pad_template_get (&sinktemplate);
-  agg_pad = g_object_new (GST_TYPE_AGGREGATOR_PAD,
+  self->video_pad = g_object_new (GST_TYPE_AGGREGATOR_PAD,
       "name", "sink", "direction", GST_PAD_SINK, "template", templ, NULL);
   gst_object_unref (templ);
-  gst_element_add_pad (GST_ELEMENT_CAST (self), GST_PAD_CAST (agg_pad));
+  gst_element_add_pad (GST_ELEMENT_CAST (self), GST_PAD_CAST (self->video_pad));
 
   self->current_frame_captions =
       g_array_new (FALSE, FALSE, sizeof (CaptionData));
@@ -1291,9 +1517,14 @@ gst_cc_combiner_init (GstCCCombiner * self)
   self->prop_schedule = DEFAULT_SCHEDULE;
   self->prop_max_scheduled = DEFAULT_MAX_SCHEDULED;
   self->prop_output_padding = DEFAULT_OUTPUT_PADDING;
+  self->prop_cea608_padding_strategy = DEFAULT_CEA608_PADDING_STRATEGY;
+  self->prop_cea608_valid_padding_timeout =
+      DEFAULT_CEA608_VALID_PADDING_TIMEOUT;
+  self->prop_schedule_timeout = DEFAULT_SCHEDULE_TIMEOUT;
+  self->prop_input_meta_processing = DEFAULT_INPUT_META_PROCESSING;
   self->cdp_hdr_sequence_cntr = 0;
   self->cdp_fps_entry = &null_fps_entry;
+  self->last_caption_ts = GST_CLOCK_TIME_NONE;
 
   self->cc_buffer = cc_buffer_new ();
-  cc_buffer_set_max_buffer_time (self->cc_buffer, GST_CLOCK_TIME_NONE);
 }

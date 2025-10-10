@@ -123,6 +123,7 @@ gst_va_encoder_set_property (GObject * object, guint prop_id,
 
   switch (prop_id) {
     case PROP_DISPLAY:{
+      /* G_PARAM_CONSTRUCT_ONLY */
       g_assert (!self->display);
       self->display = g_value_dup_object (value);
       break;
@@ -364,7 +365,7 @@ _create_reconstruct_pool (GstVaDisplay * display, GArray * surface_formats,
 
   caps = gst_video_info_to_caps (&info);
   gst_caps_set_features_simple (caps,
-      gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_VA));
+      gst_caps_features_new_single_static_str (GST_CAPS_FEATURE_MEMORY_VA));
 
   allocator = gst_va_allocator_new (display, surface_formats);
 
@@ -1288,11 +1289,11 @@ static const GEnumValue rate_control_map[] = {
   {VA_RC_CQP, "Constant Quantizer", "cqp"},
   /* {VA_RC_VBR_CONSTRAINED, "VBR with peak rate higher than average bitrate", */
   /*  "vbr-constrained"}, */
-  /* {VA_RC_ICQ, "Intelligent Constant Quality", "icq"}, */
+  {VA_RC_ICQ, "Intelligent Constant Quality", "icq"},
   /* {VA_RC_MB, "Macroblock based rate control", "mb"}, */
   /* {VA_RC_CFS, "Constant Frame Size", "cfs"}, */
   /* {VA_RC_PARALLEL, "Parallel BRC", "parallel"}, */
-  /* {VA_RC_QVBR, "Quality defined VBR", "qvbr"}, */
+  {VA_RC_QVBR, "Quality defined VBR", "qvbr"},
   /* {VA_RC_AVBR, "Average VBR", "avbr"}, */
 };
 

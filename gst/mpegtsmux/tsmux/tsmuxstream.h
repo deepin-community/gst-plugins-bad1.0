@@ -118,9 +118,12 @@ enum TsMuxStreamType {
   /* later extensions */
   TSMUX_ST_AUDIO_AAC                  = 0x0f,
   TSMUX_ST_VIDEO_MPEG4                = 0x10,
+  TSMUX_ST_PES_METADATA               = 0x15,
   TSMUX_ST_VIDEO_H264                 = 0x1b,
   TSMUX_ST_VIDEO_HEVC                 = 0x24,
-  TSMUX_ST_VIDEO_JP2K = 0x21,
+  TSMUX_ST_VIDEO_JP2K                 = 0x21,
+  TSMUX_ST_VIDEO_JPEG_XS              = 0x32,
+  TSMUX_ST_VIDEO_VVC                  = 0x33,
 
   /* private stream types */
   TSMUX_ST_PS_AUDIO_AC3               = 0x81,
@@ -130,6 +133,11 @@ enum TsMuxStreamType {
   TSMUX_ST_PS_TELETEXT                = 0x8d,
   TSMUX_ST_PS_KLV                     = 0x8e,    /* only used internally */
   TSMUX_ST_PS_OPUS                    = 0x8f,    /* only used internally */
+  TSMUX_ST_PS_ID3                     = 0x90,    /* only used internally */
+  TSMUX_ST_PS_ST_2038                 = 0x91,    /* only used internally */
+  TSMUX_ST_PS_S302M                   = 0x92,    /* only used internally */
+  TSMUX_ST_PS_VP9                     = 0x93,    /* only used internally */
+  TSMUX_ST_PS_VIDEO_AV1               = 0x94,    /* only used internally */
   TSMUX_ST_PS_DVD_SUBPICTURE          = 0xff,
 
   /* Non-standard definitions */
@@ -145,7 +153,12 @@ enum TsMuxStreamState {
 struct TsMuxStream {
   TsMuxStreamState state;
   TsMuxPacketInfo pi;
-  guint stream_type;
+  /* Stream type to be used in PES/PSI */
+  TsMuxStreamType stream_type;
+  /* internal stream identifier (used for private section/pes) */
+  TsMuxStreamType internal_stream_type;
+  /* Nature of the stream (audio, video, ..) */
+  GstStreamType gst_stream_type;
 
   /* stream_id (13818-1) */
   guint8 id;
@@ -156,8 +169,6 @@ struct TsMuxStream {
 
   /* requested index in the PMT */
   gint pmt_index;
-
-  gboolean is_video_stream;
 
   /* data available for writing out
    * and total sum of sizes */
@@ -208,11 +219,7 @@ struct TsMuxStream {
   gboolean is_dvb_sub;
   gchar language[4];
 
-  gboolean is_meta;
-  gboolean is_audio;
-
   /* Opus */
-  gboolean is_opus;
   guint8 opus_channel_config[1 + 2 + 1 + 1 + 255];
   gsize opus_channel_config_len;
 
@@ -226,6 +233,9 @@ struct TsMuxStream {
   guint16 profile_and_level;
   gboolean interlace_mode;
   guint8 color_spec;
+
+  /* PMT descriptor for the stream */
+  GstMpegtsDescriptor *pmt_descriptor;
 };
 
 /* stream management */

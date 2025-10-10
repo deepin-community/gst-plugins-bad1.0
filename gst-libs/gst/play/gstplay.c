@@ -89,9 +89,8 @@
 
 #include <gst/gst.h>
 #include <gst/video/video.h>
-#include <gst/video/colorbalance.h>
 #include <gst/tag/tag.h>
-#include <gst/pbutils/descriptions.h>
+#include <gst/pbutils/pbutils.h>
 
 #include <string.h>
 
@@ -117,30 +116,6 @@ gst_play_error_quark (void)
 {
   return g_quark_from_static_string ("gst-play-error-quark");
 }
-
-static GQuark QUARK_CONFIG;
-
-/* Keep ConfigQuarkId and _config_quark_strings ordered and synced */
-typedef enum
-{
-  CONFIG_QUARK_USER_AGENT = 0,
-  CONFIG_QUARK_POSITION_INTERVAL_UPDATE,
-  CONFIG_QUARK_ACCURATE_SEEK,
-  CONFIG_QUARK_PIPELINE_DUMP_IN_ERROR_DETAILS,
-
-  CONFIG_QUARK_MAX
-} ConfigQuarkId;
-
-static const gchar *_config_quark_strings[] = {
-  "user-agent",
-  "position-interval-update",
-  "accurate-seek",
-  "pipeline-dump-in-error-details",
-};
-
-static GQuark _config_quark_table[CONFIG_QUARK_MAX];
-
-#define CONFIG_QUARK(q) _config_quark_table[CONFIG_QUARK_##q]
 
 enum
 {
@@ -213,18 +188,21 @@ struct _GstPlay
 
   GstStructure *config;
 
+  GList *missing_plugin_messages;
+
   /* Protected by lock */
   gboolean seek_pending;        /* Only set from main context */
   GstClockTime last_seek_time;  /* Only set from main context */
   GSource *seek_source;
   GstClockTime seek_position;
 
-  /* For playbin3 */
-  gboolean use_playbin3;
   GstStreamCollection *collection;
   gchar *video_sid;
+  gboolean video_enabled;
   gchar *audio_sid;
+  gboolean audio_enabled;
   gchar *subtitle_sid;
+  gboolean subtitle_enabled;
   gulong stream_notify_id;
 };
 
@@ -260,15 +238,9 @@ static void change_state (GstPlay * self, GstPlayState state);
 
 static GstPlayMediaInfo *gst_play_media_info_create (GstPlay * self);
 
-static void gst_play_streams_info_create (GstPlay * self,
-    GstPlayMediaInfo * media_info, const gchar * prop, GType type);
 static void gst_play_stream_info_update (GstPlay * self, GstPlayStreamInfo * s);
-static void gst_play_stream_info_update_tags_and_caps (GstPlay * self,
-    GstPlayStreamInfo * s);
 static GstPlayStreamInfo *gst_play_stream_info_find (GstPlayMediaInfo *
     media_info, GType type, gint stream_index);
-static GstPlayStreamInfo *gst_play_stream_info_get_current (GstPlay *
-    self, const gchar * prop, GType type);
 
 static void gst_play_video_info_update (GstPlay * self,
     GstPlayStreamInfo * stream_info);
@@ -276,6 +248,8 @@ static void gst_play_audio_info_update (GstPlay * self,
     GstPlayStreamInfo * stream_info);
 static void gst_play_subtitle_info_update (GstPlay * self,
     GstPlayStreamInfo * stream_info);
+
+static gboolean gst_play_select_streams (GstPlay * self);
 
 /* For playbin3 */
 static void gst_play_streams_info_create_from_collection (GstPlay * self,
@@ -301,6 +275,8 @@ static void remove_seek_source (GstPlay * self);
 
 static gboolean query_position (GstPlay * self, GstClockTime * position);
 
+static void gst_play_set_uri_details (GstPlay * self, GstStructure * details);
+
 static void
 gst_play_init (GstPlay * self)
 {
@@ -314,12 +290,13 @@ gst_play_init (GstPlay * self)
   self->context = g_main_context_new ();
   self->loop = g_main_loop_new (self->context, FALSE);
   self->api_bus = gst_bus_new ();
+  gst_object_set_name (GST_OBJECT (self->api_bus), "api_bus");
 
   /* *INDENT-OFF* */
-  self->config = gst_structure_new_id (QUARK_CONFIG,
-      CONFIG_QUARK (POSITION_INTERVAL_UPDATE), G_TYPE_UINT, DEFAULT_POSITION_UPDATE_INTERVAL_MS,
-      CONFIG_QUARK (ACCURATE_SEEK), G_TYPE_BOOLEAN, FALSE,
-      CONFIG_QUARK (PIPELINE_DUMP_IN_ERROR_DETAILS), G_TYPE_BOOLEAN, FALSE,
+  self->config = gst_structure_new_static_str ("play-config",
+      "position-interval-update", G_TYPE_UINT, DEFAULT_POSITION_UPDATE_INTERVAL_MS,
+      "accurate-seek", G_TYPE_BOOLEAN, FALSE,
+      "pipeline-dump-error-in-details", G_TYPE_BOOLEAN, FALSE,
       NULL);
   /* *INDENT-ON* */
 
@@ -329,6 +306,10 @@ gst_play_init (GstPlay * self)
 
   self->cached_position = 0;
   self->cached_duration = GST_CLOCK_TIME_NONE;
+
+  self->audio_enabled = TRUE;
+  self->video_enabled = TRUE;
+  self->subtitle_enabled = TRUE;
 
   GST_TRACE_OBJECT (self, "Initialized");
 }
@@ -341,12 +322,13 @@ api_bus_post_message (GstPlay * self, GstPlayMessage message_type,
     const gchar * firstfield, ...)
 {
   GstStructure *message_data = NULL;
+  GstStructure *details = NULL;
   GstMessage *msg = NULL;
   va_list varargs;
 
   GST_INFO ("Posting API-bus message-type: %s",
       gst_play_message_get_name (message_type));
-  message_data = gst_structure_new (GST_PLAY_MESSAGE_DATA,
+  message_data = gst_structure_new_static_str (GST_PLAY_MESSAGE_DATA,
       GST_PLAY_MESSAGE_DATA_TYPE, GST_TYPE_PLAY_MESSAGE, message_type, NULL);
 
   va_start (varargs, firstfield);
@@ -355,26 +337,27 @@ api_bus_post_message (GstPlay * self, GstPlayMessage message_type,
 
   msg = gst_message_new_custom (GST_MESSAGE_APPLICATION,
       GST_OBJECT (self), message_data);
-  GST_DEBUG ("Created message with payload: [ %" GST_PTR_FORMAT " ]",
-      message_data);
-  gst_bus_post (self->api_bus, msg);
-}
 
-static void
-config_quark_initialize (void)
-{
-  gint i;
-
-  QUARK_CONFIG = g_quark_from_static_string ("play-config");
-
-  if (G_N_ELEMENTS (_config_quark_strings) != CONFIG_QUARK_MAX)
-    g_warning ("the quark table is not consistent! %d != %d",
-        (int) G_N_ELEMENTS (_config_quark_strings), CONFIG_QUARK_MAX);
-
-  for (i = 0; i < CONFIG_QUARK_MAX; i++) {
-    _config_quark_table[i] =
-        g_quark_from_static_string (_config_quark_strings[i]);
+  // ERROR/WARNING messages store the details in differently named fields for
+  // backwards compatibility
+  if (message_type == GST_PLAY_MESSAGE_ERROR) {
+    const GValue *v = gst_structure_get_value (message_data,
+        GST_PLAY_MESSAGE_DATA_ERROR_DETAILS);
+    details = g_value_get_boxed (v);
+  } else if (message_type == GST_PLAY_MESSAGE_WARNING) {
+    const GValue *v = gst_structure_get_value (message_data,
+        GST_PLAY_MESSAGE_DATA_WARNING_DETAILS);
+    details = g_value_get_boxed (v);
   }
+
+  if (!details)
+    details = gst_message_writable_details (msg);
+
+  gst_play_set_uri_details (self, details);
+
+  GST_DEBUG_OBJECT (self,
+      "Created message with payload: [ %" GST_PTR_FORMAT " ]", message_data);
+  gst_bus_post (self->api_bus, msg);
 }
 
 static void
@@ -475,8 +458,6 @@ gst_play_class_init (GstPlayClass * klass)
       G_MININT64, G_MAXINT64, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
   g_object_class_install_properties (gobject_class, PROP_LAST, param_specs);
-
-  config_quark_initialize ();
 }
 
 static void
@@ -973,48 +954,42 @@ remove_ready_timeout_source (GstPlay * self)
 
 
 static void
-on_error (GstPlay * self, GError * err, const GstStructure * details)
+on_error (GstPlay * self, GError * err, GstStructure * details)
 {
 #ifndef GST_DISABLE_GST_DEBUG
-  GstStructure *extra_details = NULL;
   gchar *dot_data = NULL;
 #endif
 
   GST_ERROR_OBJECT (self, "Error: %s (%s, %d)", err->message,
       g_quark_to_string (err->domain), err->code);
 
+  if (!details)
+    details = gst_structure_new_static_str_empty ("error-details");
+
 #ifndef GST_DISABLE_GST_DEBUG
-  if (details != NULL) {
-    extra_details = gst_structure_copy (details);
-  } else {
-    extra_details = gst_structure_new_empty ("error-details");
-  }
   if (gst_play_config_get_pipeline_dump_in_error_details (self->config)) {
     dot_data = gst_debug_bin_to_dot_data (GST_BIN_CAST (self->playbin),
         GST_DEBUG_GRAPH_SHOW_ALL);
-    gst_structure_set (extra_details, "pipeline-dump", G_TYPE_STRING, dot_data,
-        NULL);
+    gst_structure_set (details, "pipeline-dump", G_TYPE_STRING, dot_data, NULL);
   }
 #endif
   api_bus_post_message (self, GST_PLAY_MESSAGE_ERROR,
       GST_PLAY_MESSAGE_DATA_ERROR, G_TYPE_ERROR, err,
-      GST_PLAY_MESSAGE_DATA_ERROR_DETAILS, GST_TYPE_STRUCTURE,
-#ifndef GST_DISABLE_GST_DEBUG
-      extra_details
-#else
-      details
-#endif
-      , NULL);
+      GST_PLAY_MESSAGE_DATA_ERROR_DETAILS, GST_TYPE_STRUCTURE, details, NULL);
 
 #ifndef GST_DISABLE_GST_DEBUG
   g_free (dot_data);
-  gst_structure_free (extra_details);
 #endif
+  gst_structure_free (details);
 
   g_error_free (err);
 
   remove_tick_source (self);
   remove_ready_timeout_source (self);
+
+  g_list_free_full (self->missing_plugin_messages,
+      (GDestroyNotify) gst_message_unref);
+  self->missing_plugin_messages = NULL;
 
   self->target_state = GST_STATE_NULL;
   self->current_state = GST_STATE_NULL;
@@ -1056,17 +1031,108 @@ dump_dot_file (GstPlay * self, const gchar * name)
 }
 
 static void
+gst_play_set_missing_plugin_details (GstPlay * self, GstStructure * details)
+{
+  GValue missing_plugin_details = G_VALUE_INIT;
+
+  g_value_init (&missing_plugin_details, GST_TYPE_ARRAY);
+
+  for (GList * l = self->missing_plugin_messages; l; l = l->next) {
+    GstMessage *missing_plugin_message = l->data;
+    GValue v = G_VALUE_INIT;
+    GstStructure *s;
+    gchar *description, *installer_details;
+
+    description =
+        gst_missing_plugin_message_get_description (missing_plugin_message);
+    installer_details =
+        gst_missing_plugin_message_get_installer_detail
+        (missing_plugin_message);
+
+    s = gst_structure_new_static_str ("missing-plugin-detail", "description",
+        G_TYPE_STRING, description, "installer-details", G_TYPE_STRING,
+        installer_details, NULL);
+    g_value_init (&v, GST_TYPE_STRUCTURE);
+    g_value_take_boxed (&v, s);
+    gst_value_array_append_and_take_value (&missing_plugin_details, &v);
+
+    g_free (description);
+    g_free (installer_details);
+  }
+
+
+  gst_structure_take_value_static_str (details, "missing-plugin-details",
+      &missing_plugin_details);
+}
+
+static void
+gst_play_set_uri_details (GstPlay * self, GstStructure * details)
+{
+  if (!gst_structure_has_field (details, "uri")) {
+    gchar *uri;
+
+    g_object_get (self->playbin, "current-uri", &uri, NULL);
+    if (!uri)
+      g_object_get (self->playbin, "uri", &uri, NULL);
+    if (!uri)
+      uri = g_strdup (self->uri);
+    gst_structure_set (details, "uri", G_TYPE_STRING, uri, NULL);
+    g_free (uri);
+  }
+}
+
+static void
+gst_play_set_stream_id_details (GstPlay * self, GstMessage * msg,
+    GstStructure * details)
+{
+  if (!gst_structure_has_field (details, "stream-id")) {
+    GstPad *pad = NULL;
+    gchar *stream_id;
+
+    if (GST_IS_ELEMENT (GST_MESSAGE_SRC (msg))) {
+      GstElement *element = GST_ELEMENT (GST_MESSAGE_SRC (msg));
+
+      // If the message src has only one sinkpad (or is a source element)
+      // grab the stream id from there
+      GST_OBJECT_LOCK (element);
+      if (element->numsinkpads == 1) {
+        pad = gst_object_ref (element->sinkpads->data);
+      } else if (element->numsinkpads == 0 && element->numsrcpads > 0) {
+        pad = gst_object_ref (element->srcpads->data);
+      }
+      GST_OBJECT_UNLOCK (element);
+    } else if (GST_IS_PAD (GST_MESSAGE_SRC (msg))) {
+      pad = gst_object_ref (GST_PAD (GST_MESSAGE_SRC (msg)));
+    }
+
+    if (pad) {
+      stream_id = gst_pad_get_stream_id (pad);
+      if (stream_id)
+        gst_structure_set (details, "stream-id", G_TYPE_STRING, stream_id,
+            NULL);
+      g_free (stream_id);
+      gst_object_unref (pad);
+    }
+  }
+}
+
+static void
 error_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
 {
   GstPlay *self = GST_PLAY (user_data);
   GError *err, *play_err;
   gchar *name, *debug, *message, *full_message;
-  const GstStructure *details = NULL;
+  GstStructure *details = NULL;
+  GstPlayError play_error = GST_PLAY_ERROR_FAILED;
 
   dump_dot_file (self, "error");
 
   gst_message_parse_error (msg, &err, &debug);
-  gst_message_parse_error_details (msg, &details);
+  gst_message_parse_error_details (msg, (const GstStructure **) &details);
+  if (details)
+    details = gst_structure_copy (details);
+  else
+    details = gst_structure_new_static_str_empty ("message-details");
 
   name = gst_object_get_path_string (msg->src);
   message = gst_error_get_message (err->domain, err->code);
@@ -1084,8 +1150,15 @@ error_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
   if (debug != NULL)
     GST_ERROR_OBJECT (self, "Additional debug info: %s", debug);
 
-  play_err =
-      g_error_new_literal (GST_PLAY_ERROR, GST_PLAY_ERROR_FAILED, full_message);
+  gst_play_set_stream_id_details (self, msg, details);
+  if (g_error_matches (err, GST_CORE_ERROR, GST_CORE_ERROR_MISSING_PLUGIN) ||
+      g_error_matches (err, GST_STREAM_ERROR,
+          GST_STREAM_ERROR_CODEC_NOT_FOUND)) {
+    play_error = GST_PLAY_ERROR_MISSING_PLUGIN;
+    gst_play_set_missing_plugin_details (self, details);
+  }
+
+  play_err = g_error_new_literal (GST_PLAY_ERROR, play_error, full_message);
   on_error (self, play_err, details);
 
   g_clear_error (&err);
@@ -1101,12 +1174,17 @@ warning_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
   GstPlay *self = GST_PLAY (user_data);
   GError *err, *play_err;
   gchar *name, *debug, *message, *full_message;
-  const GstStructure *details = NULL;
+  GstStructure *details = NULL;
+  GstPlayError play_error = GST_PLAY_ERROR_FAILED;
 
   dump_dot_file (self, "warning");
 
   gst_message_parse_warning (msg, &err, &debug);
-  gst_message_parse_warning_details (msg, &details);
+  gst_message_parse_warning_details (msg, (const GstStructure **) &details);
+  if (details)
+    details = gst_structure_copy (details);
+  else
+    details = gst_structure_new_static_str_empty ("message-details");
 
   name = gst_object_get_path_string (msg->src);
   message = gst_error_get_message (err->domain, err->code);
@@ -1124,22 +1202,24 @@ warning_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
   if (debug != NULL)
     GST_WARNING_OBJECT (self, "Additional debug info: %s", debug);
 
-  play_err =
-      g_error_new_literal (GST_PLAY_ERROR, GST_PLAY_ERROR_FAILED, full_message);
+  gst_play_set_stream_id_details (self, msg, details);
+  if (g_error_matches (err, GST_CORE_ERROR, GST_CORE_ERROR_MISSING_PLUGIN) ||
+      g_error_matches (err, GST_STREAM_ERROR,
+          GST_STREAM_ERROR_CODEC_NOT_FOUND)) {
+    play_error = GST_PLAY_ERROR_MISSING_PLUGIN;
+    gst_play_set_missing_plugin_details (self, details);
+  }
+
+  play_err = g_error_new_literal (GST_PLAY_ERROR, play_error, full_message);
 
   GST_WARNING_OBJECT (self, "Warning: %s (%s, %d)", err->message,
       g_quark_to_string (err->domain), err->code);
 
-  if (details != NULL) {
-    api_bus_post_message (self, GST_PLAY_MESSAGE_WARNING,
-        GST_PLAY_MESSAGE_DATA_WARNING, G_TYPE_ERROR, play_err,
-        GST_PLAY_MESSAGE_DATA_WARNING_DETAILS, GST_TYPE_STRUCTURE, details,
-        NULL);
-  } else {
-    api_bus_post_message (self, GST_PLAY_MESSAGE_WARNING,
-        GST_PLAY_MESSAGE_DATA_WARNING, G_TYPE_ERROR, play_err, NULL);
-  }
+  api_bus_post_message (self, GST_PLAY_MESSAGE_WARNING,
+      GST_PLAY_MESSAGE_DATA_WARNING, G_TYPE_ERROR, play_err,
+      GST_PLAY_MESSAGE_DATA_WARNING_DETAILS, GST_TYPE_STRUCTURE, details, NULL);
 
+  gst_structure_free (details);
   g_clear_error (&play_err);
   g_clear_error (&err);
   g_free (debug);
@@ -1422,8 +1502,12 @@ state_changed_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg,
       }
 
       if (self->seek_position != GST_CLOCK_TIME_NONE) {
-        GST_DEBUG_OBJECT (self, "Seeking now that we reached PAUSED state");
-        gst_play_seek_internal_locked (self);
+        if (!self->media_info->seekable) {
+          GST_DEBUG_OBJECT (self, "Media is not seekable");
+        } else {
+          GST_DEBUG_OBJECT (self, "Seeking now that we reached PAUSED state");
+          gst_play_seek_internal_locked (self);
+        }
         g_mutex_unlock (&self->lock);
       } else if (!self->seek_pending) {
         g_mutex_unlock (&self->lock);
@@ -1453,6 +1537,28 @@ state_changed_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg,
         if (gst_element_query_duration (self->playbin, GST_FORMAT_TIME,
                 &duration)) {
           on_duration_changed (self, duration);
+        }
+      }
+
+      /* Try to query seek information again for live stream */
+      if (self->is_live) {
+        gboolean seekable = FALSE;
+        gboolean updated = FALSE;
+
+        GstQuery *query = gst_query_new_seeking (GST_FORMAT_TIME);
+        if (gst_element_query (self->playbin, query))
+          gst_query_parse_seeking (query, NULL, &seekable, NULL, NULL);
+        gst_query_unref (query);
+
+        g_mutex_lock (&self->lock);
+        if (self->media_info && seekable != self->media_info->seekable) {
+          self->media_info->seekable = seekable;
+          updated = TRUE;
+        }
+        g_mutex_unlock (&self->lock);
+
+        if (updated) {
+          on_media_info_updated (self);
         }
       }
       /* api_bus_post_message (self, GST_PLAY_MESSAGE_POSITION_UPDATED, */
@@ -1622,6 +1728,9 @@ element_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
       else if (target_state == GST_STATE_PLAYING)
         gst_play_play_internal (self);
     }
+  } else if (gst_is_missing_plugin_message (msg)) {
+    self->missing_plugin_messages =
+        g_list_prepend (self->missing_plugin_messages, gst_message_ref (msg));
   }
 }
 
@@ -1646,7 +1755,53 @@ update_stream_collection (GstPlay * self, GstStreamCollection * collection)
       g_signal_connect (self->collection, "stream-notify",
       G_CALLBACK (stream_notify_cb), self);
 
-  return TRUE;
+  // If no stream selected then we don't have to search
+  gboolean found_audio = self->audio_sid == NULL;
+  gboolean found_video = self->video_sid == NULL;
+  gboolean found_subtitle = self->subtitle_sid == NULL;
+
+  guint len = gst_stream_collection_get_size (collection);
+  for (guint i = 0; i < len; i++) {
+    GstStream *stream = gst_stream_collection_get_stream (collection, i);
+    GstStreamType stream_type = gst_stream_get_stream_type (stream);
+    const gchar *stream_id = gst_stream_get_stream_id (stream);
+
+    if ((stream_type & GST_STREAM_TYPE_AUDIO)
+        && g_strcmp0 (self->audio_sid, stream_id) == 0) {
+      found_audio = TRUE;
+    }
+    if ((stream_type & GST_STREAM_TYPE_VIDEO)
+        && g_strcmp0 (self->video_sid, stream_id) == 0) {
+      found_video = TRUE;
+    }
+    if ((stream_type & GST_STREAM_TYPE_TEXT)
+        && g_strcmp0 (self->subtitle_sid, stream_id) == 0) {
+      found_subtitle = TRUE;
+    }
+  }
+
+  if (!found_audio) {
+    GST_WARNING_OBJECT (self, "Didn't find selected audio stream id '%s'",
+        self->audio_sid);
+    g_free (self->audio_sid);
+    self->audio_sid = NULL;
+  }
+
+  if (!found_video) {
+    GST_WARNING_OBJECT (self, "Didn't find selected video stream id '%s'",
+        self->video_sid);
+    g_free (self->video_sid);
+    self->video_sid = NULL;
+  }
+
+  if (!found_subtitle) {
+    GST_WARNING_OBJECT (self, "Didn't find selected subtitle stream id '%s'",
+        self->subtitle_sid);
+    g_free (self->subtitle_sid);
+    self->subtitle_sid = NULL;
+  }
+
+  return self->media_info != NULL;
 }
 
 static void
@@ -1655,7 +1810,6 @@ stream_collection_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg,
 {
   GstPlay *self = GST_PLAY (user_data);
   GstStreamCollection *collection = NULL;
-  gboolean updated = FALSE;
 
   gst_message_parse_stream_collection (msg, &collection);
 
@@ -1663,8 +1817,47 @@ stream_collection_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg,
     return;
 
   g_mutex_lock (&self->lock);
-  updated = update_stream_collection (self, collection);
+  gboolean updated = update_stream_collection (self, collection);
   gst_object_unref (collection);
+
+  // Select a default stream if it is enabled and none was selected by the application
+  gboolean select_audio = self->audio_enabled && !self->audio_sid;
+  gboolean select_video = self->video_enabled && !self->video_sid;
+  gboolean select_subtitle = self->subtitle_enabled && !self->subtitle_sid;
+
+  if (select_audio || select_video || select_subtitle) {
+    GST_DEBUG_OBJECT (self,
+        "Do default selection: audio %d video %d subtitle %d", select_audio,
+        select_video, select_subtitle);
+
+    guint len = gst_stream_collection_get_size (collection);
+    for (guint i = 0; i < len; i++) {
+      GstStream *stream = gst_stream_collection_get_stream (collection, i);
+      GstStreamType stream_type = gst_stream_get_stream_type (stream);
+      const gchar *stream_id = gst_stream_get_stream_id (stream);
+
+      if ((stream_type & GST_STREAM_TYPE_AUDIO) && select_audio) {
+        g_free (self->audio_sid);
+        self->audio_sid = g_strdup (stream_id);
+        select_audio = FALSE;
+        updated = TRUE;
+      } else if ((stream_type & GST_STREAM_TYPE_VIDEO) && select_video) {
+        g_free (self->video_sid);
+        self->video_sid = g_strdup (stream_id);
+        select_video = FALSE;
+        updated = TRUE;
+      } else if ((stream_type & GST_STREAM_TYPE_TEXT) && select_subtitle) {
+        g_free (self->subtitle_sid);
+        self->subtitle_sid = g_strdup (stream_id);
+        select_subtitle = FALSE;
+        updated = TRUE;
+      }
+    }
+  }
+
+  if (updated)
+    gst_play_select_streams (self);
+
   g_mutex_unlock (&self->lock);
 
   if (self->media_info && updated)
@@ -1677,8 +1870,6 @@ streams_selected_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg,
 {
   GstPlay *self = GST_PLAY (user_data);
   GstStreamCollection *collection = NULL;
-  gboolean updated = FALSE;
-  guint i, len;
 
   gst_message_parse_streams_selected (msg, &collection);
 
@@ -1686,45 +1877,74 @@ streams_selected_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg,
     return;
 
   g_mutex_lock (&self->lock);
-  updated = update_stream_collection (self, collection);
+  gboolean updated = update_stream_collection (self, collection);
   gst_object_unref (collection);
 
-  g_free (self->video_sid);
-  g_free (self->audio_sid);
-  g_free (self->subtitle_sid);
-  self->video_sid = NULL;
-  self->audio_sid = NULL;
-  self->subtitle_sid = NULL;
+  // This should not really happen: we should first get a stream-collection
+  // message with the new collection, then selection happens.
+  if (updated) {
+    GST_WARNING_OBJECT (self,
+        "Updated stream collection from streams-selected message");
+  }
 
-  len = gst_message_streams_selected_get_size (msg);
-  for (i = 0; i < len; i++) {
+  gboolean found_audio = self->audio_sid == NULL;
+  gboolean found_video = self->video_sid == NULL;
+  gboolean found_subtitle = self->subtitle_sid == NULL;
+
+  guint len = gst_message_streams_selected_get_size (msg);
+  for (guint i = 0; i < len; i++) {
     GstStream *stream;
     GstStreamType stream_type;
     const gchar *stream_id;
-    gchar **current_sid;
+
     stream = gst_message_streams_selected_get_stream (msg, i);
     stream_type = gst_stream_get_stream_type (stream);
     stream_id = gst_stream_get_stream_id (stream);
-    if (stream_type & GST_STREAM_TYPE_AUDIO)
-      current_sid = &self->audio_sid;
-    else if (stream_type & GST_STREAM_TYPE_VIDEO)
-      current_sid = &self->video_sid;
-    else if (stream_type & GST_STREAM_TYPE_TEXT)
-      current_sid = &self->subtitle_sid;
-    else {
-      GST_WARNING_OBJECT (self,
-          "Unknown stream-id %s with type 0x%x", stream_id, stream_type);
-      continue;
+
+    if ((stream_type & GST_STREAM_TYPE_AUDIO)) {
+      GST_DEBUG_OBJECT (self, "Selected audio track %s", stream_id);
+      if (g_strcmp0 (self->audio_sid, stream_id) == 0 && self->audio_enabled) {
+        found_audio = TRUE;
+      } else {
+        GST_WARNING_OBJECT (self, "Unexpected audio stream id '%s' selected",
+            stream_id);
+      }
     }
 
-    if (G_UNLIKELY (*current_sid)) {
-      GST_FIXME_OBJECT (self,
-          "Multiple streams are selected for type %s, choose the first one",
-          gst_stream_type_get_name (stream_type));
-      continue;
+    if ((stream_type & GST_STREAM_TYPE_VIDEO)) {
+      GST_DEBUG_OBJECT (self, "Selected video track %s", stream_id);
+      if (g_strcmp0 (self->video_sid, stream_id) == 0 && self->video_enabled) {
+        found_video = TRUE;
+      } else {
+        GST_WARNING_OBJECT (self, "Unexpected video stream id '%s' selected",
+            stream_id);
+      }
     }
 
-    *current_sid = g_strdup (stream_id);
+    if ((stream_type & GST_STREAM_TYPE_TEXT) && self->subtitle_enabled) {
+      GST_DEBUG_OBJECT (self, "Selected subtitle track %s", stream_id);
+      if (g_strcmp0 (self->subtitle_sid, stream_id) == 0) {
+        found_subtitle = TRUE;
+      } else {
+        GST_WARNING_OBJECT (self, "Unexpected subtitle stream id '%s' selected",
+            stream_id);
+      }
+    }
+  }
+
+  if (!found_audio && self->audio_enabled) {
+    GST_WARNING_OBJECT (self, "Didn't find selected audio stream id '%s'",
+        self->audio_sid);
+  }
+
+  if (!found_video && self->video_enabled) {
+    GST_WARNING_OBJECT (self, "Didn't find selected video stream id '%s'",
+        self->video_sid);
+  }
+
+  if (!found_subtitle && self->subtitle_enabled) {
+    GST_WARNING_OBJECT (self, "Didn't find selected subtitle stream id '%s'",
+        self->subtitle_sid);
   }
   g_mutex_unlock (&self->lock);
 
@@ -1777,30 +1997,6 @@ on_media_info_updated (GstPlay * self)
   g_object_unref (media_info_copy);
 }
 
-static GstCaps *
-get_caps (GstPlay * self, gint stream_index, GType type)
-{
-  GstPad *pad = NULL;
-  GstCaps *caps = NULL;
-
-  if (type == GST_TYPE_PLAY_VIDEO_INFO)
-    g_signal_emit_by_name (G_OBJECT (self->playbin),
-        "get-video-pad", stream_index, &pad);
-  else if (type == GST_TYPE_PLAY_AUDIO_INFO)
-    g_signal_emit_by_name (G_OBJECT (self->playbin),
-        "get-audio-pad", stream_index, &pad);
-  else
-    g_signal_emit_by_name (G_OBJECT (self->playbin),
-        "get-text-pad", stream_index, &pad);
-
-  if (pad) {
-    caps = gst_pad_get_current_caps (pad);
-    gst_object_unref (pad);
-  }
-
-  return caps;
-}
-
 static void
 gst_play_subtitle_info_update (GstPlay * self, GstPlayStreamInfo * stream_info)
 {
@@ -1835,21 +2031,13 @@ gst_play_subtitle_info_update (GstPlay * self, GstPlayStreamInfo * stream_info)
      * external subtitle and use the filename.
      */
     if (!info->language) {
-      gint text_index = -1;
       gchar *suburi = NULL;
 
       g_object_get (G_OBJECT (self->playbin), "current-suburi", &suburi, NULL);
       if (suburi) {
-        if (self->use_playbin3) {
-          if (self->subtitle_sid &&
-              g_str_equal (self->subtitle_sid, stream_info->stream_id)) {
-            info->language = g_path_get_basename (suburi);
-          }
-        } else {
-          g_object_get (G_OBJECT (self->playbin), "current-text", &text_index,
-              NULL);
-          if (text_index == gst_play_stream_info_get_index (stream_info))
-            info->language = g_path_get_basename (suburi);
+        if (self->subtitle_sid &&
+            g_str_equal (self->subtitle_sid, stream_info->stream_id)) {
+          info->language = g_path_get_basename (suburi);
         }
         g_free (suburi);
       }
@@ -2022,7 +2210,7 @@ gst_play_stream_info_find (GstPlayMediaInfo * media_info,
   for (l = list; l != NULL; l = l->next) {
     info = (GstPlayStreamInfo *) l->data;
     if ((G_OBJECT_TYPE (info) == type) && (info->stream_index == stream_index)) {
-      return info;
+      return g_object_ref (info);
     }
   }
 
@@ -2061,26 +2249,6 @@ is_track_enabled (GstPlay * self, gint pos)
     return TRUE;
 
   return FALSE;
-}
-
-static GstPlayStreamInfo *
-gst_play_stream_info_get_current (GstPlay * self, const gchar * prop,
-    GType type)
-{
-  gint current;
-  GstPlayStreamInfo *info;
-
-  if (!self->media_info)
-    return NULL;
-
-  g_object_get (G_OBJECT (self->playbin), prop, &current, NULL);
-  g_mutex_lock (&self->lock);
-  info = gst_play_stream_info_find (self->media_info, type, current);
-  if (info)
-    info = gst_play_stream_info_copy (info);
-  g_mutex_unlock (&self->lock);
-
-  return info;
 }
 
 static GstPlayStreamInfo *
@@ -2175,86 +2343,6 @@ stream_info_get_codec (GstPlayStreamInfo * s)
 }
 
 static void
-gst_play_stream_info_update_tags_and_caps (GstPlay * self,
-    GstPlayStreamInfo * s)
-{
-  GstTagList *tags;
-  gint stream_index;
-
-  stream_index = gst_play_stream_info_get_index (s);
-
-  if (GST_IS_PLAY_VIDEO_INFO (s))
-    g_signal_emit_by_name (self->playbin, "get-video-tags",
-        stream_index, &tags);
-  else if (GST_IS_PLAY_AUDIO_INFO (s))
-    g_signal_emit_by_name (self->playbin, "get-audio-tags",
-        stream_index, &tags);
-  else
-    g_signal_emit_by_name (self->playbin, "get-text-tags", stream_index, &tags);
-
-  if (s->tags)
-    gst_tag_list_unref (s->tags);
-  s->tags = tags;
-
-  if (s->caps)
-    gst_caps_unref (s->caps);
-  s->caps = get_caps (self, stream_index, G_OBJECT_TYPE (s));
-
-  g_free (s->codec);
-  s->codec = stream_info_get_codec (s);
-
-  GST_DEBUG_OBJECT (self, "%s index: %d tags: %p caps: %p",
-      gst_play_stream_info_get_stream_type (s), stream_index, s->tags, s->caps);
-
-  gst_play_stream_info_update (self, s);
-}
-
-static void
-gst_play_streams_info_create (GstPlay * self,
-    GstPlayMediaInfo * media_info, const gchar * prop, GType type)
-{
-  gint i;
-  gint total = -1;
-  GstPlayStreamInfo *s;
-
-  if (!media_info)
-    return;
-
-  g_object_get (G_OBJECT (self->playbin), prop, &total, NULL);
-
-  GST_DEBUG_OBJECT (self, "%s: %d", prop, total);
-
-  for (i = 0; i < total; i++) {
-    /* check if stream already exist in the list */
-    s = gst_play_stream_info_find (media_info, type, i);
-
-    if (!s) {
-      /* create a new stream info instance */
-      s = gst_play_stream_info_new (i, type);
-
-      /* add the object in stream list */
-      media_info->stream_list = g_list_append (media_info->stream_list, s);
-
-      /* based on type, add the object in its corresponding stream_ list */
-      if (GST_IS_PLAY_AUDIO_INFO (s))
-        media_info->audio_stream_list = g_list_append
-            (media_info->audio_stream_list, s);
-      else if (GST_IS_PLAY_VIDEO_INFO (s))
-        media_info->video_stream_list = g_list_append
-            (media_info->video_stream_list, s);
-      else
-        media_info->subtitle_stream_list = g_list_append
-            (media_info->subtitle_stream_list, s);
-
-      GST_DEBUG_OBJECT (self, "create %s stream stream_index: %d",
-          gst_play_stream_info_get_stream_type (s), i);
-    }
-
-    gst_play_stream_info_update_tags_and_caps (self, s);
-  }
-}
-
-static void
 gst_play_stream_info_update_from_stream (GstPlay * self,
     GstPlayStreamInfo * s, GstStream * stream)
 {
@@ -2269,9 +2357,8 @@ gst_play_stream_info_update_from_stream (GstPlay * self,
   g_free (s->codec);
   s->codec = stream_info_get_codec (s);
 
-  GST_DEBUG_OBJECT (self, "%s index: %d tags: %p caps: %p",
-      gst_play_stream_info_get_stream_type (s), s->stream_index,
-      s->tags, s->caps);
+  GST_DEBUG_OBJECT (self, "%s stream id: %s tags: %p caps: %p",
+      gst_play_stream_info_get_stream_type (s), s->stream_id, s->tags, s->caps);
 
   gst_play_stream_info_update (self, s);
 }
@@ -2298,20 +2385,21 @@ gst_play_streams_info_create_from_collection (GstPlay * self,
     const gchar *stream_id = gst_stream_get_stream_id (stream);
 
     if (stream_type & GST_STREAM_TYPE_AUDIO) {
-      s = gst_play_stream_info_new (n_audio, GST_TYPE_PLAY_AUDIO_INFO);
+      s = gst_play_stream_info_new (n_audio, stream_id,
+          GST_TYPE_PLAY_AUDIO_INFO);
       n_audio++;
     } else if (stream_type & GST_STREAM_TYPE_VIDEO) {
-      s = gst_play_stream_info_new (n_video, GST_TYPE_PLAY_VIDEO_INFO);
+      s = gst_play_stream_info_new (n_video, stream_id,
+          GST_TYPE_PLAY_VIDEO_INFO);
       n_video++;
     } else if (stream_type & GST_STREAM_TYPE_TEXT) {
-      s = gst_play_stream_info_new (n_text, GST_TYPE_PLAY_SUBTITLE_INFO);
+      s = gst_play_stream_info_new (n_text, stream_id,
+          GST_TYPE_PLAY_SUBTITLE_INFO);
       n_text++;
     } else {
       GST_DEBUG_OBJECT (self, "Unknown type stream %d", i);
       continue;
     }
-
-    s->stream_id = g_strdup (stream_id);
 
     /* add the object in stream list */
     media_info->stream_list = g_list_append (media_info->stream_list, s);
@@ -2327,44 +2415,11 @@ gst_play_streams_info_create_from_collection (GstPlay * self,
       media_info->subtitle_stream_list = g_list_append
           (media_info->subtitle_stream_list, s);
 
-    GST_DEBUG_OBJECT (self, "create %s stream stream_index: %d",
-        gst_play_stream_info_get_stream_type (s), s->stream_index);
+    GST_DEBUG_OBJECT (self, "create %s stream id %s",
+        gst_play_stream_info_get_stream_type (s), s->stream_id);
 
     gst_play_stream_info_update_from_stream (self, s, stream);
   }
-}
-
-static void
-video_changed_cb (G_GNUC_UNUSED GObject * object, gpointer user_data)
-{
-  GstPlay *self = GST_PLAY (user_data);
-
-  g_mutex_lock (&self->lock);
-  gst_play_streams_info_create (self, self->media_info,
-      "n-video", GST_TYPE_PLAY_VIDEO_INFO);
-  g_mutex_unlock (&self->lock);
-}
-
-static void
-audio_changed_cb (G_GNUC_UNUSED GObject * object, gpointer user_data)
-{
-  GstPlay *self = GST_PLAY (user_data);
-
-  g_mutex_lock (&self->lock);
-  gst_play_streams_info_create (self, self->media_info,
-      "n-audio", GST_TYPE_PLAY_AUDIO_INFO);
-  g_mutex_unlock (&self->lock);
-}
-
-static void
-subtitle_changed_cb (G_GNUC_UNUSED GObject * object, gpointer user_data)
-{
-  GstPlay *self = GST_PLAY (user_data);
-
-  g_mutex_lock (&self->lock);
-  gst_play_streams_info_create (self, self->media_info,
-      "n-text", GST_TYPE_PLAY_SUBTITLE_INFO);
-  g_mutex_unlock (&self->lock);
 }
 
 static void *
@@ -2467,18 +2522,8 @@ gst_play_media_info_create (GstPlay * self)
     gst_query_parse_seeking (query, NULL, &media_info->seekable, NULL, NULL);
   gst_query_unref (query);
 
-  if (self->use_playbin3) {
-    gst_play_streams_info_create_from_collection (self, media_info,
-        self->collection);
-  } else {
-    /* create audio/video/sub streams */
-    gst_play_streams_info_create (self, media_info, "n-video",
-        GST_TYPE_PLAY_VIDEO_INFO);
-    gst_play_streams_info_create (self, media_info, "n-audio",
-        GST_TYPE_PLAY_AUDIO_INFO);
-    gst_play_streams_info_create (self, media_info, "n-text",
-        GST_TYPE_PLAY_SUBTITLE_INFO);
-  }
+  gst_play_streams_info_create_from_collection (self, media_info,
+      self->collection);
 
   media_info->title = get_from_tags (self, media_info, get_title);
   media_info->container =
@@ -2493,47 +2538,6 @@ gst_play_media_info_create (GstPlay * self)
 
   GST_DEBUG_OBJECT (self, "end");
   return media_info;
-}
-
-static void
-tags_changed_cb (GstPlay * self, gint stream_index, GType type)
-{
-  GstPlayStreamInfo *s;
-
-  if (!self->media_info)
-    return;
-
-  /* update the stream information */
-  g_mutex_lock (&self->lock);
-  s = gst_play_stream_info_find (self->media_info, type, stream_index);
-  gst_play_stream_info_update_tags_and_caps (self, s);
-  g_mutex_unlock (&self->lock);
-
-  on_media_info_updated (self);
-}
-
-static void
-video_tags_changed_cb (G_GNUC_UNUSED GstElement * playbin, gint stream_index,
-    gpointer user_data)
-{
-  tags_changed_cb (GST_PLAY (user_data), stream_index,
-      GST_TYPE_PLAY_VIDEO_INFO);
-}
-
-static void
-audio_tags_changed_cb (G_GNUC_UNUSED GstElement * playbin, gint stream_index,
-    gpointer user_data)
-{
-  tags_changed_cb (GST_PLAY (user_data), stream_index,
-      GST_TYPE_PLAY_AUDIO_INFO);
-}
-
-static void
-subtitle_tags_changed_cb (G_GNUC_UNUSED GstElement * playbin, gint stream_index,
-    gpointer user_data)
-{
-  tags_changed_cb (GST_PLAY (user_data), stream_index,
-      GST_TYPE_PLAY_SUBTITLE_INFO);
 }
 
 static void
@@ -2582,7 +2586,6 @@ gst_play_main (gpointer data)
   GstBus *bus;
   GSource *source;
   GstElement *scaletempo;
-  const gchar *env;
 
   GST_TRACE_OBJECT (self, "Starting main thread");
 
@@ -2594,21 +2597,9 @@ gst_play_main (gpointer data)
   g_source_attach (source, self->context);
   g_source_unref (source);
 
-  env = g_getenv ("GST_PLAY_USE_PLAYBIN3");
-  if (env && g_str_has_prefix (env, "0"))
-    self->use_playbin3 = FALSE;
-  else
-    self->use_playbin3 = TRUE;
-
-  if (self->use_playbin3) {
-    GST_DEBUG_OBJECT (self, "playbin3 enabled");
-    self->playbin = gst_element_factory_make ("playbin3", "playbin3");
-  } else {
-    self->playbin = gst_element_factory_make ("playbin", "playbin");
-  }
-
+  self->playbin = gst_element_factory_make ("playbin3", "playbin3");
   if (!self->playbin) {
-    g_error ("GstPlay: 'playbin' element not found, please check your setup");
+    g_error ("GstPlay: 'playbin3' element not found, please check your setup");
     g_assert_not_reached ();
   }
 
@@ -2627,7 +2618,9 @@ gst_play_main (gpointer data)
   }
 
   self->bus = bus = gst_element_get_bus (self->playbin);
+  gst_object_set_name (GST_OBJECT (self->bus), "playbin_bus");
   gst_bus_add_signal_watch (bus);
+  gst_bus_enable_sync_message_emission (bus);
 
   g_signal_connect (G_OBJECT (bus), "message::error", G_CALLBACK (error_cb),
       self);
@@ -2649,28 +2642,10 @@ gst_play_main (gpointer data)
   g_signal_connect (G_OBJECT (bus), "message::element",
       G_CALLBACK (element_cb), self);
   g_signal_connect (G_OBJECT (bus), "message::tag", G_CALLBACK (tags_cb), self);
-
-  if (self->use_playbin3) {
-    g_signal_connect (G_OBJECT (bus), "message::stream-collection",
-        G_CALLBACK (stream_collection_cb), self);
-    g_signal_connect (G_OBJECT (bus), "message::streams-selected",
-        G_CALLBACK (streams_selected_cb), self);
-  } else {
-    g_signal_connect (self->playbin, "video-changed",
-        G_CALLBACK (video_changed_cb), self);
-    g_signal_connect (self->playbin, "audio-changed",
-        G_CALLBACK (audio_changed_cb), self);
-    g_signal_connect (self->playbin, "text-changed",
-        G_CALLBACK (subtitle_changed_cb), self);
-
-    g_signal_connect (self->playbin, "video-tags-changed",
-        G_CALLBACK (video_tags_changed_cb), self);
-    g_signal_connect (self->playbin, "audio-tags-changed",
-        G_CALLBACK (audio_tags_changed_cb), self);
-    g_signal_connect (self->playbin, "text-tags-changed",
-        G_CALLBACK (subtitle_tags_changed_cb), self);
-  }
-
+  g_signal_connect (G_OBJECT (bus), "sync-message::stream-collection",
+      G_CALLBACK (stream_collection_cb), self);
+  g_signal_connect (G_OBJECT (bus), "sync-message::streams-selected",
+      G_CALLBACK (streams_selected_cb), self);
   g_signal_connect (self->playbin, "notify::volume",
       G_CALLBACK (volume_notify_cb), self);
   g_signal_connect (self->playbin, "notify::mute",
@@ -2695,6 +2670,10 @@ gst_play_main (gpointer data)
 
   remove_tick_source (self);
   remove_ready_timeout_source (self);
+
+  g_list_free_full (self->missing_plugin_messages,
+      (GDestroyNotify) gst_message_unref);
+  self->missing_plugin_messages = NULL;
 
   g_mutex_lock (&self->lock);
   if (self->media_info) {
@@ -2941,6 +2920,10 @@ gst_play_stop_internal (GstPlay * self, gboolean transient)
 
   tick_cb (self);
   remove_tick_source (self);
+
+  g_list_free_full (self->missing_plugin_messages,
+      (GDestroyNotify) gst_message_unref);
+  self->missing_plugin_messages = NULL;
 
   add_ready_timeout_source (self);
 
@@ -3468,14 +3451,9 @@ gst_play_get_current_audio_track (GstPlay * self)
   if (!is_track_enabled (self, GST_PLAY_FLAG_AUDIO))
     return NULL;
 
-  if (self->use_playbin3) {
-    info = (GstPlayAudioInfo *)
-        gst_play_stream_info_get_current_from_stream_id (self,
-        self->audio_sid, GST_TYPE_PLAY_AUDIO_INFO);
-  } else {
-    info = (GstPlayAudioInfo *) gst_play_stream_info_get_current (self,
-        "current-audio", GST_TYPE_PLAY_AUDIO_INFO);
-  }
+  info = (GstPlayAudioInfo *)
+      gst_play_stream_info_get_current_from_stream_id (self,
+      self->audio_sid, GST_TYPE_PLAY_AUDIO_INFO);
 
   return info;
 }
@@ -3501,14 +3479,9 @@ gst_play_get_current_video_track (GstPlay * self)
   if (!is_track_enabled (self, GST_PLAY_FLAG_VIDEO))
     return NULL;
 
-  if (self->use_playbin3) {
-    info = (GstPlayVideoInfo *)
-        gst_play_stream_info_get_current_from_stream_id (self,
-        self->video_sid, GST_TYPE_PLAY_VIDEO_INFO);
-  } else {
-    info = (GstPlayVideoInfo *) gst_play_stream_info_get_current (self,
-        "current-video", GST_TYPE_PLAY_VIDEO_INFO);
-  }
+  info = (GstPlayVideoInfo *)
+      gst_play_stream_info_get_current_from_stream_id (self,
+      self->video_sid, GST_TYPE_PLAY_VIDEO_INFO);
 
   return info;
 }
@@ -3534,14 +3507,9 @@ gst_play_get_current_subtitle_track (GstPlay * self)
   if (!is_track_enabled (self, GST_PLAY_FLAG_SUBTITLE))
     return NULL;
 
-  if (self->use_playbin3) {
-    info = (GstPlaySubtitleInfo *)
-        gst_play_stream_info_get_current_from_stream_id (self,
-        self->subtitle_sid, GST_TYPE_PLAY_SUBTITLE_INFO);
-  } else {
-    info = (GstPlaySubtitleInfo *) gst_play_stream_info_get_current (self,
-        "current-text", GST_TYPE_PLAY_SUBTITLE_INFO);
-  }
+  info = (GstPlaySubtitleInfo *)
+      gst_play_stream_info_get_current_from_stream_id (self,
+      self->subtitle_sid, GST_TYPE_PLAY_SUBTITLE_INFO);
 
   return info;
 }
@@ -3553,12 +3521,21 @@ gst_play_select_streams (GstPlay * self)
   GList *stream_list = NULL;
   gboolean ret = FALSE;
 
-  if (self->audio_sid)
+  if (!self->collection)
+    return FALSE;
+
+  if (self->audio_sid && self->audio_enabled) {
+    GST_DEBUG_OBJECT (self, "Selecting audio track %s", self->audio_sid);
     stream_list = g_list_append (stream_list, g_strdup (self->audio_sid));
-  if (self->video_sid)
+  }
+  if (self->video_sid && self->video_enabled) {
+    GST_DEBUG_OBJECT (self, "Selecting video track %s", self->video_sid);
     stream_list = g_list_append (stream_list, g_strdup (self->video_sid));
-  if (self->subtitle_sid)
+  }
+  if (self->subtitle_sid && self->subtitle_enabled) {
+    GST_DEBUG_OBJECT (self, "Selecting subtitle track %s", self->subtitle_sid);
     stream_list = g_list_append (stream_list, g_strdup (self->subtitle_sid));
+  }
 
   g_mutex_unlock (&self->lock);
   if (stream_list) {
@@ -3581,6 +3558,9 @@ gst_play_select_streams (GstPlay * self)
  * Returns: %TRUE or %FALSE
  *
  * Sets the audio track @stream_index.
+ *
+ * Deprecated: 1.26: Use gst_play_set_audio_track_id() instead.
+ *
  * Since: 1.20
  */
 gboolean
@@ -3589,29 +3569,25 @@ gst_play_set_audio_track (GstPlay * self, gint stream_index)
   GstPlayStreamInfo *info;
   gboolean ret = TRUE;
 
-  g_return_val_if_fail (GST_IS_PLAY (self), 0);
+  g_return_val_if_fail (GST_IS_PLAY (self), FALSE);
 
   g_mutex_lock (&self->lock);
   info = gst_play_stream_info_find (self->media_info,
       GST_TYPE_PLAY_AUDIO_INFO, stream_index);
-  g_mutex_unlock (&self->lock);
   if (!info) {
     GST_ERROR_OBJECT (self, "invalid audio stream index %d", stream_index);
+    g_mutex_unlock (&self->lock);
     return FALSE;
   }
 
-  if (self->use_playbin3) {
-    g_mutex_lock (&self->lock);
-    g_free (self->audio_sid);
-    self->audio_sid = g_strdup (info->stream_id);
-    ret = gst_play_select_streams (self);
-    g_mutex_unlock (&self->lock);
-  } else {
-    g_object_set (G_OBJECT (self->playbin), "current-audio", stream_index,
-        NULL);
-  }
+  g_free (self->audio_sid);
+  self->audio_sid = g_strdup (info->stream_id);
+  GST_DEBUG_OBJECT (self, "Selecting audio stream id '%s'", info->stream_id);
 
-  GST_DEBUG_OBJECT (self, "set stream index '%d'", stream_index);
+  ret = gst_play_select_streams (self);
+  g_mutex_unlock (&self->lock);
+  g_object_unref (info);
+
   return ret;
 }
 
@@ -3623,6 +3599,9 @@ gst_play_set_audio_track (GstPlay * self, gint stream_index)
  * Returns: %TRUE or %FALSE
  *
  * Sets the video track @stream_index.
+ *
+ * Deprecated: 1.26: Use gst_play_set_video_track_id() instead.
+ *
  * Since: 1.20
  */
 gboolean
@@ -3631,30 +3610,26 @@ gst_play_set_video_track (GstPlay * self, gint stream_index)
   GstPlayStreamInfo *info;
   gboolean ret = TRUE;
 
-  g_return_val_if_fail (GST_IS_PLAY (self), 0);
+  g_return_val_if_fail (GST_IS_PLAY (self), FALSE);
 
   /* check if stream_index exist in our internal media_info list */
   g_mutex_lock (&self->lock);
   info = gst_play_stream_info_find (self->media_info,
       GST_TYPE_PLAY_VIDEO_INFO, stream_index);
-  g_mutex_unlock (&self->lock);
   if (!info) {
     GST_ERROR_OBJECT (self, "invalid video stream index %d", stream_index);
+    g_mutex_unlock (&self->lock);
     return FALSE;
   }
 
-  if (self->use_playbin3) {
-    g_mutex_lock (&self->lock);
-    g_free (self->video_sid);
-    self->video_sid = g_strdup (info->stream_id);
-    ret = gst_play_select_streams (self);
-    g_mutex_unlock (&self->lock);
-  } else {
-    g_object_set (G_OBJECT (self->playbin), "current-video", stream_index,
-        NULL);
-  }
+  g_free (self->video_sid);
+  self->video_sid = g_strdup (info->stream_id);
+  GST_DEBUG_OBJECT (self, "Selecting video stream id '%s'", info->stream_id);
 
-  GST_DEBUG_OBJECT (self, "set stream index '%d'", stream_index);
+  ret = gst_play_select_streams (self);
+  g_mutex_unlock (&self->lock);
+  g_object_unref (info);
+
   return ret;
 }
 
@@ -3666,6 +3641,9 @@ gst_play_set_video_track (GstPlay * self, gint stream_index)
  * Returns: %TRUE or %FALSE
  *
  * Sets the subtitle stack @stream_index.
+ *
+ * Deprecated: 1.26: Use gst_play_set_subtitle_track_id() instead.
+ *
  * Since: 1.20
  */
 gboolean
@@ -3674,28 +3652,277 @@ gst_play_set_subtitle_track (GstPlay * self, gint stream_index)
   GstPlayStreamInfo *info;
   gboolean ret = TRUE;
 
-  g_return_val_if_fail (GST_IS_PLAY (self), 0);
+  g_return_val_if_fail (GST_IS_PLAY (self), FALSE);
 
   g_mutex_lock (&self->lock);
   info = gst_play_stream_info_find (self->media_info,
       GST_TYPE_PLAY_SUBTITLE_INFO, stream_index);
-  g_mutex_unlock (&self->lock);
   if (!info) {
     GST_ERROR_OBJECT (self, "invalid subtitle stream index %d", stream_index);
+    g_mutex_unlock (&self->lock);
     return FALSE;
   }
 
-  if (self->use_playbin3) {
-    g_mutex_lock (&self->lock);
-    g_free (self->subtitle_sid);
-    self->subtitle_sid = g_strdup (info->stream_id);
-    ret = gst_play_select_streams (self);
-    g_mutex_unlock (&self->lock);
-  } else {
-    g_object_set (G_OBJECT (self->playbin), "current-text", stream_index, NULL);
+  g_free (self->subtitle_sid);
+  self->subtitle_sid = g_strdup (info->stream_id);
+  GST_DEBUG_OBJECT (self, "Selecting subtitle stream id '%s'", info->stream_id);
+
+  ret = gst_play_select_streams (self);
+  g_mutex_unlock (&self->lock);
+  g_object_unref (info);
+
+  return ret;
+}
+
+/**
+ * gst_play_set_audio_track_id:
+ * @play: #GstPlay instance
+ * @stream_id: (nullable): stream id
+ *
+ * Returns: %TRUE or %FALSE
+ *
+ * Sets the audio track @stream_id.
+ *
+ * Since: 1.26
+ */
+gboolean
+gst_play_set_audio_track_id (GstPlay * self, const gchar * stream_id)
+{
+  gboolean ret = TRUE;
+
+  g_return_val_if_fail (GST_IS_PLAY (self), FALSE);
+
+  g_mutex_lock (&self->lock);
+  if (stream_id) {
+    GstPlayStreamInfo *info;
+
+    info = gst_play_stream_info_find_from_stream_id (self->media_info,
+        stream_id);
+    if (!info) {
+      GST_ERROR_OBJECT (self, "invalid audio stream id %s", stream_id);
+      g_mutex_unlock (&self->lock);
+      return FALSE;
+    }
+
+    if (!GST_IS_PLAY_AUDIO_INFO (info)) {
+      GST_ERROR_OBJECT (self, "invalid audio stream id %s", stream_id);
+      g_mutex_unlock (&self->lock);
+      g_object_unref (info);
+      return FALSE;
+    }
+    g_object_unref (info);
   }
 
-  GST_DEBUG_OBJECT (self, "set stream index '%d'", stream_index);
+  g_free (self->audio_sid);
+  self->audio_sid = g_strdup (stream_id);
+  GST_DEBUG_OBJECT (self, "Selecting audio stream id '%s'",
+      GST_STR_NULL (stream_id));
+
+  ret = gst_play_select_streams (self);
+  g_mutex_unlock (&self->lock);
+
+  return ret;
+}
+
+/**
+ * gst_play_set_video_track_id:
+ * @play: #GstPlay instance
+ * @stream_id: (nullable): stream id
+ *
+ * Returns: %TRUE or %FALSE
+ *
+ * Sets the video track @stream_id.
+ *
+ * Since: 1.26
+ */
+gboolean
+gst_play_set_video_track_id (GstPlay * self, const gchar * stream_id)
+{
+  gboolean ret = TRUE;
+
+  g_return_val_if_fail (GST_IS_PLAY (self), FALSE);
+
+  g_mutex_lock (&self->lock);
+  if (stream_id) {
+    GstPlayStreamInfo *info;
+
+    info = gst_play_stream_info_find_from_stream_id (self->media_info,
+        stream_id);
+    if (!info) {
+      GST_ERROR_OBJECT (self, "invalid video stream index %s", stream_id);
+      g_mutex_unlock (&self->lock);
+      return FALSE;
+    }
+
+    if (!GST_IS_PLAY_VIDEO_INFO (info)) {
+      GST_ERROR_OBJECT (self, "invalid video stream id %s", stream_id);
+      g_mutex_unlock (&self->lock);
+      g_object_unref (info);
+      return FALSE;
+    }
+    g_object_unref (info);
+  }
+
+  g_free (self->video_sid);
+  self->video_sid = g_strdup (stream_id);
+  GST_DEBUG_OBJECT (self, "Selecting video stream id '%s'",
+      GST_STR_NULL (stream_id));
+
+  ret = gst_play_select_streams (self);
+  g_mutex_unlock (&self->lock);
+
+  return ret;
+}
+
+/**
+ * gst_play_set_subtitle_track_id:
+ * @play: #GstPlay instance
+ * @stream_id: (nullable): stream id
+ *
+ * Returns: %TRUE or %FALSE
+ *
+ * Sets the subtitle track @stream_id.
+ *
+ * Since: 1.26
+ */
+gboolean
+gst_play_set_subtitle_track_id (GstPlay * self, const gchar * stream_id)
+{
+  gboolean ret = TRUE;
+
+  g_return_val_if_fail (GST_IS_PLAY (self), FALSE);
+
+  g_mutex_lock (&self->lock);
+  if (stream_id) {
+    GstPlayStreamInfo *info;
+
+    info = gst_play_stream_info_find_from_stream_id (self->media_info,
+        stream_id);
+    if (!info) {
+      GST_ERROR_OBJECT (self, "invalid subtitle stream index %s", stream_id);
+      g_mutex_unlock (&self->lock);
+      return FALSE;
+    }
+
+    if (!GST_IS_PLAY_SUBTITLE_INFO (info)) {
+      GST_ERROR_OBJECT (self, "invalid subtile stream id %s", stream_id);
+      g_mutex_unlock (&self->lock);
+      g_object_unref (info);
+      return FALSE;
+    }
+    g_object_unref (info);
+  }
+
+  g_free (self->subtitle_sid);
+  self->subtitle_sid = g_strdup (stream_id);
+  GST_DEBUG_OBJECT (self, "Selecting subtitle stream id '%s'",
+      GST_STR_NULL (stream_id));
+
+  ret = gst_play_select_streams (self);
+  g_mutex_unlock (&self->lock);
+
+  return ret;
+}
+
+/**
+ * gst_play_set_track_ids:
+ * @play: #GstPlay instance
+ * @audio_stream_id: (nullable): audio stream id
+ * @video_stream_id: (nullable): video stream id
+ * @subtitle_stream_id: (nullable): subtitle stream id
+ *
+ * Returns: %TRUE or %FALSE
+ *
+ * Sets the selected track stream ids. Setting %NULL as stream id disables the
+ * corresponding track.
+ *
+ * Since: 1.26
+ */
+gboolean
+gst_play_set_track_ids (GstPlay * self, const gchar * audio_stream_id,
+    const gchar * video_stream_id, const gchar * subtitle_stream_id)
+{
+  gboolean ret = TRUE;
+
+  g_return_val_if_fail (GST_IS_PLAY (self), FALSE);
+
+  g_mutex_lock (&self->lock);
+  if (audio_stream_id) {
+    GstPlayStreamInfo *info;
+
+    info = gst_play_stream_info_find_from_stream_id (self->media_info,
+        audio_stream_id);
+    if (!info) {
+      GST_ERROR_OBJECT (self, "invalid audio stream id %s", audio_stream_id);
+      g_mutex_unlock (&self->lock);
+      return FALSE;
+    }
+
+    if (!GST_IS_PLAY_AUDIO_INFO (info)) {
+      GST_ERROR_OBJECT (self, "invalid audio stream id %s", audio_stream_id);
+      g_mutex_unlock (&self->lock);
+      g_object_unref (info);
+      return FALSE;
+    }
+    g_object_unref (info);
+  }
+
+  if (video_stream_id) {
+    GstPlayStreamInfo *info;
+
+    info = gst_play_stream_info_find_from_stream_id (self->media_info,
+        video_stream_id);
+    if (!info) {
+      GST_ERROR_OBJECT (self, "invalid video stream index %s", video_stream_id);
+      g_mutex_unlock (&self->lock);
+      return FALSE;
+    }
+
+    if (!GST_IS_PLAY_VIDEO_INFO (info)) {
+      GST_ERROR_OBJECT (self, "invalid video stream id %s", video_stream_id);
+      g_mutex_unlock (&self->lock);
+      g_object_unref (info);
+      return FALSE;
+    }
+    g_object_unref (info);
+  }
+
+  if (subtitle_stream_id) {
+    GstPlayStreamInfo *info;
+
+    info = gst_play_stream_info_find_from_stream_id (self->media_info,
+        subtitle_stream_id);
+    if (!info) {
+      GST_ERROR_OBJECT (self, "invalid subtitle stream index %s",
+          subtitle_stream_id);
+      g_mutex_unlock (&self->lock);
+      return FALSE;
+    }
+
+    if (!GST_IS_PLAY_SUBTITLE_INFO (info)) {
+      GST_ERROR_OBJECT (self, "invalid subtile stream id %s",
+          subtitle_stream_id);
+      g_mutex_unlock (&self->lock);
+      g_object_unref (info);
+      return FALSE;
+    }
+    g_object_unref (info);
+  }
+
+  g_free (self->audio_sid);
+  self->audio_sid = g_strdup (audio_stream_id);
+  g_free (self->video_sid);
+  self->video_sid = g_strdup (video_stream_id);
+  g_free (self->subtitle_sid);
+  self->subtitle_sid = g_strdup (subtitle_stream_id);
+
+  GST_DEBUG_OBJECT (self, "set stream ids audio '%s' video '%s' subtitle '%s'",
+      GST_STR_NULL (audio_stream_id), GST_STR_NULL (video_stream_id),
+      GST_STR_NULL (subtitle_stream_id));
+
+  ret = gst_play_select_streams (self);
+  g_mutex_unlock (&self->lock);
+
   return ret;
 }
 
@@ -3712,12 +3939,12 @@ gst_play_set_audio_track_enabled (GstPlay * self, gboolean enabled)
 {
   g_return_if_fail (GST_IS_PLAY (self));
 
-  if (enabled)
-    play_set_flag (self, GST_PLAY_FLAG_AUDIO);
-  else
-    play_clear_flag (self, GST_PLAY_FLAG_AUDIO);
-
-  GST_DEBUG_OBJECT (self, "track is '%s'", enabled ? "Enabled" : "Disabled");
+  g_mutex_lock (&self->lock);
+  self->audio_enabled = enabled;
+  GST_DEBUG_OBJECT (self, "Audio track is %s",
+      enabled ? "enabled" : "disabled");
+  gst_play_select_streams (self);
+  g_mutex_unlock (&self->lock);
 }
 
 /**
@@ -3733,12 +3960,12 @@ gst_play_set_video_track_enabled (GstPlay * self, gboolean enabled)
 {
   g_return_if_fail (GST_IS_PLAY (self));
 
-  if (enabled)
-    play_set_flag (self, GST_PLAY_FLAG_VIDEO);
-  else
-    play_clear_flag (self, GST_PLAY_FLAG_VIDEO);
-
-  GST_DEBUG_OBJECT (self, "track is '%s'", enabled ? "Enabled" : "Disabled");
+  g_mutex_lock (&self->lock);
+  self->video_enabled = enabled;
+  GST_DEBUG_OBJECT (self, "Video track is %s",
+      enabled ? "enabled" : "disabled");
+  gst_play_select_streams (self);
+  g_mutex_unlock (&self->lock);
 }
 
 /**
@@ -3754,12 +3981,12 @@ gst_play_set_subtitle_track_enabled (GstPlay * self, gboolean enabled)
 {
   g_return_if_fail (GST_IS_PLAY (self));
 
-  if (enabled)
-    play_set_flag (self, GST_PLAY_FLAG_SUBTITLE);
-  else
-    play_clear_flag (self, GST_PLAY_FLAG_SUBTITLE);
-
-  GST_DEBUG_OBJECT (self, "track is '%s'", enabled ? "Enabled" : "Disabled");
+  g_mutex_lock (&self->lock);
+  self->subtitle_enabled = enabled;
+  GST_DEBUG_OBJECT (self, "Subtitle track is %s",
+      enabled ? "enabled" : "disabled");
+  gst_play_select_streams (self);
+  g_mutex_unlock (&self->lock);
 }
 
 /**
@@ -4336,6 +4563,8 @@ gst_play_error_get_name (GstPlayError error)
   switch (error) {
     case GST_PLAY_ERROR_FAILED:
       return "failed";
+    case GST_PLAY_ERROR_MISSING_PLUGIN:
+      return "missing-plugin";
   }
 
   g_assert_not_reached ();
@@ -4427,8 +4656,7 @@ gst_play_config_set_user_agent (GstStructure * config, const gchar * agent)
   g_return_if_fail (config != NULL);
   g_return_if_fail (agent != NULL);
 
-  gst_structure_id_set (config,
-      CONFIG_QUARK (USER_AGENT), G_TYPE_STRING, agent, NULL);
+  gst_structure_set (config, "user-agent", G_TYPE_STRING, agent, NULL);
 }
 
 /**
@@ -4448,8 +4676,7 @@ gst_play_config_get_user_agent (const GstStructure * config)
 
   g_return_val_if_fail (config != NULL, NULL);
 
-  gst_structure_id_get (config,
-      CONFIG_QUARK (USER_AGENT), G_TYPE_STRING, &agent, NULL);
+  gst_structure_get (config, "user-agent", G_TYPE_STRING, &agent, NULL);
 
   return agent;
 }
@@ -4470,8 +4697,8 @@ gst_play_config_set_position_update_interval (GstStructure * config,
   g_return_if_fail (config != NULL);
   g_return_if_fail (interval <= 10000);
 
-  gst_structure_id_set (config,
-      CONFIG_QUARK (POSITION_INTERVAL_UPDATE), G_TYPE_UINT, interval, NULL);
+  gst_structure_set (config,
+      "position-update-interval", G_TYPE_UINT, interval, NULL);
 }
 
 /**
@@ -4489,8 +4716,8 @@ gst_play_config_get_position_update_interval (const GstStructure * config)
 
   g_return_val_if_fail (config != NULL, DEFAULT_POSITION_UPDATE_INTERVAL_MS);
 
-  gst_structure_id_get (config,
-      CONFIG_QUARK (POSITION_INTERVAL_UPDATE), G_TYPE_UINT, &interval, NULL);
+  gst_structure_get (config,
+      "position-update-interval", G_TYPE_UINT, &interval, NULL);
 
   return interval;
 }
@@ -4517,8 +4744,7 @@ gst_play_config_set_seek_accurate (GstStructure * config, gboolean accurate)
 {
   g_return_if_fail (config != NULL);
 
-  gst_structure_id_set (config,
-      CONFIG_QUARK (ACCURATE_SEEK), G_TYPE_BOOLEAN, accurate, NULL);
+  gst_structure_set (config, "accurate-seek", G_TYPE_BOOLEAN, accurate, NULL);
 }
 
 /**
@@ -4536,8 +4762,7 @@ gst_play_config_get_seek_accurate (const GstStructure * config)
 
   g_return_val_if_fail (config != NULL, FALSE);
 
-  gst_structure_id_get (config,
-      CONFIG_QUARK (ACCURATE_SEEK), G_TYPE_BOOLEAN, &accurate, NULL);
+  gst_structure_get (config, "accurate-seek", G_TYPE_BOOLEAN, &accurate, NULL);
 
   return accurate;
 }
@@ -4561,7 +4786,7 @@ gst_play_config_set_pipeline_dump_in_error_details (GstStructure * config,
 {
   g_return_if_fail (config != NULL);
 
-  gst_structure_id_set (config, CONFIG_QUARK (PIPELINE_DUMP_IN_ERROR_DETAILS),
+  gst_structure_set (config, "pipeline-dump-in-error-details",
       G_TYPE_BOOLEAN, value, NULL);
 }
 
@@ -4581,7 +4806,7 @@ gst_play_config_get_pipeline_dump_in_error_details (const GstStructure * config)
 
   g_return_val_if_fail (config != NULL, FALSE);
 
-  gst_structure_id_get (config, CONFIG_QUARK (PIPELINE_DUMP_IN_ERROR_DETAILS),
+  gst_structure_get (config, "pipeline-dump-in-error-details",
       G_TYPE_BOOLEAN, &value, NULL);
 
   return value;
@@ -4608,7 +4833,6 @@ GstSample *
 gst_play_get_video_snapshot (GstPlay * self,
     GstPlaySnapshotFormat format, const GstStructure * config)
 {
-  gint video_tracks = 0;
   GstPlayVideoInfo *video_info = NULL;
   GstSample *sample = NULL;
   GstCaps *caps = NULL;
@@ -4618,20 +4842,12 @@ gst_play_get_video_snapshot (GstPlay * self,
   gint par_d = 1;
   g_return_val_if_fail (GST_IS_PLAY (self), NULL);
 
-  if (self->use_playbin3) {
-    video_info = gst_play_get_current_video_track (self);
-    if (video_info == NULL) {
-      GST_DEBUG_OBJECT (self, "no current video track");
-      return NULL;
-    } else {
-      g_object_unref (video_info);
-    }
+  video_info = gst_play_get_current_video_track (self);
+  if (video_info == NULL) {
+    GST_DEBUG_OBJECT (self, "no current video track");
+    return NULL;
   } else {
-    g_object_get (self->playbin, "n-video", &video_tracks, NULL);
-    if (video_tracks == 0) {
-      GST_DEBUG_OBJECT (self, "total video track num is 0");
-      return NULL;
-    }
+    g_object_unref (video_info);
   }
 
   switch (format) {
@@ -4715,9 +4931,12 @@ gst_play_is_play_message (GstMessage * msg)
   return g_str_equal (gst_structure_get_name (data), GST_PLAY_MESSAGE_DATA);
 }
 
-#define PARSE_MESSAGE_FIELD(msg, field, value_type, value) G_STMT_START { \
+#define PARSE_MESSAGE_FIELD(msg, expected_msg_type, field, value_type, value) G_STMT_START { \
     const GstStructure *data = NULL;                                      \
+    GstPlayMessage msg_type;                                              \
     g_return_if_fail (gst_play_is_play_message (msg));                    \
+    gst_play_message_parse_type (msg, &msg_type);                         \
+    g_return_if_fail (msg_type == expected_msg_type);                     \
     data = gst_message_get_structure (msg);                               \
     gst_structure_get (data, field, value_type, value, NULL);             \
 } G_STMT_END
@@ -4734,8 +4953,132 @@ gst_play_is_play_message (GstMessage * msg)
 void
 gst_play_message_parse_type (GstMessage * msg, GstPlayMessage * type)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_TYPE,
-      GST_TYPE_PLAY_MESSAGE, type);
+  const GstStructure *data = NULL;
+  g_return_if_fail (gst_play_is_play_message (msg));
+  data = gst_message_get_structure (msg);
+  gst_structure_get (data, GST_PLAY_MESSAGE_DATA_TYPE, GST_TYPE_PLAY_MESSAGE,
+      type, NULL);
+}
+
+/**
+ * gst_play_message_get_uri:
+ * @msg: A #GstMessage
+ *
+ * Reads the URI the play message @msg applies to.
+ *
+ * Returns: (transfer none): The URI this message applies to
+ *
+ * Since: 1.26
+ */
+const gchar *
+gst_play_message_get_uri (GstMessage * msg)
+{
+  const GstStructure *details = NULL;
+  const gchar *uri;
+  GstPlayMessage msg_type;
+
+  g_return_val_if_fail (gst_play_is_play_message (msg), NULL);
+
+  gst_play_message_parse_type (msg, &msg_type);
+
+  // ERROR/WARNING messages store the details in differently named fields for
+  // backwards compatibility
+  if (msg_type == GST_PLAY_MESSAGE_ERROR) {
+    const GstStructure *s = gst_message_get_structure (msg);
+    const GValue *v =
+        gst_structure_get_value (s, GST_PLAY_MESSAGE_DATA_ERROR_DETAILS);
+    details = g_value_get_boxed (v);
+  } else if (msg_type == GST_PLAY_MESSAGE_WARNING) {
+    const GstStructure *s = gst_message_get_structure (msg);
+    const GValue *v =
+        gst_structure_get_value (s, GST_PLAY_MESSAGE_DATA_WARNING_DETAILS);
+    details = g_value_get_boxed (v);
+  }
+
+  if (!details)
+    details = gst_message_get_details (msg);
+
+  g_return_val_if_fail (details, NULL);
+  uri = gst_structure_get_string (details, "uri");
+  g_return_val_if_fail (uri, NULL);
+
+  return uri;
+}
+
+/**
+ * gst_play_message_get_stream_id:
+ * @msg: A #GstMessage
+ *
+ * Reads the stream ID the play message @msg applies to, if any.
+ *
+ * Returns: (transfer none) (nullable): The stream ID this message applies to
+ *
+ * Since: 1.26
+ */
+const gchar *
+gst_play_message_get_stream_id (GstMessage * msg)
+{
+  const GstStructure *details = NULL;
+  const gchar *stream_id;
+  GstPlayMessage msg_type;
+
+  g_return_val_if_fail (gst_play_is_play_message (msg), NULL);
+
+  gst_play_message_parse_type (msg, &msg_type);
+
+  // ERROR/WARNING messages store the details in differently named fields for
+  // backwards compatibility
+  if (msg_type == GST_PLAY_MESSAGE_ERROR) {
+    const GstStructure *s = gst_message_get_structure (msg);
+    const GValue *v =
+        gst_structure_get_value (s, GST_PLAY_MESSAGE_DATA_ERROR_DETAILS);
+    details = g_value_get_boxed (v);
+  } else if (msg_type == GST_PLAY_MESSAGE_WARNING) {
+    const GstStructure *s = gst_message_get_structure (msg);
+    const GValue *v =
+        gst_structure_get_value (s, GST_PLAY_MESSAGE_DATA_WARNING_DETAILS);
+    details = g_value_get_boxed (v);
+  }
+
+  if (!details)
+    details = gst_message_get_details (msg);
+  g_return_val_if_fail (details, NULL);
+  stream_id = gst_structure_get_string (details, "stream-id");
+
+  return stream_id;
+}
+
+/**
+ * gst_play_message_parse_uri_loaded:
+ * @msg: A #GstMessage
+ * @uri: (out) (optional) (transfer full): the resulting URI
+ *
+ * Parse the given uri-loaded @msg and extract the corresponding value
+ *
+ * Since: 1.26
+ */
+void
+gst_play_message_parse_uri_loaded (GstMessage * msg, gchar ** uri)
+{
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_URI_LOADED,
+      GST_PLAY_MESSAGE_DATA_URI, G_TYPE_STRING, uri);
+}
+
+/**
+ * gst_play_message_parse_duration_changed:
+ * @msg: A #GstMessage
+ * @duration: (out) (optional): the resulting duration
+ *
+ * Parse the given duration-changed @msg and extract the corresponding #GstClockTime
+ *
+ * Since: 1.26
+ */
+void
+gst_play_message_parse_duration_changed (GstMessage * msg,
+    GstClockTime * duration)
+{
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DURATION_CHANGED,
+      GST_PLAY_MESSAGE_DATA_DURATION, GST_TYPE_CLOCK_TIME, duration);
 }
 
 /**
@@ -4743,16 +5086,17 @@ gst_play_message_parse_type (GstMessage * msg, GstPlayMessage * type)
  * @msg: A #GstMessage
  * @duration: (out) (optional): the resulting duration
  *
- * Parse the given duration @msg and extract the corresponding #GstClockTime
+ * Parse the given duration-changed @msg and extract the corresponding #GstClockTime
  *
  * Since: 1.20
+ *
+ * Deprecated: 1.26: Use gst_play_message_parse_duration_changed().
  */
 void
 gst_play_message_parse_duration_updated (GstMessage * msg,
     GstClockTime * duration)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_DURATION,
-      GST_TYPE_CLOCK_TIME, duration);
+  gst_play_message_parse_duration_changed (msg, duration);
 }
 
 /**
@@ -4760,7 +5104,7 @@ gst_play_message_parse_duration_updated (GstMessage * msg,
  * @msg: A #GstMessage
  * @position: (out) (optional): the resulting position
  *
- * Parse the given position @msg and extract the corresponding #GstClockTime
+ * Parse the given position-updated @msg and extract the corresponding #GstClockTime
  *
  * Since: 1.20
  */
@@ -4768,8 +5112,8 @@ void
 gst_play_message_parse_position_updated (GstMessage * msg,
     GstClockTime * position)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_POSITION,
-      GST_TYPE_CLOCK_TIME, position);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_POSITION_UPDATED,
+      GST_PLAY_MESSAGE_DATA_POSITION, GST_TYPE_CLOCK_TIME, position);
 }
 
 /**
@@ -4777,15 +5121,31 @@ gst_play_message_parse_position_updated (GstMessage * msg,
  * @msg: A #GstMessage
  * @state: (out) (optional): the resulting play state
  *
- * Parse the given state @msg and extract the corresponding #GstPlayState
+ * Parse the given state-changed @msg and extract the corresponding #GstPlayState
  *
  * Since: 1.20
  */
 void
 gst_play_message_parse_state_changed (GstMessage * msg, GstPlayState * state)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_PLAY_STATE,
-      GST_TYPE_PLAY_STATE, state);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_STATE_CHANGED,
+      GST_PLAY_MESSAGE_DATA_PLAY_STATE, GST_TYPE_PLAY_STATE, state);
+}
+
+/**
+ * gst_play_message_parse_buffering:
+ * @msg: A #GstMessage
+ * @percent: (out) (optional): the resulting buffering percent
+ *
+ * Parse the given buffering @msg and extract the corresponding value
+ *
+ * Since: 1.26
+ */
+void
+gst_play_message_parse_buffering (GstMessage * msg, guint * percent)
+{
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_BUFFERING,
+      GST_PLAY_MESSAGE_DATA_BUFFERING_PERCENT, G_TYPE_UINT, percent);
 }
 
 /**
@@ -4793,15 +5153,16 @@ gst_play_message_parse_state_changed (GstMessage * msg, GstPlayState * state)
  * @msg: A #GstMessage
  * @percent: (out) (optional): the resulting buffering percent
  *
- * Parse the given buffering-percent @msg and extract the corresponding value
+ * Parse the given buffering @msg and extract the corresponding value
  *
  * Since: 1.20
+ *
+ * Deprecated: 1.26: Use gst_play_message_parse_buffering().
  */
 void
 gst_play_message_parse_buffering_percent (GstMessage * msg, guint * percent)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_BUFFERING_PERCENT,
-      G_TYPE_UINT, percent);
+  gst_play_message_parse_buffering (msg, percent);
 }
 
 /**
@@ -4810,7 +5171,11 @@ gst_play_message_parse_buffering_percent (GstMessage * msg, guint * percent)
  * @error: (out) (optional) (transfer full): the resulting error
  * @details: (out) (optional) (nullable) (transfer full): A #GstStructure containing additional details about the error
  *
- * Parse the given error @msg and extract the corresponding #GError
+ * Parse the given error @msg and extract the corresponding #GError.
+ *
+ * Since 1.26 the details will always contain the URI this refers to in an
+ * "uri" field of type string, and (if known) the string "stream-id" it is
+ * referring to.
  *
  * Since: 1.20
  */
@@ -4818,9 +5183,111 @@ void
 gst_play_message_parse_error (GstMessage * msg, GError ** error,
     GstStructure ** details)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_ERROR, G_TYPE_ERROR, error);
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_ERROR_DETAILS,
-      GST_TYPE_STRUCTURE, details);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_ERROR, GST_PLAY_MESSAGE_DATA_ERROR,
+      G_TYPE_ERROR, error);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_ERROR,
+      GST_PLAY_MESSAGE_DATA_ERROR_DETAILS, GST_TYPE_STRUCTURE, details);
+}
+
+static gboolean
+gst_play_message_parse_missing_plugin (GstMessage * msg,
+    GstPlayMessage msg_type, gchar *** descriptions,
+    gchar *** installer_details)
+{
+  const GError *err;
+  const GValue *v, *details_array;
+  const GstStructure *s, *details;
+  guint n_details;
+
+  if (descriptions)
+    *descriptions = NULL;
+  if (installer_details)
+    *installer_details = NULL;
+
+  s = gst_message_get_structure (msg);
+
+  v = gst_structure_get_value (s,
+      msg_type ==
+      GST_PLAY_MESSAGE_ERROR ? GST_PLAY_MESSAGE_DATA_ERROR :
+      GST_PLAY_MESSAGE_DATA_WARNING);
+  if (!v)
+    return FALSE;
+  err = g_value_get_boxed (v);
+  if (!err)
+    return FALSE;
+
+  if (!g_error_matches (err, GST_PLAY_ERROR, GST_PLAY_ERROR_MISSING_PLUGIN))
+    return FALSE;
+
+  v = gst_structure_get_value (s,
+      msg_type ==
+      GST_PLAY_MESSAGE_ERROR ? GST_PLAY_MESSAGE_DATA_ERROR_DETAILS :
+      GST_PLAY_MESSAGE_DATA_WARNING_DETAILS);
+  if (!v)
+    return FALSE;
+  details = g_value_get_boxed (v);
+  if (!details)
+    return FALSE;
+
+  details_array = gst_structure_get_value (details, "missing-plugin-details");
+
+  n_details = gst_value_array_get_size (details_array);
+  if (descriptions)
+    *descriptions = g_new0 (gchar *, n_details + 1);
+  if (installer_details)
+    *installer_details = g_new0 (gchar *, n_details + 1);
+
+  for (guint i = 0; i < n_details; i++) {
+    const GValue *details_v = gst_value_array_get_value (details_array, i);
+    const GstStructure *details_s = g_value_get_boxed (details_v);
+    gchar *str;
+
+    if (descriptions) {
+      gst_structure_get (details_s, "description", G_TYPE_STRING, &str, NULL);
+      (*descriptions)[i] = str;
+    }
+
+    if (installer_details) {
+      gst_structure_get (details_s, "installer-details", G_TYPE_STRING, &str,
+          NULL);
+      (*installer_details)[i] = str;
+    }
+  }
+
+  return TRUE;
+
+}
+
+/**
+ * gst_play_message_parse_error_missing_plugin:
+ * @msg: A #GstMessage
+ * @descriptions: (out) (optional) (transfer full) (array zero-terminated=1): a %NULL-terminated array of descriptions
+ * @installer_details: (out) (optional) (transfer full) (array zero-terminated=1): a %NULL-terminated array of installer details
+ *
+ * Parses missing plugin descriptions and installer details from a
+ * GST_PLAY_ERROR_MISSING_PLUGIN error message.
+ *
+ * Both arrays will have the same length, and strings at the same index
+ * correspond to each other.
+ *
+ * The installer details can be passed to gst_install_plugins_sync() or
+ * gst_install_plugins_async().
+ *
+ * Returns: %TRUE if the message contained a missing-plugin error.
+ *
+ * Since: 1.26
+ */
+gboolean
+gst_play_message_parse_error_missing_plugin (GstMessage * msg,
+    gchar *** descriptions, gchar *** installer_details)
+{
+  GstPlayMessage msg_type;
+
+  gst_play_message_parse_type (msg, &msg_type);
+  g_return_val_if_fail (msg_type == GST_PLAY_MESSAGE_ERROR, FALSE);
+
+  return gst_play_message_parse_missing_plugin (msg, msg_type, descriptions,
+      installer_details);
 }
 
 /**
@@ -4829,7 +5296,11 @@ gst_play_message_parse_error (GstMessage * msg, GError ** error,
  * @error: (out) (optional) (transfer full): the resulting warning
  * @details: (out) (optional) (nullable) (transfer full): A #GstStructure containing additional details about the warning
  *
- * Parse the given error @msg and extract the corresponding #GError warning
+ * Parse the given warning @msg and extract the corresponding #GError.
+ *
+ * Since 1.26 the details will always contain the URI this refers to in an
+ * "uri" field of type string, and (if known) the string "stream-id" it is
+ * referring to.
  *
  * Since: 1.20
  */
@@ -4837,9 +5308,42 @@ void
 gst_play_message_parse_warning (GstMessage * msg, GError ** error,
     GstStructure ** details)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_WARNING, G_TYPE_ERROR, error);
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_WARNING, GST_TYPE_STRUCTURE,
-      details);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_WARNING,
+      GST_PLAY_MESSAGE_DATA_WARNING, G_TYPE_ERROR, error);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_WARNING,
+      GST_PLAY_MESSAGE_DATA_WARNING_DETAILS, GST_TYPE_STRUCTURE, details);
+}
+
+/**
+ * gst_play_message_parse_warning_missing_plugin:
+ * @msg: A #GstMessage
+ * @descriptions: (out) (optional) (transfer full) (array zero-terminated=1): a %NULL-terminated array of descriptions
+ * @installer_details: (out) (optional) (transfer full) (array zero-terminated=1): a %NULL-terminated array of installer details
+ *
+ * Parses missing plugin descriptions and installer details from a
+ * GST_PLAY_ERROR_MISSING_PLUGIN warning message.
+ *
+ * Both arrays will have the same length, and strings at the same index
+ * correspond to each other.
+ *
+ * The installer details can be passed to gst_install_plugins_sync() or
+ * gst_install_plugins_async().
+ *
+ * Returns: %TRUE if the message contained a missing-plugin error.
+ *
+ * Since: 1.26
+ */
+gboolean
+gst_play_message_parse_warning_missing_plugin (GstMessage * msg,
+    gchar *** descriptions, gchar *** installer_details)
+{
+  GstPlayMessage msg_type;
+
+  gst_play_message_parse_type (msg, &msg_type);
+  g_return_val_if_fail (msg_type == GST_PLAY_MESSAGE_WARNING, FALSE);
+
+  return gst_play_message_parse_missing_plugin (msg, msg_type, descriptions,
+      installer_details);
 }
 
 /**
@@ -4848,7 +5352,7 @@ gst_play_message_parse_warning (GstMessage * msg, GError ** error,
  * @width: (out) (optional): the resulting video width
  * @height: (out) (optional): the resulting video height
  *
- * Parse the given @msg and extract the corresponding video dimensions
+ * Parse the given video-dimensions-changed @msg and extract the corresponding video dimensions
  *
  * Since: 1.20
  */
@@ -4856,10 +5360,10 @@ void
 gst_play_message_parse_video_dimensions_changed (GstMessage * msg,
     guint * width, guint * height)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_VIDEO_WIDTH,
-      G_TYPE_UINT, width);
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_VIDEO_HEIGHT,
-      G_TYPE_UINT, height);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_VIDEO_DIMENSIONS_CHANGED,
+      GST_PLAY_MESSAGE_DATA_VIDEO_WIDTH, G_TYPE_UINT, width);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_VIDEO_DIMENSIONS_CHANGED,
+      GST_PLAY_MESSAGE_DATA_VIDEO_HEIGHT, G_TYPE_UINT, height);
 }
 
 /**
@@ -4867,7 +5371,7 @@ gst_play_message_parse_video_dimensions_changed (GstMessage * msg,
  * @msg: A #GstMessage
  * @info: (out) (optional) (transfer full): the resulting media info
  *
- * Parse the given @msg and extract the corresponding media information
+ * Parse the given media-info-updated @msg and extract the corresponding media information
  *
  * Since: 1.20
  */
@@ -4875,8 +5379,8 @@ void
 gst_play_message_parse_media_info_updated (GstMessage * msg,
     GstPlayMediaInfo ** info)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_MEDIA_INFO,
-      GST_TYPE_PLAY_MEDIA_INFO, info);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_MEDIA_INFO_UPDATED,
+      GST_PLAY_MESSAGE_DATA_MEDIA_INFO, GST_TYPE_PLAY_MEDIA_INFO, info);
 }
 
 /**
@@ -4884,15 +5388,15 @@ gst_play_message_parse_media_info_updated (GstMessage * msg,
  * @msg: A #GstMessage
  * @volume: (out) (optional): the resulting audio volume
  *
- * Parse the given @msg and extract the corresponding audio volume
+ * Parse the given volume-changed @msg and extract the corresponding audio volume
  *
  * Since: 1.20
  */
 void
 gst_play_message_parse_volume_changed (GstMessage * msg, gdouble * volume)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_VOLUME, G_TYPE_DOUBLE,
-      volume);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_VOLUME_CHANGED,
+      GST_PLAY_MESSAGE_DATA_VOLUME, G_TYPE_DOUBLE, volume);
 }
 
 /**
@@ -4900,13 +5404,29 @@ gst_play_message_parse_volume_changed (GstMessage * msg, gdouble * volume)
  * @msg: A #GstMessage
  * @muted: (out) (optional): the resulting audio muted state
  *
- * Parse the given @msg and extract the corresponding audio muted state
+ * Parse the given mute-changed @msg and extract the corresponding audio muted state
  *
  * Since: 1.20
  */
 void
 gst_play_message_parse_muted_changed (GstMessage * msg, gboolean * muted)
 {
-  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_DATA_IS_MUTED, G_TYPE_BOOLEAN,
-      muted);
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_MUTE_CHANGED,
+      GST_PLAY_MESSAGE_DATA_IS_MUTED, G_TYPE_BOOLEAN, muted);
+}
+
+/**
+ * gst_play_message_parse_seek_done:
+ * @msg: A #GstMessage
+ * @position: (out) (optional): the resulting position
+ *
+ * Parse the given seek-done @msg and extract the corresponding #GstClockTime
+ *
+ * Since: 1.26
+ */
+void
+gst_play_message_parse_seek_done (GstMessage * msg, GstClockTime * position)
+{
+  PARSE_MESSAGE_FIELD (msg, GST_PLAY_MESSAGE_SEEK_DONE,
+      GST_PLAY_MESSAGE_DATA_POSITION, GST_TYPE_CLOCK_TIME, position);
 }

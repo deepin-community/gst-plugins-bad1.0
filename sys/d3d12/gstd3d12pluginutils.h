@@ -20,8 +20,8 @@
 #pragma once
 
 #include <gst/gst.h>
-#include "gstd3d12.h"
-#include "gstd3d12-private.h"
+#include <gst/d3d12/gstd3d12.h>
+#include <gst/d3d12/gstd3d12-private.h>
 
 G_BEGIN_DECLS
 
@@ -49,13 +49,17 @@ enum GstD3D12MSAAMode
 #define GST_TYPE_D3D12_MSAA_MODE (gst_d3d12_msaa_mode_get_type())
 GType gst_d3d12_msaa_mode_get_type (void);
 
-void          gst_d3d12_buffer_after_write (GstBuffer * buffer,
-                                            guint64 fence_value);
-
 gboolean      gst_d3d12_need_transform (gfloat rotation_x,
                                         gfloat rotation_y,
                                         gfloat rotation_z,
                                         gfloat scale_x,
                                         gfloat scale_y);
+
+gboolean      gst_d3d12_is_windows_10_or_greater (void);
+
+void          gst_d3d12_calculate_sample_desc_for_msaa (GstD3D12Device * device,
+                                                        DXGI_FORMAT format,
+                                                        GstD3D12MSAAMode msaa_mode,
+                                                        DXGI_SAMPLE_DESC * desc);
 
 G_END_DECLS

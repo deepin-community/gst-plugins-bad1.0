@@ -239,5 +239,9 @@
 #define DRF_ID_OPUS       0x4f707573
 #define DRF_ID_EAC3       0x45414333   /* defined in A/52 Annex G */
 #define DRF_ID_AC4        0x41432D34   /* defined in ETSI TS 103 190-2 Annex D */
+#define DRF_ID_ID3        0x49443320   /* defined in SMPTE registration authority */
+#define DRF_ID_VANC       0x56414e43   /* defined in SMPTE ST-2038 */
+#define DRF_ID_VP09       0x56503039   /* Custom GStreamer vp9 */
+#define DRF_ID_AV1G       0x41563147   /* Custom AV1 GStreamer mapping */
 
 #endif /* __GST_MPEG_DESC_H__ */

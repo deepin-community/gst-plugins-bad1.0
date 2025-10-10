@@ -169,6 +169,13 @@ gst_qsv_decoder_class_init (GstQsvDecoderClass * klass)
           "DXGI Adapter LUID (Locally Unique Identifier) of created device",
           G_MININT64, G_MAXINT64, 0, param_flags));
 #else
+  /**
+   * GstQsvDecoder:device-path:
+   *
+   * DRM device path
+   *
+   * Since: 1.22
+   */
   g_object_class_install_property (object_class, PROP_DEVICE_PATH,
       g_param_spec_string ("device-path", "Device Path",
           "DRM device path", nullptr, param_flags));
@@ -1197,7 +1204,8 @@ gst_qsv_decoder_negotiate_internal (GstVideoDecoder * decoder,
   if (priv->use_video_memory) {
     GST_DEBUG_OBJECT (self, "Downstream supports D3D11 memory");
     gst_caps_set_features (priv->output_state->caps, 0,
-        gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY, nullptr));
+        gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY,
+            nullptr));
   }
 #endif
 

@@ -177,7 +177,7 @@ gst_proxy_src_class_init (GstProxySrcClass * klass)
 
   g_object_class_install_property (gobject_class, PROP_PROXYSINK,
       g_param_spec_object ("proxysink", "Proxysink", "Matching proxysink",
-          GST_TYPE_PROXY_SINK, G_PARAM_READWRITE));
+          GST_TYPE_PROXY_SINK, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gstelement_class->change_state = gst_proxy_src_change_state;
   gstelement_class->send_event = gst_proxy_src_send_event;
@@ -244,11 +244,11 @@ gst_proxy_src_dispose (GObject * object)
 {
   GstProxySrc *self = GST_PROXY_SRC (object);
 
-  gst_object_unparent (GST_OBJECT (self->dummy_sinkpad));
-  self->dummy_sinkpad = NULL;
-
   gst_object_unparent (GST_OBJECT (self->internal_srcpad));
   self->internal_srcpad = NULL;
+
+  gst_object_unparent (GST_OBJECT (self->dummy_sinkpad));
+  self->dummy_sinkpad = NULL;
 
   g_weak_ref_set (&self->proxysink, NULL);
 

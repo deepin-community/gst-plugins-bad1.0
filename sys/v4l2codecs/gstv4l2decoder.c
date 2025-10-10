@@ -25,6 +25,7 @@
 #include "gstv4l2codecpool.h"
 #include "gstv4l2decoder.h"
 #include "gstv4l2format.h"
+#include "linux/drm_fourcc.h"
 #include "linux/media.h"
 #include "linux/videodev2.h"
 
@@ -40,6 +41,12 @@
 
 GST_DEBUG_CATEGORY (v4l2_decoder_debug);
 #define GST_CAT_DEFAULT v4l2_decoder_debug
+
+#define SRC_CAPS \
+    GST_VIDEO_DMA_DRM_CAPS_MAKE " ; " \
+    GST_VIDEO_CAPS_MAKE (GST_V4L2_DEFAULT_VIDEO_FORMATS)
+
+static GstStaticCaps default_src_caps = GST_STATIC_CAPS (SRC_CAPS);
 
 enum
 {
@@ -75,8 +82,8 @@ struct _GstV4l2Decoder
   gboolean opened;
   gint media_fd;
   gint video_fd;
-  GstQueueArray *request_pool;
-  GstQueueArray *pending_requests;
+  GstVecDeque *request_pool;
+  GstVecDeque *pending_requests;
   guint version;
 
   enum v4l2_buf_type src_buf_type;
@@ -90,6 +97,10 @@ struct _GstV4l2Decoder
 
   /* detected features */
   gboolean supports_holding_capture;
+  gboolean supports_remove_buffers;
+
+  /* special state for doc generator */
+  gboolean doc_mode;
 };
 
 G_DEFINE_TYPE_WITH_CODE (GstV4l2Decoder, gst_v4l2_decoder, GST_TYPE_OBJECT,
@@ -116,8 +127,8 @@ gst_v4l2_decoder_finalize (GObject * obj)
 
   g_free (self->media_device);
   g_free (self->video_device);
-  gst_queue_array_free (self->request_pool);
-  gst_queue_array_free (self->pending_requests);
+  gst_vec_deque_free (self->request_pool);
+  gst_vec_deque_free (self->pending_requests);
 
   G_OBJECT_CLASS (gst_v4l2_decoder_parent_class)->finalize (obj);
 }
@@ -125,15 +136,14 @@ gst_v4l2_decoder_finalize (GObject * obj)
 static void
 gst_v4l2_decoder_init (GstV4l2Decoder * self)
 {
-  self->request_pool = gst_queue_array_new (16);
-  self->pending_requests = gst_queue_array_new (16);
+  self->request_pool = gst_vec_deque_new (16);
+  self->pending_requests = gst_vec_deque_new (16);
 }
 
 static void
 gst_v4l2_decoder_class_init (GstV4l2DecoderClass * klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
-
   gobject_class->finalize = gst_v4l2_decoder_finalize;
   gobject_class->get_property = gst_v4l2_decoder_get_property;
   gobject_class->set_property = gst_v4l2_decoder_set_property;
@@ -153,6 +163,9 @@ gst_v4l2_decoder_new (GstV4l2CodecDevice * device)
       "media-device", device->media_device_path,
       "video-device", device->video_device_path, NULL);
 
+  if (!g_strcmp0 (device->name, "docdec-proc"))
+    decoder->doc_mode = TRUE;
+
   return gst_object_ref_sink (decoder);
 }
 
@@ -167,7 +180,17 @@ gst_v4l2_decoder_open (GstV4l2Decoder * self)
 {
   gint ret;
   struct v4l2_capability querycap;
+  struct v4l2_create_buffers createbufs = {
+    .count = 0,
+    .memory = V4L2_MEMORY_MMAP,
+  };
+
   guint32 capabilities;
+
+  if (self->doc_mode) {
+    self->opened = TRUE;
+    return TRUE;
+  }
 
   self->media_fd = open (self->media_device, 0);
   if (self->media_fd < 0) {
@@ -211,6 +234,20 @@ gst_v4l2_decoder_open (GstV4l2Decoder * self)
     return FALSE;
   }
 
+  createbufs.format.type = self->sink_buf_type;
+  ret = ioctl (self->video_fd, VIDIOC_CREATE_BUFS, &createbufs);
+  if (ret < 0) {
+    GST_ERROR_OBJECT (self,
+        "GStreamer requires VIDIOC_CREATE_BUFS to be supported by stateless decoders.");
+    gst_v4l2_decoder_close (self);
+    return FALSE;
+  }
+
+  if (createbufs.capabilities & V4L2_BUF_CAP_SUPPORTS_REMOVE_BUFS)
+    self->supports_remove_buffers = TRUE;
+  else
+    self->supports_remove_buffers = FALSE;
+
   self->opened = TRUE;
 
   return TRUE;
@@ -221,10 +258,10 @@ gst_v4l2_decoder_close (GstV4l2Decoder * self)
 {
   GstV4l2Request *request;
 
-  while ((request = gst_queue_array_pop_head (self->pending_requests)))
+  while ((request = gst_vec_deque_pop_head (self->pending_requests)))
     gst_v4l2_request_unref (request);
 
-  while ((request = gst_queue_array_pop_head (self->request_pool)))
+  while ((request = gst_vec_deque_pop_head (self->request_pool)))
     gst_v4l2_request_free (request);
 
   if (self->media_fd)
@@ -265,7 +302,7 @@ gst_v4l2_decoder_streamoff (GstV4l2Decoder * self, GstPadDirection direction)
 
     /* STREAMOFF have the effect of cancelling all requests and unqueuing all
      * buffers, so clear the pending request list */
-    while ((pending_req = gst_queue_array_pop_head (self->pending_requests))) {
+    while ((pending_req = gst_vec_deque_pop_head (self->pending_requests))) {
       g_clear_pointer (&pending_req->bitstream, gst_memory_unref);
       pending_req->pending = FALSE;
       gst_v4l2_request_unref (pending_req);
@@ -301,6 +338,19 @@ gst_v4l2_decoder_enum_sink_fmt (GstV4l2Decoder * self, gint i,
   gint ret;
 
   g_return_val_if_fail (self->opened, FALSE);
+
+  if (self->doc_mode) {
+    guint32 all_fmt[] = {
+      V4L2_PIX_FMT_H264_SLICE, V4L2_PIX_FMT_HEVC_SLICE, V4L2_PIX_FMT_VP8_FRAME,
+      V4L2_PIX_FMT_MPEG2_SLICE, V4L2_PIX_FMT_VP9_FRAME, V4L2_PIX_FMT_AV1_FRAME,
+    };
+
+    if (i >= G_N_ELEMENTS (all_fmt))
+      return FALSE;
+
+    *out_fmt = all_fmt[i];
+    return TRUE;
+  }
 
   ret = ioctl (self->video_fd, VIDIOC_ENUM_FMT, &fmtdesc);
   if (ret < 0) {
@@ -361,9 +411,7 @@ gst_v4l2_decoder_enum_size_for_format (GstV4l2Decoder * self,
     guint32 pixelformat, gint index, gint unscaled_width, gint unscaled_height)
 {
   struct v4l2_frmsizeenum size;
-  GstVideoFormat format;
   gint ret;
-  gboolean res;
 
   memset (&size, 0, sizeof (struct v4l2_frmsizeenum));
   size.index = index;
@@ -391,9 +439,6 @@ gst_v4l2_decoder_enum_size_for_format (GstV4l2Decoder * self,
     return NULL;
   }
 
-  res = gst_v4l2_format_to_video_format (pixelformat, &format);
-  g_assert (res);
-
   GST_DEBUG_OBJECT (self, "get size (%d x %d) index %d for %" GST_FOURCC_FORMAT,
       size.discrete.width, size.discrete.height, index,
       GST_FOURCC_ARGS (pixelformat));
@@ -411,44 +456,63 @@ gst_v4l2_decoder_probe_caps_for_format (GstV4l2Decoder * self,
   GstCaps *caps, *tmp, *size_caps;
   GstVideoFormat format;
   guint32 drm_fourcc;
+  guint64 modifier;
 
   GST_DEBUG_OBJECT (self, "enumerate size for %" GST_FOURCC_FORMAT,
       GST_FOURCC_ARGS (pixelformat));
 
-  if (!gst_v4l2_format_to_video_format (pixelformat, &format))
-    return gst_caps_new_empty ();
+  caps = gst_caps_new_empty ();
+  if (!gst_v4l2_format_to_video_format (pixelformat, &format) ||
+      !gst_v4l2_format_to_drm_format (pixelformat, &drm_fourcc, &modifier)) {
+    return caps;
+  }
 
-  caps = gst_caps_new_simple ("video/x-raw", "format", G_TYPE_STRING,
-      gst_video_format_to_string (format), NULL);
+  GST_DEBUG_OBJECT (self,
+      "got format %s DRM %" GST_FOURCC_FORMAT ":0x%016" G_GINT64_MODIFIER "x",
+      gst_video_format_to_string (format), GST_FOURCC_ARGS (drm_fourcc),
+      modifier);
 
-  size_caps = gst_caps_new_empty ();
+  size_caps = gst_caps_new_simple ("video/x-raw",
+      "width", G_TYPE_INT, unscaled_width,
+      "height", G_TYPE_INT, unscaled_height, NULL);
   while ((tmp = gst_v4l2_decoder_enum_size_for_format (self, pixelformat,
               index++, unscaled_width, unscaled_height))) {
     size_caps = gst_caps_merge (size_caps, tmp);
   }
 
-  if (!gst_caps_is_empty (size_caps)) {
-    tmp = caps;
-    caps = gst_caps_intersect_full (tmp, size_caps, GST_CAPS_INTERSECT_FIRST);
-    gst_caps_unref (tmp);
+  if (format != GST_VIDEO_FORMAT_UNKNOWN) {
+    GstCaps *simple_caps;
+
+    simple_caps = gst_caps_new_simple ("video/x-raw", "format", G_TYPE_STRING,
+        gst_video_format_to_string (format), NULL);
+
+    if (!gst_caps_is_empty (size_caps)) {
+      tmp = simple_caps;
+      simple_caps =
+          gst_caps_intersect_full (tmp, size_caps, GST_CAPS_INTERSECT_FIRST);
+      gst_caps_unref (tmp);
+    }
+
+    caps = gst_caps_merge (simple_caps, caps);
   }
 
-  /* TODO: Add a V4L2 to DRM fourcc translator for formats that we don't support
-   * in software.
-   */
-  drm_fourcc = gst_video_dma_drm_fourcc_from_format (format);
-  if (drm_fourcc /* != DRM_FORMAT_INVALID */ ) {
+  if (drm_fourcc != DRM_FORMAT_INVALID) {
     GstCaps *drm_caps;
+    gchar *drm_format_str =
+        gst_video_dma_drm_fourcc_to_string (drm_fourcc, modifier);
 
     drm_caps = gst_caps_new_simple ("video/x-raw", "format", G_TYPE_STRING,
-        "DMA_DRM", "drm-format", G_TYPE_STRING,
-        gst_video_dma_drm_fourcc_to_string (drm_fourcc, 0), NULL);
+        "DMA_DRM", "drm-format", G_TYPE_STRING, drm_format_str, NULL);
+    g_free (drm_format_str);
+
     gst_caps_set_features_simple (drm_caps,
-        gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_DMABUF));
+        gst_caps_features_new_single_static_str
+        (GST_CAPS_FEATURE_MEMORY_DMABUF));
 
     if (!gst_caps_is_empty (size_caps)) {
       gst_caps_set_features_simple (size_caps,
-          gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_DMABUF));
+          gst_caps_features_new_single_static_str
+          (GST_CAPS_FEATURE_MEMORY_DMABUF));
       tmp = drm_caps;
       drm_caps =
           gst_caps_intersect_full (tmp, size_caps, GST_CAPS_INTERSECT_FIRST);
@@ -477,9 +541,9 @@ filter_non_dmabuf_caps (GstCapsFeatures * features,
   return !gst_caps_features_contains (features, GST_CAPS_FEATURE_MEMORY_DMABUF);
 }
 
-GstCaps *
-gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self,
-    GstStaticCaps * static_filter)
+static GstCaps *
+gst_v4l2_decoder_enum_src_formats_full (GstV4l2Decoder * self,
+    GstStaticCaps * static_filter, gboolean enum_all)
 {
   gint ret;
   struct v4l2_format fmt = {
@@ -505,7 +569,17 @@ gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self,
   for (i = 0; ret >= 0; i++) {
     struct v4l2_fmtdesc fmtdesc = { i, self->src_buf_type, };
 
+    if (enum_all)
+      fmtdesc.index |= V4L2_FMTDESC_FLAG_ENUM_ALL;
+
     ret = ioctl (self->video_fd, VIDIOC_ENUM_FMT, &fmtdesc);
+    /* If the driver can't enumerate all the pixels formats
+     * return empty caps */
+    if (enum_all && ret < 0 && errno == EINVAL) {
+      gst_caps_unref (caps);
+      return gst_static_caps_get (&default_src_caps);
+    }
+
     if (ret < 0) {
       if (errno != EINVAL)
         GST_ERROR_OBJECT (self, "VIDIOC_ENUM_FMT failed: %s",
@@ -529,14 +603,64 @@ gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self,
   gst_caps_filter_and_map_in_place (tmp, filter_non_dmabuf_caps, NULL);
   gst_caps_append (caps, tmp);
 
+  if (enum_all) {
+    /* When enumerating all the formats we don't need yet resolution
+     * so remove width, height and framerate fields */
+    guint n = gst_caps_get_size (caps);
+    for (i = 0; i < n; i++) {
+      GstStructure *s = gst_caps_get_structure (caps, i);
+
+      gst_structure_remove_fields (s, "width", "height", "framerate", NULL);
+    }
+    caps = gst_caps_simplify (caps);
+  }
   GST_DEBUG_OBJECT (self, "Probed caps: %" GST_PTR_FORMAT, caps);
 
   return caps;
 }
 
+GstCaps *
+gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self,
+    GstStaticCaps * static_filter)
+{
+  return gst_v4l2_decoder_enum_src_formats_full (self, static_filter, FALSE);
+}
+
+GstCaps *
+gst_v4l2_decoder_enum_all_src_formats (GstV4l2Decoder * self,
+    GstStaticCaps * static_filter)
+{
+  return gst_v4l2_decoder_enum_src_formats_full (self, static_filter, TRUE);
+}
+
+gboolean
+gst_v4l2_decoder_remove_buffers (GstV4l2Decoder * self,
+    GstPadDirection direction, guint index, guint num_buffers)
+{
+  gint ret;
+  struct v4l2_remove_buffers remove_bufs = {
+    .type = direction_to_buffer_type (self, direction),
+    .index = index,
+    .count = num_buffers,
+  };
+
+  if (!self->supports_remove_buffers)
+    return FALSE;
+
+  GST_DEBUG_OBJECT (self, "remove buffers %d from index %d", remove_bufs.count,
+      remove_bufs.index);
+  ret = ioctl (self->video_fd, VIDIOC_REMOVE_BUFS, &remove_bufs);
+  if (ret < 0) {
+    GST_ERROR_OBJECT (self, "VIDIOC_REMOVE_BUF failed: %s", g_strerror (errno));
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
 gboolean
 gst_v4l2_decoder_select_src_format (GstV4l2Decoder * self, GstCaps * caps,
-    GstVideoInfo * vinfo, GstVideoInfoDmaDrm * vinfo_drm)
+    GstVideoInfoDmaDrm * vinfo_drm)
 {
   gint ret;
   struct v4l2_format fmt = {
@@ -544,7 +668,6 @@ gst_v4l2_decoder_select_src_format (GstV4l2Decoder * self, GstCaps * caps,
   };
   GstVideoFormat format;
   guint32 pix_fmt;
-  GstVideoInfo tmp_vinfo;
   GstVideoInfoDmaDrm tmp_vinfo_drm;
 
   if (gst_caps_is_empty (caps))
@@ -556,31 +679,37 @@ gst_v4l2_decoder_select_src_format (GstV4l2Decoder * self, GstCaps * caps,
     return FALSE;
   }
 
-  gst_video_info_init (&tmp_vinfo);
-  gst_video_info_dma_drm_init (&tmp_vinfo_drm);
-
   GST_DEBUG_OBJECT (self, "Original caps: %" GST_PTR_FORMAT, caps);
+  caps = gst_v4l2_format_sort_caps (caps);
   caps = gst_caps_fixate (caps);
   GST_DEBUG_OBJECT (self, "Fixated caps: %" GST_PTR_FORMAT, caps);
 
-  if (gst_video_info_dma_drm_from_caps (&tmp_vinfo_drm, caps)) {
-    format = tmp_vinfo_drm.vinfo.finfo->format;
-  } else if (gst_video_info_from_caps (&tmp_vinfo, caps)) {
-    format = tmp_vinfo.finfo->format;
-  } else {
+  gst_video_info_dma_drm_init (&tmp_vinfo_drm);
+  if (!gst_video_info_dma_drm_from_caps (&tmp_vinfo_drm, caps) &&
+      !gst_video_info_from_caps (&tmp_vinfo_drm.vinfo, caps)) {
     GST_WARNING_OBJECT (self, "Can't transform caps into video info!");
+    gst_caps_unref (caps);
     return FALSE;
   }
+  gst_caps_unref (caps);
 
-  if (!gst_v4l2_format_from_video_format (format, &pix_fmt)) {
-    GST_ERROR_OBJECT (self, "Unsupported V4L2 pixelformat %" GST_FOURCC_FORMAT,
-        GST_FOURCC_ARGS (fmt.fmt.pix_mp.pixelformat));
+  format = tmp_vinfo_drm.vinfo.finfo->format;
+  if (!gst_v4l2_format_from_drm_format (tmp_vinfo_drm.drm_fourcc,
+          tmp_vinfo_drm.drm_modifier, &pix_fmt) &&
+      !gst_v4l2_format_from_video_format (format, &pix_fmt)) {
+    GST_ERROR_OBJECT (self,
+        "Unsupported format %s DRM %" GST_FOURCC_FORMAT ":0x%016"
+        G_GINT64_MODIFIER "x", gst_video_format_to_string (format),
+        GST_FOURCC_ARGS (tmp_vinfo_drm.drm_fourcc), tmp_vinfo_drm.drm_modifier);
     return FALSE;
   }
 
   if (pix_fmt != fmt.fmt.pix_mp.pixelformat) {
-    GST_WARNING_OBJECT (self, "Trying to use peer format: %s",
-        gst_video_format_to_string (format));
+    GST_WARNING_OBJECT (self,
+        "Trying to use peer format: %s V4L2 %" GST_FOURCC_FORMAT " DRM %"
+        GST_FOURCC_FORMAT ":0x%016" G_GINT64_MODIFIER "x",
+        gst_video_format_to_string (format), GST_FOURCC_ARGS (pix_fmt),
+        GST_FOURCC_ARGS (tmp_vinfo_drm.drm_fourcc), tmp_vinfo_drm.drm_modifier);
     fmt.fmt.pix_mp.pixelformat = pix_fmt;
 
     ret = ioctl (self->video_fd, VIDIOC_S_FMT, &fmt);
@@ -590,44 +719,54 @@ gst_v4l2_decoder_select_src_format (GstV4l2Decoder * self, GstCaps * caps,
     }
   }
 
-  if (!gst_v4l2_format_to_video_info (&fmt, vinfo)) {
+  if (!gst_v4l2_format_to_dma_drm_info (&fmt, vinfo_drm)) {
     GST_ERROR_OBJECT (self, "Unsupported V4L2 pixelformat %" GST_FOURCC_FORMAT,
         GST_FOURCC_ARGS (fmt.fmt.pix_mp.pixelformat));
     return FALSE;
   }
 
-  if (tmp_vinfo_drm.drm_fourcc) {
-    if (!gst_video_info_dma_drm_from_video_info (vinfo_drm, vinfo, 0)) {
+  if (tmp_vinfo_drm.drm_fourcc == DRM_FORMAT_INVALID) {
+    if (vinfo_drm->vinfo.finfo->format == GST_VIDEO_FORMAT_DMA_DRM) {
       GST_ERROR_OBJECT (self,
-          "Unsupported V4L2 pixelformat for DRM %" GST_FOURCC_FORMAT,
+          "V4L2 pixelformat %" GST_FOURCC_FORMAT
+          " only supported with DMA_DRM caps but non-DMA_DRM caps requested.",
           GST_FOURCC_ARGS (fmt.fmt.pix_mp.pixelformat));
       return FALSE;
     }
-  } else {
-    gst_video_info_dma_drm_init (vinfo_drm);
+
+    // Non-DMA_DRM caps, clean VideoInfo.
+    vinfo_drm->drm_fourcc = DRM_FORMAT_INVALID;
+    vinfo_drm->drm_modifier = DRM_FORMAT_MOD_INVALID;
   }
 
-  GST_INFO_OBJECT (self, "Selected format %s %ix%i",
-      gst_video_format_to_string (vinfo->finfo->format),
-      vinfo->width, vinfo->height);
+  GST_INFO_OBJECT (self,
+      "Selected format %s DRM %" GST_FOURCC_FORMAT ":0x%016" G_GINT64_MODIFIER
+      "x %ix%i", gst_video_format_to_string (format),
+      GST_FOURCC_ARGS (vinfo_drm->drm_fourcc), vinfo_drm->drm_modifier,
+      vinfo_drm->vinfo.width, vinfo_drm->vinfo.height);
 
   return TRUE;
 }
 
 GstVideoCodecState *
 gst_v4l2_decoder_set_output_state (GstVideoDecoder * decoder,
-    GstVideoInfo * vinfo, GstVideoInfoDmaDrm * vinfo_drm, guint width,
+    GstVideoInfoDmaDrm * vinfo_drm, guint width,
     guint height, GstVideoCodecState * reference)
 {
   GstVideoCodecState *state;
 
-  state = gst_video_decoder_set_output_state (decoder, vinfo->finfo->format,
-      width, height, reference);
+  state =
+      gst_video_decoder_set_output_state (decoder,
+      vinfo_drm->vinfo.finfo->format, width, height, reference);
 
   if (vinfo_drm->drm_fourcc /* != DRM_FORMAT_INVALID */ ) {
     GstVideoInfoDmaDrm tmp_vinfo_drm;
 
-    gst_video_info_dma_drm_from_video_info (&tmp_vinfo_drm, &state->info, 0);
+    gst_video_info_dma_drm_init (&tmp_vinfo_drm);
+    tmp_vinfo_drm.vinfo = state->info;
+    tmp_vinfo_drm.drm_fourcc = vinfo_drm->drm_fourcc;
+    tmp_vinfo_drm.drm_modifier = vinfo_drm->drm_modifier;
+
     state->caps = gst_video_info_dma_drm_to_caps (&tmp_vinfo_drm);
   } else {
     state->caps = gst_video_info_to_caps (&state->info);
@@ -657,14 +796,43 @@ gst_v4l2_decoder_request_buffers (GstV4l2Decoder * self,
     return ret;
   }
 
+  return reqbufs.count;
+}
+
+gint
+gst_v4l2_decoder_create_buffers (GstV4l2Decoder * self,
+    GstPadDirection direction, guint num_buffers)
+{
+  gint ret;
+  struct v4l2_create_buffers createbufs = {
+    .count = num_buffers,
+    .memory = V4L2_MEMORY_MMAP,
+    .format.type = direction_to_buffer_type (self, direction),
+  };
+
+  GST_DEBUG_OBJECT (self, "Creating %u buffers", num_buffers);
+
+  ret = ioctl (self->video_fd, VIDIOC_G_FMT, &createbufs.format);
+  if (ret < 0) {
+    GST_ERROR_OBJECT (self, "VIDIOC_G_FMT failed: %s", g_strerror (errno));
+    return ret;
+  }
+
+  ret = ioctl (self->video_fd, VIDIOC_CREATE_BUFS, &createbufs);
+  if (ret < 0) {
+    GST_ERROR_OBJECT (self, "VIDIOC_CREATE_BUFS failed: %s",
+        g_strerror (errno));
+    return ret;
+  }
+
   if (direction == GST_PAD_SINK) {
-    if (reqbufs.capabilities & V4L2_BUF_CAP_SUPPORTS_M2M_HOLD_CAPTURE_BUF)
+    if (createbufs.capabilities & V4L2_BUF_CAP_SUPPORTS_M2M_HOLD_CAPTURE_BUF)
       self->supports_holding_capture = TRUE;
     else
       self->supports_holding_capture = FALSE;
   }
 
-  return reqbufs.count;
+  return createbufs.index;
 }
 
 gboolean
@@ -999,13 +1167,11 @@ gst_v4l2_decoder_get_property (GObject * object, guint prop_id,
 /**
  * gst_v4l2_decoder_register:
  * @plugin: a #GstPlugin
- * @dec_type: A #GType for the codec
- * @class_init: The #GClassInitFunc for #dec_type
- * @instance_init: The #GInstanceInitFunc for #dec_type
+ * @dec_type: Base #GType for the codec
+ * @type_info: a #GTypeInfo for the codec
  * @element_name_tmpl: A string to use for the first codec found and as a template for the next ones.
  * @device: (transfer full) A #GstV4l2CodecDevice
  * @rank: The rank to use for the element
- * @class_data: (nullable) (transfer full) A #gpointer to pass as class_data, set to @device if null
  * @element_name (nullable) (out) Sets the pointer to the new element name
  *
  * Registers a decoder element as a subtype of @dec_type for @plugin.
@@ -1014,24 +1180,13 @@ gst_v4l2_decoder_get_property (GObject * object, guint prop_id,
  */
 void
 gst_v4l2_decoder_register (GstPlugin * plugin,
-    GType dec_type, GClassInitFunc class_init, gconstpointer class_data,
-    GInstanceInitFunc instance_init, const gchar * element_name_tmpl,
+    GType dec_type, GTypeInfo * type_info, const gchar * element_name_tmpl,
     GstV4l2CodecDevice * device, guint rank, gchar ** element_name)
 {
-  GTypeQuery type_query;
-  GTypeInfo type_info = { 0, };
   GType subtype;
   gchar *type_name;
 
-  g_type_query (dec_type, &type_query);
-  memset (&type_info, 0, sizeof (type_info));
-  type_info.class_size = type_query.class_size;
-  type_info.instance_size = type_query.instance_size;
-  type_info.class_init = class_init;
-  type_info.class_data = class_data;
-  type_info.instance_init = instance_init;
-
-  if (class_data == device)
+  if (type_info->class_data == device)
     GST_MINI_OBJECT_FLAG_SET (device, GST_MINI_OBJECT_FLAG_MAY_BE_LEAKED);
 
   /* The first decoder to be registered should use a constant name, like
@@ -1048,7 +1203,7 @@ gst_v4l2_decoder_register (GstPlugin * plugin,
     g_free (basename);
   }
 
-  subtype = g_type_register_static (dec_type, type_name, &type_info, 0);
+  subtype = g_type_register_static (dec_type, type_name, type_info, 0);
 
   if (!gst_element_register (plugin, type_name, rank, subtype)) {
     GST_WARNING ("Failed to register plugin '%s'", type_name);
@@ -1080,7 +1235,7 @@ GstV4l2Request *
 gst_v4l2_decoder_alloc_request (GstV4l2Decoder * self, guint32 frame_num,
     GstMemory * bitstream, GstBuffer * pic_buf)
 {
-  GstV4l2Request *request = gst_queue_array_pop_head (self->request_pool);
+  GstV4l2Request *request = gst_vec_deque_pop_head (self->request_pool);
   gint ret;
 
   if (!request) {
@@ -1126,7 +1281,7 @@ GstV4l2Request *
 gst_v4l2_decoder_alloc_sub_request (GstV4l2Decoder * self,
     GstV4l2Request * prev_request, GstMemory * bitstream)
 {
-  GstV4l2Request *request = gst_queue_array_pop_head (self->request_pool);
+  GstV4l2Request *request = gst_vec_deque_pop_head (self->request_pool);
   gint ret;
 
   if (!request) {
@@ -1188,6 +1343,31 @@ gst_v4l2_decoder_get_render_delay (GstV4l2Decoder * self)
   return self->render_delay;
 }
 
+/**
+ * gst_v4l2_decoder_has_remove_bufs:
+ * @self: a #GstV4l2Decoder pointer
+ *
+ * Returns: TRUE if the video decoder driver allows to remove
+ * buffers from CAPTURE queue.
+ */
+gboolean
+gst_v4l2_decoder_has_remove_bufs (GstV4l2Decoder * self)
+{
+  return self->supports_remove_buffers;
+}
+
+/**
+ * gst_v4l2_decoder_in_doc_mode:
+ * @slef: a #GstV4l2Decoder pointer
+ *
+ * Returns: %TRUE if running in documenetation genetator mode
+ */
+gboolean
+gst_v4l2_decoder_in_doc_mode (GstV4l2Decoder * self)
+{
+  return self->doc_mode;
+}
+
 GstV4l2Request *
 gst_v4l2_request_ref (GstV4l2Request * request)
 {
@@ -1232,9 +1412,9 @@ gst_v4l2_request_unref (GstV4l2Request * request)
 
     GST_DEBUG_OBJECT (decoder, "Freeing pending request %i.", request->fd);
 
-    idx = gst_queue_array_find (decoder->pending_requests, NULL, request);
+    idx = gst_vec_deque_find (decoder->pending_requests, NULL, request);
     if (idx >= 0)
-      gst_queue_array_drop_element (decoder->pending_requests, idx);
+      gst_vec_deque_drop_element (decoder->pending_requests, idx);
 
     gst_v4l2_request_free (request);
     return;
@@ -1250,7 +1430,7 @@ gst_v4l2_request_unref (GstV4l2Request * request)
     return;
   }
 
-  gst_queue_array_push_tail (decoder->request_pool, request);
+  gst_vec_deque_push_tail (decoder->request_pool, request);
   g_clear_object (&request->decoder);
 }
 
@@ -1295,15 +1475,15 @@ gst_v4l2_request_queue (GstV4l2Request * request, guint flags)
     request->hold_pic_buf = TRUE;
 
   request->pending = TRUE;
-  gst_queue_array_push_tail (decoder->pending_requests,
+  gst_vec_deque_push_tail (decoder->pending_requests,
       gst_v4l2_request_ref (request));
 
   max_pending = MAX (1, decoder->render_delay);
 
-  if (gst_queue_array_get_length (decoder->pending_requests) > max_pending) {
+  if (gst_vec_deque_get_length (decoder->pending_requests) > max_pending) {
     GstV4l2Request *pending_req;
 
-    pending_req = gst_queue_array_peek_head (decoder->pending_requests);
+    pending_req = gst_vec_deque_peek_head (decoder->pending_requests);
     gst_v4l2_request_set_done (pending_req);
   }
 
@@ -1335,7 +1515,7 @@ gst_v4l2_request_set_done (GstV4l2Request * request)
     return ret;
   }
 
-  while ((pending_req = gst_queue_array_pop_head (decoder->pending_requests))) {
+  while ((pending_req = gst_vec_deque_pop_head (decoder->pending_requests))) {
     gst_v4l2_decoder_dequeue_sink (decoder);
     g_clear_pointer (&pending_req->bitstream, gst_memory_unref);
 

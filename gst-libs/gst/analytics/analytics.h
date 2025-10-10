@@ -30,5 +30,7 @@
 #include <gst/analytics/gstanalyticsclassificationmtd.h>
 #include <gst/analytics/gstanalyticsobjectdetectionmtd.h>
 #include <gst/analytics/gstanalyticsobjecttrackingmtd.h>
+#include <gst/analytics/gstanalyticssegmentationmtd.h>
+#include <gst/analytics/gsttensormeta.h>
 
 #endif /* __ANALYTICS_H__ */

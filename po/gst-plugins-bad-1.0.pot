@@ -6,9 +6,9 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: gst-plugins-bad-1.24.6\n"
+"Project-Id-Version: gst-plugins-bad-1.26.6\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2024-07-29 16:42+0100\n"
+"POT-Creation-Date: 2025-09-14 13:14+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -17,7 +17,7 @@ msgstr ""
 "Content-Type: text/plain; charset=CHARSET\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-#: ext/curl/gstcurlhttpsrc.c:1440
+#: ext/curl/gstcurlhttpsrc.c:1442
 msgid "No URL set."
 msgstr ""
 
@@ -48,7 +48,7 @@ msgstr ""
 msgid "Could not read DVD."
 msgstr ""
 
-#: ext/smoothstreaming/gstmssdemux.c:430
+#: ext/smoothstreaming/gstmssdemux.c:439
 #: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:735
 msgid "This file contains no playable streams."
 msgstr ""
@@ -61,7 +61,7 @@ msgstr ""
 msgid "Generated file has a larger preroll time than its streams duration"
 msgstr ""
 
-#: gst/camerabin2/camerabingeneral.c:167 gst/camerabin2/gstcamerabin2.c:1885
+#: gst/camerabin2/camerabingeneral.c:167 gst/camerabin2/gstcamerabin2.c:1887
 #: gst/camerabin2/gstdigitalzoom.c:283 gst/camerabin2/gstviewfinderbin.c:275
 #, c-format
 msgid "Missing element '%s' - check your GStreamer installation."
@@ -75,7 +75,7 @@ msgstr ""
 msgid "Digitalzoom element couldn't be created"
 msgstr ""
 
-#: gst/dvdspu/gstdvdspu.c:1559
+#: gst/dvdspu/gstdvdspu.c:1570
 msgid "Subpicture format was not configured before data flow"
 msgstr ""
 
@@ -89,31 +89,31 @@ msgid "Couldn't download fragments"
 msgstr ""
 
 #: gst-libs/gst/adaptivedemux/gstadaptivedemux.c:4102
-#: gst/mpegtsdemux/mpegtsbase.c:1777
+#: gst/mpegtsdemux/mpegtsbase.c:1776
 msgid "Internal data stream error."
 msgstr ""
 
-#: sys/dvb/gstdvbsrc.c:1597 sys/dvb/gstdvbsrc.c:1811
+#: sys/dvb/gstdvbsrc.c:1644 sys/dvb/gstdvbsrc.c:1858
 #, c-format
 msgid "Device \"%s\" does not exist."
 msgstr ""
 
-#: sys/dvb/gstdvbsrc.c:1601
+#: sys/dvb/gstdvbsrc.c:1648
 #, c-format
 msgid "Could not open frontend device \"%s\"."
 msgstr ""
 
-#: sys/dvb/gstdvbsrc.c:1620
+#: sys/dvb/gstdvbsrc.c:1667
 #, c-format
 msgid "Could not get settings from frontend device \"%s\"."
 msgstr ""
 
-#: sys/dvb/gstdvbsrc.c:1637
+#: sys/dvb/gstdvbsrc.c:1684
 #, c-format
 msgid "Cannot enumerate delivery systems from frontend device \"%s\"."
 msgstr ""
 
-#: sys/dvb/gstdvbsrc.c:1815
+#: sys/dvb/gstdvbsrc.c:1862
 #, c-format
 msgid "Could not open file \"%s\" for reading."
 msgstr ""

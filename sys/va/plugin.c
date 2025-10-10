@@ -38,11 +38,15 @@
 #include "gstvah264enc.h"
 #include "gstvah265dec.h"
 #include "gstvah265enc.h"
+#include "gstvah266dec.h"
 #include "gstvajpegdec.h"
+#include "gstvajpegenc.h"
 #include "gstvampeg2dec.h"
 #include "gstvaprofile.h"
 #include "gstvavp8dec.h"
+#include "gstvavp8enc.h"
 #include "gstvavp9dec.h"
+#include "gstvavp9enc.h"
 #include "gstvavpp.h"
 
 #define GST_CAT_DEFAULT gstva_debug
@@ -121,6 +125,15 @@ plugin_register_decoders (GstPlugin * plugin, GstVaDevice * device,
               device->render_device_path);
         }
         break;
+#if VA_CHECK_VERSION(1, 22, 0)
+      case VVC:
+        if (!gst_va_h266_dec_register (plugin, device, sinkcaps, srccaps,
+                GST_RANK_NONE)) {
+          GST_WARNING ("Failed to register H266 decoder: %s",
+              device->render_device_path);
+        }
+        break;
+#endif
       case VP8:
         if (!gst_va_vp8_dec_register (plugin, device, sinkcaps, srccaps,
                 GST_VA_RANK_PRIMARY)) {
@@ -212,6 +225,27 @@ plugin_register_encoders (GstPlugin * plugin, GstVaDevice * device,
         if (!gst_va_h265_enc_register (plugin, device, sinkcaps, srccaps,
                 GST_RANK_NONE, entrypoint)) {
           GST_WARNING ("Failed to register H265 encoder: %s",
+              device->render_device_path);
+        }
+        break;
+      case VP8:
+        if (!gst_va_vp8_enc_register (plugin, device, sinkcaps, srccaps,
+                GST_RANK_NONE, entrypoint)) {
+          GST_WARNING ("Failed to register VP8 encoder: %s",
+              device->render_device_path);
+        }
+        break;
+      case VP9:
+        if (!gst_va_vp9_enc_register (plugin, device, sinkcaps, srccaps,
+                GST_RANK_NONE, entrypoint)) {
+          GST_WARNING ("Failed to register VP9 encoder: %s",
+              device->render_device_path);
+        }
+        break;
+      case JPEG:
+        if (!gst_va_jpeg_enc_register (plugin, device, sinkcaps, srccaps,
+                GST_RANK_NONE, entrypoint)) {
+          GST_WARNING ("Failed to register JPEG encoder: %s",
               device->render_device_path);
         }
         break;

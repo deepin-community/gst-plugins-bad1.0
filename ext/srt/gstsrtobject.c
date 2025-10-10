@@ -732,6 +732,8 @@ gst_srt_object_install_properties_helper (GObjectClass * gobject_class)
    * Boolean to choose whether to automatically reconnect.  If TRUE, an element
    * in caller mode will try to reconnect instead of reporting an error.
    *
+   * This will be ignored for authentication failures.
+   *
    * Since: 1.22
    *
    */
@@ -1198,19 +1200,22 @@ gst_srt_object_wait_connect (GstSRTObject * srtobject, gpointer sa,
   }
   poll_added = TRUE;
 
-  GST_DEBUG_OBJECT (srtobject->element, "Starting to listen on bind socket");
-  if (srt_listen (sock, 1) == SRT_ERROR) {
-    g_set_error (error, GST_RESOURCE_ERROR,
-        GST_RESOURCE_ERROR_OPEN_READ_WRITE, "Cannot listen on bind socket: %s",
-        srt_getlasterror_str ());
-    goto failed;
-  }
-
   srtobject->sock = sock;
 
   /* Register the SRT listen callback */
   if (srt_listen_callback (srtobject->sock,
           (srt_listen_callback_fn *) srt_listen_callback_func, srtobject)) {
+    g_set_error (error, GST_RESOURCE_ERROR,
+        GST_RESOURCE_ERROR_OPEN_READ_WRITE,
+        "Failed to register SRT listen callback: %s", srt_getlasterror_str ());
+    goto failed;
+  }
+
+  GST_DEBUG_OBJECT (srtobject->element, "Starting to listen on bind socket");
+  if (srt_listen (sock, 1) == SRT_ERROR) {
+    g_set_error (error, GST_RESOURCE_ERROR,
+        GST_RESOURCE_ERROR_OPEN_READ_WRITE, "Cannot listen on bind socket: %s",
+        srt_getlasterror_str ());
     goto failed;
   }
 
@@ -1597,6 +1602,8 @@ retry:
         g_set_error (&internal_error, GST_RESOURCE_ERROR,
             GST_RESOURCE_ERROR_NOT_AUTHORIZED,
             "Failed to authenticate: %" REASON_FORMAT, REASON_ARGS (reason));
+        /* Failure to authenticate are fatal */
+        auto_reconnect = FALSE;
       } else {
         g_set_error (&internal_error, GST_RESOURCE_ERROR,
             GST_RESOURCE_ERROR_READ,

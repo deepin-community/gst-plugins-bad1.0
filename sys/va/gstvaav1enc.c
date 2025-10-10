@@ -58,6 +58,8 @@
 #include "gstvadisplay_priv.h"
 #include "gstvapluginutils.h"
 
+#include "gst/glib-compat-private.h"
+
 GST_DEBUG_CATEGORY_STATIC (gst_va_av1enc_debug);
 #define GST_CAT_DEFAULT gst_va_av1enc_debug
 
@@ -161,7 +163,7 @@ struct _GstVaAV1Ref
 
 struct _GstVaAV1EncFrame
 {
-  GstVaEncodePicture *picture;
+  GstVaEncFrame base;
   GstAV1FrameType type;
   guint8 temporal_id;
   guint8 spatial_id;
@@ -180,6 +182,9 @@ struct _GstVaAV1EncFrame
 
   guint cached_frame_header_size;
   guint8 cached_frame_header[32];
+
+  guint repeat_frame_header_size;
+  guint8 repeat_frame_header[32];
 };
 
 struct _GstVaAV1Enc
@@ -502,12 +507,12 @@ gst_va_av1_enc_frame_new (void)
 {
   GstVaAV1EncFrame *frame;
 
-  frame = g_slice_new (GstVaAV1EncFrame);
+  frame = g_new (GstVaAV1EncFrame, 1);
   frame->frame_num = -1;
   frame->type = FRAME_TYPE_INVALID;
   frame->temporal_id = 0;
   frame->spatial_id = 0;
-  frame->picture = NULL;
+  frame->base.picture = NULL;
   frame->pyramid_level = 0;
   frame->flags = 0;
   frame->bidir_ref = FALSE;
@@ -515,6 +520,9 @@ gst_va_av1_enc_frame_new (void)
   frame->order_hint = -1;
   frame->repeat_index = -1;
   frame->cached_frame_header_size = 0;
+  memset (frame->cached_frame_header, 0, sizeof (frame->cached_frame_header));
+  frame->repeat_frame_header_size = 0;
+  memset (frame->repeat_frame_header, 0, sizeof (frame->repeat_frame_header));
 
   return frame;
 }
@@ -524,8 +532,8 @@ gst_va_av1_enc_frame_free (gpointer pframe)
 {
   GstVaAV1EncFrame *frame = pframe;
 
-  g_clear_pointer (&frame->picture, gst_va_encode_picture_free);
-  g_slice_free (GstVaAV1EncFrame, frame);
+  g_clear_pointer (&frame->base.picture, gst_va_encode_picture_free);
+  g_free (frame);
 }
 
 static gboolean
@@ -534,7 +542,7 @@ gst_va_av1_enc_new_frame (GstVaBaseEnc * base, GstVideoCodecFrame * frame)
   GstVaAV1EncFrame *frame_in;
 
   frame_in = gst_va_av1_enc_frame_new ();
-  gst_video_codec_frame_set_user_data (frame, frame_in,
+  gst_va_set_enc_frame (frame, (GstVaEncFrame *) frame_in,
       gst_va_av1_enc_frame_free);
 
   return TRUE;
@@ -1329,7 +1337,7 @@ gst_va_av1_enc_reorder_frame (GstVaBaseEnc * base, GstVideoCodecFrame * frame,
   va_frame->frame_num = self->gop.frame_num_since_kf;
   self->gop.frame_num_since_kf++;
 
-  GST_LOG_OBJECT (self, "push frame: system_frame_number %d, frame_num: %d",
+  GST_LOG_OBJECT (self, "push frame: system_frame_number %u, frame_num: %d",
       frame->system_frame_number, va_frame->frame_num);
 
   /* A new key frame force to finish the current GF group. */
@@ -1371,7 +1379,7 @@ gst_va_av1_enc_reorder_frame (GstVaBaseEnc * base, GstVideoCodecFrame * frame,
 
   if (!_av1_gf_group_push_frame (&self->gop.current_group, frame)) {
     GST_WARNING_OBJECT (base, "Failed to push the frame,"
-        " system_frame_number %d.", frame->system_frame_number);
+        " system_frame_number %u.", frame->system_frame_number);
     goto error;
   }
 
@@ -1385,7 +1393,7 @@ pop:
 finish:
   if (*out_frame) {
     va_frame = _enc_frame (*out_frame);
-    GST_LOG_OBJECT (self, "pop frame: system_frame_number %d,"
+    GST_LOG_OBJECT (self, "pop frame: system_frame_number %u,"
         " frame_num: %d, frame_type %s", (*out_frame)->system_frame_number,
         va_frame->frame_num, _av1_get_frame_type_name (va_frame->type));
   }
@@ -1395,7 +1403,7 @@ finish:
 error:
   if (frame) {
     GST_ERROR_OBJECT (base, "Failed to reorder the frame,"
-        " system_frame_number %d.", frame->system_frame_number);
+        " system_frame_number %u.", frame->system_frame_number);
   } else {
     GST_ERROR_OBJECT (base, "error when poping frame.");
   }
@@ -1483,7 +1491,7 @@ _av1_assign_ref_index (GstVaAV1Enc * self, GstVideoCodecFrame * frame)
     return FALSE;
   }
 
-  g_qsort_with_data (all_refs, ref_num, sizeof (GstVaAV1Ref),
+  g_sort_array (all_refs, ref_num, sizeof (GstVaAV1Ref),
       _av1_sort_by_frame_num, NULL);
 
   /* Assign the forward references in order of:
@@ -1940,6 +1948,7 @@ _av1_decide_profile (GstVaAV1Enc * self, guint rt_format,
       }
     }
   }
+  gst_caps_unref (allowed_caps);
 
   if (candidates->len == 0) {
     GST_ERROR_OBJECT (self, "No available profile in caps");
@@ -1985,7 +1994,7 @@ out:
   if (ret_profile != VAProfileNone)
     GST_INFO_OBJECT (self, "Decide the profile: %s",
         gst_va_profile_name (ret_profile));
-
+  g_array_unref (candidates);
   return ret_profile;
 }
 
@@ -2325,8 +2334,8 @@ _av1_setup_encoding_features (GstVaAV1Enc * self)
     /* not enable it now. */
     self->features.enable_warped_motion = FALSE;
     // (features.bits.support_warped_motion != 0);
-    self->features.enable_palette_mode =
-        (features.bits.support_palette_mode != 0);
+    self->features.enable_palette_mode = FALSE;
+    //  (features.bits.support_palette_mode != 0);
     self->features.enable_dual_filter =
         (features.bits.support_dual_filter != 0);
     self->features.enable_jnt_comp = (features.bits.support_jnt_comp != 0);
@@ -2535,7 +2544,7 @@ _av1_ensure_rate_control (GstVaAV1Enc * self)
    * speed and quality, while the others control encoding bit rate and
    * quality. The lower value has better quality(maybe bigger MV search
    * range) but slower speed, the higher value has faster speed but lower
-   * quality.
+   * quality. It is valid for all modes.
    *
    * The possible composition to control the bit rate and quality:
    *
@@ -2570,6 +2579,17 @@ _av1_ensure_rate_control (GstVaAV1Enc * self)
    *    target bit rate, and encoder will try its best to make the QP
    *    with in the ["max-qp", "min-qp"] range. Other paramters are
    *    ignored.
+   *
+   * 5. ICQ mode: "rate-control=ICQ", which is similar to CQP mode
+   *    except that its QP(qindex in AV1) may be increased or decreaed
+   *    to avoid huge bit rate fluctuation. The "qp" specifies a quality
+   *    factor as the base quality value. Other properties are ignored.
+   *
+   * 6. QVBR mode: "rate-control=QVBR", which is similar to VBR mode
+   *    with the same usage of "bitrate", "target-percentage" and
+   *    "cpb-size" properties. Besides that, the "qp"(the qindex in AV1)
+   *    specifies a quality factor as the base quality value which the
+   *    driver should try its best to meet. Other properties are ignored.
    */
 
   GstVaBaseEnc *base = GST_VA_BASE_ENC (self);
@@ -2641,7 +2661,8 @@ _av1_ensure_rate_control (GstVaAV1Enc * self)
 
   /* Calculate a bitrate if it is not set. */
   if ((self->rc.rc_ctrl_mode == VA_RC_CBR || self->rc.rc_ctrl_mode == VA_RC_VBR
-          || self->rc.rc_ctrl_mode == VA_RC_VCM) && bitrate == 0) {
+          || self->rc.rc_ctrl_mode == VA_RC_VCM
+          || self->rc.rc_ctrl_mode == VA_RC_QVBR) && bitrate == 0) {
     /* FIXME: Provide better estimation. */
     /* Choose the max value of all levels' MainCR which is 8, and x2 for
        conservative calculation. So just using a 1/16 compression ratio,
@@ -2670,15 +2691,14 @@ _av1_ensure_rate_control (GstVaAV1Enc * self)
         GST_VIDEO_INFO_FPS_D (&base->in_info)) / 1000;
 
     GST_INFO_OBJECT (self, "target bitrate computed to %u kbps", bitrate);
-
-    self->prop.bitrate = bitrate;
-    g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_BITRATE]);
   }
 
   /* Adjust the setting based on RC mode. */
   switch (self->rc.rc_ctrl_mode) {
     case VA_RC_NONE:
+    case VA_RC_ICQ:
     case VA_RC_CQP:
+      bitrate = 0;
       self->rc.max_bitrate = 0;
       self->rc.target_bitrate = 0;
       self->rc.target_percentage = 0;
@@ -2692,11 +2712,13 @@ _av1_ensure_rate_control (GstVaAV1Enc * self)
       self->rc.base_qindex = DEFAULT_BASE_QINDEX;
       break;
     case VA_RC_VBR:
-      g_assert (self->rc.target_percentage >= 10);
+      self->rc.base_qindex = DEFAULT_BASE_QINDEX;
+      /* Fall through. */
+    case VA_RC_QVBR:
+      self->rc.target_percentage = MAX (10, self->rc.target_percentage);
       self->rc.max_bitrate = (guint) gst_util_uint64_scale_int (bitrate,
           100, self->rc.target_percentage);
       self->rc.target_bitrate = bitrate;
-      self->rc.base_qindex = DEFAULT_BASE_QINDEX;
       break;
     case VA_RC_VCM:
       self->rc.max_bitrate = bitrate;
@@ -2716,14 +2738,16 @@ _av1_ensure_rate_control (GstVaAV1Enc * self)
       break;
   }
 
-  GST_DEBUG_OBJECT (self, "Max bitrate: %u bits/sec, "
-      "Target bitrate: %u bits/sec", self->rc.max_bitrate,
-      self->rc.target_bitrate);
+  GST_DEBUG_OBJECT (self, "Max bitrate: %u kbps, target bitrate: %u kbps",
+      self->rc.max_bitrate, self->rc.target_bitrate);
 
-  if (self->rc.rc_ctrl_mode != VA_RC_NONE && self->rc.rc_ctrl_mode != VA_RC_CQP)
+  if (self->rc.rc_ctrl_mode == VA_RC_CBR || self->rc.rc_ctrl_mode == VA_RC_VBR
+      || self->rc.rc_ctrl_mode == VA_RC_VCM
+      || self->rc.rc_ctrl_mode == VA_RC_QVBR)
     _av1_calculate_bitrate_hrd (self);
 
-  /* notifications */
+  /* update & notifications */
+  update_property_uint (base, &self->prop.bitrate, bitrate, PROP_BITRATE);
   update_property_uint (base, &self->prop.cpb_size, self->rc.cpb_size,
       PROP_CPB_SIZE);
   update_property_uint (base, &self->prop.target_percentage,
@@ -2744,15 +2768,17 @@ gst_va_av1_enc_reconfig (GstVaBaseEnc * base)
   GstVideoCodecState *output_state;
   GstVideoFormat format, reconf_format = GST_VIDEO_FORMAT_UNKNOWN;
   VAProfile profile;
-  gboolean do_renegotiation = TRUE, do_reopen, need_negotiation;
+  gboolean do_renegotiation = TRUE, do_reopen, need_negotiation, rc_same;
   guint max_ref_frames, max_surfaces = 0,
-      rt_format, depth = 0, chrome = 0, codedbuf_size;
+      rt_format, depth = 0, chrome = 0, codedbuf_size, latency_num;
   gint width, height;
+  GstClockTime latency;
 
   width = GST_VIDEO_INFO_WIDTH (&base->in_info);
   height = GST_VIDEO_INFO_HEIGHT (&base->in_info);
   format = GST_VIDEO_INFO_FORMAT (&base->in_info);
   codedbuf_size = base->codedbuf_size;
+  latency_num = base->preferred_output_delay + self->gop.gf_group_size - 1;
 
   need_negotiation =
       !gst_va_encoder_get_reconstruct_pool_config (base->encoder, &reconf_caps,
@@ -2774,16 +2800,27 @@ gst_va_av1_enc_reconfig (GstVaBaseEnc * base)
   if (profile == VAProfileNone)
     return FALSE;
 
+  GST_OBJECT_LOCK (self);
+  rc_same = (self->prop.rc_ctrl == self->rc.rc_ctrl_mode);
+  GST_OBJECT_UNLOCK (self);
+
   /* first check */
   do_reopen = !(base->profile == profile && base->rt_format == rt_format
       && format == reconf_format && width == base->width
-      && height == base->height && self->prop.rc_ctrl == self->rc.rc_ctrl_mode
-      && depth == self->depth && chrome == self->chrome);
+      && height == base->height && rc_same && depth == self->depth
+      && chrome == self->chrome);
 
   if (do_reopen && gst_va_encoder_is_open (base->encoder))
     gst_va_encoder_close (base->encoder);
 
   gst_va_base_enc_reset_state (base);
+
+  if (base->is_live) {
+    base->preferred_output_delay = 0;
+  } else {
+    /* FIXME: An experience value for most of the platforms. */
+    base->preferred_output_delay = 4;
+  }
 
   base->profile = profile;
   base->rt_format = rt_format;
@@ -2828,7 +2865,22 @@ gst_va_av1_enc_reconfig (GstVaBaseEnc * base)
 
   _av1_calculate_coded_size (self);
 
-  max_ref_frames = GST_AV1_NUM_REF_FRAMES + 3 /* scratch frames */ ;
+  /* Let the downstream know the new latency. */
+  if (latency_num != base->preferred_output_delay + self->gop.gf_group_size - 1) {
+    need_negotiation = TRUE;
+    latency_num = base->preferred_output_delay + self->gop.gf_group_size - 1;
+  }
+
+  /* Set the latency */
+  latency = gst_util_uint64_scale (latency_num,
+      GST_VIDEO_INFO_FPS_D (&base->in_info) * GST_SECOND,
+      GST_VIDEO_INFO_FPS_N (&base->in_info));
+  gst_video_encoder_set_latency (venc, latency, latency);
+
+  max_ref_frames = GST_AV1_NUM_REF_FRAMES;
+  max_ref_frames += base->preferred_output_delay;
+  base->min_buffers = max_ref_frames;
+  max_ref_frames += 3 /* scratch frames */ ;
 
   /* second check after calculations */
   do_reopen |=
@@ -3037,7 +3089,7 @@ _av1_add_sequence_header (GstVaAV1Enc * self, GstVaAV1EncFrame * frame,
 
   *size_offset += size;
 
-  if (!gst_va_encoder_add_packed_header (base->encoder, frame->picture,
+  if (!gst_va_encoder_add_packed_header (base->encoder, frame->base.picture,
           VAEncPackedHeaderAV1_SPS, packed_sps, size * 8, FALSE)) {
     GST_ERROR_OBJECT (self, "Failed to add packed sequence header.");
     return FALSE;
@@ -3219,8 +3271,8 @@ _av1_fill_frame_param (GstVaAV1Enc * self, GstVaAV1EncFrame * va_frame,
     .frame_width_minus_1 = base->width - 1,
     .frame_height_minus_1 = base->height - 1,
     .reconstructed_frame =
-        gst_va_encode_picture_get_reconstruct_surface (va_frame->picture),
-    .coded_buf = va_frame->picture->coded_buffer,
+        gst_va_encode_picture_get_reconstruct_surface (va_frame->base.picture),
+    .coded_buf = va_frame->base.picture->coded_buffer,
     .primary_ref_frame = primary_ref_frame,
     .order_hint = va_frame->order_hint,
     .refresh_frame_flags = refresh_frame_flags,
@@ -3342,7 +3394,7 @@ _av1_fill_frame_param (GstVaAV1Enc * self, GstVaAV1EncFrame * va_frame,
 
       pic_param->reference_frames[i] =
           gst_va_encode_picture_get_reconstruct_surface
-          (_enc_frame (self->gop.ref_list[i])->picture);
+          (_enc_frame (self->gop.ref_list[i])->base.picture);
     }
 
     for (i = 0; i < 7; i++) {
@@ -3648,7 +3700,7 @@ _av1_add_tile_group_param (GstVaAV1Enc * self, GstVaAV1EncFrame * va_frame,
     tile_group_param.tg_end = (index + 1) * div - 1;
   }
 
-  if (!gst_va_encoder_add_param (base->encoder, va_frame->picture,
+  if (!gst_va_encoder_add_param (base->encoder, va_frame->base.picture,
           VAEncSliceParameterBufferType, &tile_group_param,
           sizeof (VAEncTileGroupBufferAV1))) {
     GST_ERROR_OBJECT (self, "Failed to add one tile group parameter");
@@ -3723,14 +3775,14 @@ _av1_encode_one_frame (GstVaAV1Enc * self, GstVaAV1EncFrame * va_frame,
     }
   }
 
-  if (!gst_va_encoder_add_param (base->encoder, va_frame->picture,
+  if (!gst_va_encoder_add_param (base->encoder, va_frame->base.picture,
           VAEncPictureParameterBufferType, &pic_param, sizeof (pic_param))) {
     GST_ERROR_OBJECT (self, "Failed to create the frame parameter");
     return FALSE;
   }
 
   if ((self->packed_headers & VA_ENC_PACKED_HEADER_PICTURE) &&
-      !gst_va_encoder_add_packed_header (base->encoder, va_frame->picture,
+      !gst_va_encoder_add_packed_header (base->encoder, va_frame->base.picture,
           VAEncPackedHeaderAV1_PPS, packed_frame_hdr, frame_hdr_size * 8,
           FALSE)) {
     GST_ERROR_OBJECT (self, "Failed to add the packed frame header");
@@ -3744,7 +3796,7 @@ _av1_encode_one_frame (GstVaAV1Enc * self, GstVaAV1EncFrame * va_frame,
     }
   }
 
-  if (!gst_va_encoder_encode (base->encoder, va_frame->picture)) {
+  if (!gst_va_encoder_encode (base->encoder, va_frame->base.picture)) {
     GST_ERROR_OBJECT (self, "Encode frame error");
     return FALSE;
   }
@@ -3776,26 +3828,37 @@ static void
 _av1_add_repeat_frame_header (GstVaAV1Enc * self, GstVaAV1EncFrame * va_frame)
 {
   GstAV1FrameHeaderOBU frame_hdr = { 0, };
-  guint frame_hdr_data_size;
+  guint data_size;
+
+  data_size = sizeof (va_frame->repeat_frame_header) -
+      va_frame->repeat_frame_header_size;
 
   /* Repeat frame always shows a frame and so begins with a TD. */
-  _av1_add_td (self, va_frame);
+  if (gst_av1_bit_writer_temporal_delimiter_obu (TRUE,
+          va_frame->repeat_frame_header + va_frame->repeat_frame_header_size,
+          &data_size) != GST_AV1_BIT_WRITER_OK) {
+    GST_ERROR_OBJECT (self, "Failed to write temporal delimiter.");
+    /* The only possible failure is not enough buffer size,
+       user should ensure that. */
+    g_assert_not_reached ();
+  }
+
+  va_frame->repeat_frame_header_size += data_size;
+  data_size = sizeof (va_frame->repeat_frame_header) -
+      va_frame->repeat_frame_header_size;
 
   frame_hdr.show_existing_frame = 1;
   frame_hdr.frame_to_show_map_idx = va_frame->repeat_index;
 
-  frame_hdr_data_size = sizeof (va_frame->cached_frame_header) -
-      va_frame->cached_frame_header_size;
-
   if (gst_av1_bit_writer_frame_header_obu (&frame_hdr, &self->sequence_hdr,
           va_frame->temporal_id, va_frame->spatial_id, TRUE,
-          va_frame->cached_frame_header + va_frame->cached_frame_header_size,
-          &frame_hdr_data_size) != GST_AV1_BIT_WRITER_OK) {
+          va_frame->repeat_frame_header + va_frame->repeat_frame_header_size,
+          &data_size) != GST_AV1_BIT_WRITER_OK) {
     GST_ERROR_OBJECT (self, "Failed to write repeat frame header.");
     g_assert_not_reached ();
   }
 
-  va_frame->cached_frame_header_size += frame_hdr_data_size;
+  va_frame->repeat_frame_header_size += data_size;
 }
 
 static GstFlowReturn
@@ -3808,15 +3871,11 @@ gst_va_av1_enc_encode_frame (GstVaBaseEnc * base,
 
   if (!_av1_assign_ref_index (self, gst_frame)) {
     GST_ERROR_OBJECT (self, "Failed to assign reference for frame:"
-        "system_frame_number %d, frame_num: %d, frame_type %s",
+        "system_frame_number %u, frame_num: %d, frame_type %s",
         gst_frame->system_frame_number, va_frame->frame_num,
         _av1_get_frame_type_name (va_frame->type));
     return GST_FLOW_ERROR;
   }
-
-  memset (va_frame->cached_frame_header, 0,
-      sizeof (va_frame->cached_frame_header));
-  va_frame->cached_frame_header_size = 0;
 
   if (va_frame->type & FRAME_TYPE_REPEAT) {
     g_assert (va_frame->flags & FRAME_FLAG_ALREADY_ENCODED);
@@ -3825,8 +3884,8 @@ gst_va_av1_enc_encode_frame (GstVaBaseEnc * base,
   } else {
     guint size_offset = 0;
 
-    g_assert (va_frame->picture == NULL);
-    va_frame->picture = gst_va_encode_picture_new (base->encoder,
+    g_assert (va_frame->base.picture == NULL);
+    va_frame->base.picture = gst_va_encode_picture_new (base->encoder,
         gst_frame->input_buffer);
 
     _av1_find_ref_to_update (base, gst_frame);
@@ -3845,31 +3904,33 @@ gst_va_av1_enc_encode_frame (GstVaBaseEnc * base,
 
     /* Repeat the sequence for each key. */
     if (va_frame->frame_num == 0) {
-      if (!gst_va_base_enc_add_rate_control_parameter (base, va_frame->picture,
+      if (!gst_va_base_enc_add_rate_control_parameter (base,
+              va_frame->base.picture,
               self->rc.rc_ctrl_mode, self->rc.max_bitrate_bits,
               self->rc.target_percentage, self->rc.base_qindex,
               self->rc.min_qindex, self->rc.max_qindex, self->rc.mbbrc))
-        return FALSE;
+        return GST_FLOW_ERROR;
 
-      if (!gst_va_base_enc_add_quality_level_parameter (base, va_frame->picture,
-              self->rc.target_usage))
-        return FALSE;
+      if (!gst_va_base_enc_add_quality_level_parameter (base,
+              va_frame->base.picture, self->rc.target_usage))
+        return GST_FLOW_ERROR;
 
-      if (!gst_va_base_enc_add_frame_rate_parameter (base, va_frame->picture))
-        return FALSE;
+      if (!gst_va_base_enc_add_frame_rate_parameter (base,
+              va_frame->base.picture))
+        return GST_FLOW_ERROR;
 
-      if (!gst_va_base_enc_add_hrd_parameter (base, va_frame->picture,
+      if (!gst_va_base_enc_add_hrd_parameter (base, va_frame->base.picture,
               self->rc.rc_ctrl_mode, self->rc.cpb_length_bits))
-        return FALSE;
+        return GST_FLOW_ERROR;
 
       _av1_fill_sequence_param (self, &seq_param);
-      if (!_av1_add_sequence_param (self, va_frame->picture, &seq_param))
-        return FALSE;
+      if (!_av1_add_sequence_param (self, va_frame->base.picture, &seq_param))
+        return GST_FLOW_ERROR;
 
       _av1_fill_sequence_header (self, &seq_param);
       if ((self->packed_headers & VA_ENC_PACKED_HEADER_SEQUENCE) &&
           !_av1_add_sequence_header (self, va_frame, &size_offset))
-        return FALSE;
+        return GST_FLOW_ERROR;
     }
 
     if (!_av1_encode_one_frame (self, va_frame, size_offset)) {
@@ -3921,10 +3982,10 @@ _av1_create_tu_output_buffer (GstVaAV1Enc * self,
     }
 
     frame_size = gst_va_base_enc_copy_output_data (base,
-        frame_enc->picture, data + offset, total_sz - offset);
+        frame_enc->base.picture, data + offset, total_sz - offset);
     if (frame_size <= 0) {
       GST_ERROR_OBJECT (self, "Fails to copy the output data of "
-          "system_frame_number %d, frame_num: %d",
+          "system_frame_number %u, frame_num: %d",
           self->frames_in_tu[num]->system_frame_number, frame_enc->frame_num);
       goto error;
     }
@@ -3941,10 +4002,10 @@ _av1_create_tu_output_buffer (GstVaAV1Enc * self,
   }
 
   frame_size = gst_va_base_enc_copy_output_data (base,
-      frame_enc->picture, data + offset, total_sz - offset);
+      frame_enc->base.picture, data + offset, total_sz - offset);
   if (frame_size <= 0) {
     GST_ERROR_OBJECT (self, "Fails to copy the output data of "
-        "system_frame_number %d, frame_num: %d",
+        "system_frame_number %u, frame_num: %d",
         last_frame->system_frame_number, frame_enc->frame_num);
     goto error;
   }
@@ -4017,16 +4078,16 @@ gst_va_av1_enc_prepare_output (GstVaBaseEnc * base,
     g_assert ((frame_enc->flags & FRAME_FLAG_FRAME_IN_TU_CACHE) == 0);
 
     buf = gst_video_encoder_allocate_output_buffer
-        (GST_VIDEO_ENCODER_CAST (base), frame_enc->cached_frame_header_size);
+        (GST_VIDEO_ENCODER_CAST (base), frame_enc->repeat_frame_header_size);
     if (!buf) {
       GST_ERROR_OBJECT (base, "Failed to create output buffer");
       return FALSE;
     }
 
-    sz = gst_buffer_fill (buf, 0, frame_enc->cached_frame_header,
-        frame_enc->cached_frame_header_size);
+    sz = gst_buffer_fill (buf, 0, frame_enc->repeat_frame_header,
+        frame_enc->repeat_frame_header_size);
 
-    if (sz != frame_enc->cached_frame_header_size) {
+    if (sz != frame_enc->repeat_frame_header_size) {
       GST_ERROR_OBJECT (base, "Failed to write output buffer for repeat frame");
       gst_clear_buffer (&buf);
       return FALSE;
@@ -4035,7 +4096,7 @@ gst_va_av1_enc_prepare_output (GstVaBaseEnc * base,
     if (self->frames_in_tu_num > 0) {
       buf = _av1_create_tu_output_buffer (self, frame);
     } else {
-      buf = gst_va_base_enc_create_output_buffer (base, frame_enc->picture,
+      buf = gst_va_base_enc_create_output_buffer (base, frame_enc->base.picture,
           (frame_enc->cached_frame_header_size > 0 ?
               frame_enc->cached_frame_header : NULL),
           frame_enc->cached_frame_header_size);
@@ -4123,12 +4184,13 @@ gst_va_av1_enc_set_property (GObject * object, guint prop_id,
 {
   GstVaAV1Enc *const self = GST_VA_AV1_ENC (object);
   GstVaBaseEnc *base = GST_VA_BASE_ENC (self);
+  GstVaEncoder *encoder = NULL;
+  gboolean no_effect;
 
-  if (base->encoder && gst_va_encoder_is_open (base->encoder)) {
-    GST_ERROR_OBJECT (object,
-        "failed to set any property after encoding started");
-    return;
-  }
+  gst_object_replace ((GstObject **) (&encoder), (GstObject *) base->encoder);
+  no_effect = (encoder && gst_va_encoder_is_open (encoder));
+  if (encoder)
+    gst_object_unref (encoder);
 
   GST_OBJECT_LOCK (self);
 
@@ -4150,6 +4212,8 @@ gst_va_av1_enc_set_property (GObject * object, guint prop_id,
       break;
     case PROP_QP:
       self->prop.qp = g_value_get_uint (value);
+      no_effect = FALSE;
+      g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
       break;
     case PROP_MAX_QP:
       self->prop.max_qp = g_value_get_uint (value);
@@ -4159,6 +4223,8 @@ gst_va_av1_enc_set_property (GObject * object, guint prop_id,
       break;
     case PROP_BITRATE:
       self->prop.bitrate = g_value_get_uint (value);
+      no_effect = FALSE;
+      g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
       break;
     case PROP_NUM_TILE_COLS:
       self->prop.num_tile_cols = g_value_get_uint (value);
@@ -4171,15 +4237,23 @@ gst_va_av1_enc_set_property (GObject * object, guint prop_id,
       break;
     case PROP_TARGET_USAGE:
       self->prop.target_usage = g_value_get_uint (value);
+      no_effect = FALSE;
+      g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
       break;
     case PROP_TARGET_PERCENTAGE:
       self->prop.target_percentage = g_value_get_uint (value);
+      no_effect = FALSE;
+      g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
       break;
     case PROP_CPB_SIZE:
       self->prop.cpb_size = g_value_get_uint (value);
+      no_effect = FALSE;
+      g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
       break;
     case PROP_RATE_CONTROL:
       self->prop.rc_ctrl = g_value_get_enum (value);
+      no_effect = FALSE;
+      g_atomic_int_set (&GST_VA_BASE_ENC (self)->reconf, TRUE);
       break;
     case PROP_MBBRC:{
       /* Macroblock-level rate control.
@@ -4205,6 +4279,13 @@ gst_va_av1_enc_set_property (GObject * object, guint prop_id,
   }
 
   GST_OBJECT_UNLOCK (self);
+
+  if (no_effect) {
+#ifndef GST_DISABLE_GST_DEBUG
+    GST_WARNING_OBJECT (self, "Property `%s` change may not take effect "
+        "until the next encoder reconfig.", pspec->name);
+#endif
+  }
 }
 
 static void
@@ -4290,6 +4371,8 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
   gchar *long_name;
   const gchar *name, *desc;
   gint n_props = N_PROPERTIES;
+  GParamFlags param_flags =
+      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT;
 
   if (cdata->entrypoint == VAEntrypointEncSlice) {
     desc = "VA-API based AV1 video encoder";
@@ -4379,8 +4462,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
   properties[PROP_KEYFRAME_INT] = g_param_spec_uint ("key-int-max",
       "Key frame maximal interval",
       "The maximal distance between two keyframes. It decides the size of GOP"
-      " (0: auto-calculate)", 0, MAX_KEY_FRAME_INTERVAL, 60,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      " (0: auto-calculate)", 0, MAX_KEY_FRAME_INTERVAL, 60, param_flags);
 
   /**
    * GstVaAV1Enc:gf-group-size:
@@ -4390,8 +4472,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
   properties[PROP_GOLDEN_GROUP_SIZE] = g_param_spec_uint ("gf-group-size",
       "Golden frame group size",
       "The size of the golden frame group.",
-      1, MAX_GF_GROUP_SIZE, MAX_GF_GROUP_SIZE,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      1, MAX_GF_GROUP_SIZE, MAX_GF_GROUP_SIZE, param_flags);
 
   /**
    * GstVaAV1Enc:ref-frames:
@@ -4401,7 +4482,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
   properties[PROP_NUM_REF_FRAMES] = g_param_spec_uint ("ref-frames",
       "Number of Reference Frames",
       "Number of reference frames, including both the forward and the backward",
-      0, 7, 7, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      0, 7, 7, param_flags);
 
   /**
    * GstVaAV1Enc:hierarchical-level:
@@ -4412,8 +4493,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
       g_param_spec_uint ("hierarchical-level", "The hierarchical level",
       "The hierarchical level for golden frame group. Setting to 1 disables "
       "all future reference", 1, HIGHEST_PYRAMID_LEVELS,
-      HIGHEST_PYRAMID_LEVELS,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      HIGHEST_PYRAMID_LEVELS, param_flags);
 
   /**
    * GstVaAV1Enc:superblock-128x128:
@@ -4422,8 +4502,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
    */
   properties[PROP_128X128_SUPERBLOCK] =
       g_param_spec_boolean ("superblock-128x128", "128x128 superblock",
-      "Enable the 128x128 superblock mode", FALSE,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      "Enable the 128x128 superblock mode", FALSE, param_flags);
 
   /**
    * GstVaAV1Enc:min-qp:
@@ -4431,8 +4510,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
    * The minimum quantizer value.
    */
   properties[PROP_MIN_QP] = g_param_spec_uint ("min-qp", "Minimum QP",
-      "Minimum quantizer value for each frame", 0, 255, 0,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      "Minimum quantizer value for each frame", 0, 255, 0, param_flags);
 
   /**
    * GstVaAV1Enc:max-qp:
@@ -4440,8 +4518,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
    * The maximum quantizer value.
    */
   properties[PROP_MAX_QP] = g_param_spec_uint ("max-qp", "Maximum QP",
-      "Maximum quantizer value for each frame", 1, 255, 255,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      "Maximum quantizer value for each frame", 1, 255, 255, param_flags);
 
   /**
    * GstVaAV1Enc:qp:
@@ -4449,8 +4526,10 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
    * The basic quantizer value for all frames.
    */
   properties[PROP_QP] = g_param_spec_uint ("qp", "The frame QP",
-      "The basic quantizer value for all frames.", 0, 255, DEFAULT_BASE_QINDEX,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      "In CQP mode, it specifies the basic quantizer value for all frames. "
+      "In ICQ and QVBR modes, it specifies a quality factor. In other "
+      "modes, it is ignored", 0, 255, DEFAULT_BASE_QINDEX,
+      param_flags | GST_PARAM_MUTABLE_PLAYING);
 
   /**
    * GstVaAV1Enc:bitrate:
@@ -4466,8 +4545,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
    */
   properties[PROP_BITRATE] = g_param_spec_uint ("bitrate", "Bitrate (kbps)",
       "The desired bitrate expressed in kbps (0: auto-calculate)",
-      0, 2000 * 1024, 0,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      0, 2000 * 1024, 0, param_flags | GST_PARAM_MUTABLE_PLAYING);
 
   /**
    * GstVaAV1Enc:target-percentage:
@@ -4481,8 +4559,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
   properties[PROP_TARGET_PERCENTAGE] = g_param_spec_uint ("target-percentage",
       "target bitrate percentage",
       "The percentage for 'target bitrate'/'maximum bitrate' (Only in VBR)",
-      50, 100, 66,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      50, 100, 66, param_flags | GST_PARAM_MUTABLE_PLAYING);
 
   /**
    * GstVaAV1Enc:cpb-size:
@@ -4491,8 +4568,8 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
    */
   properties[PROP_CPB_SIZE] = g_param_spec_uint ("cpb-size",
       "max CPB size in Kb",
-      "The desired max CPB size in Kb (0: auto-calculate)", 0, 2000 * 1024, 0,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      "The desired max CPB size in Kb (0: auto-calculate)",
+      0, 2000 * 1024, 0, param_flags | GST_PARAM_MUTABLE_PLAYING);
 
   /**
    * GstVaAV1Enc:target-usage:
@@ -4504,7 +4581,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
   properties[PROP_TARGET_USAGE] = g_param_spec_uint ("target-usage",
       "target usage",
       "The target usage to control and balance the encoding speed/quality",
-      1, 7, 4, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      1, 7, 4, param_flags | GST_PARAM_MUTABLE_PLAYING);
 
   /**
    * GstVaAV1Enc:num-tile-cols:
@@ -4514,7 +4591,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
   properties[PROP_NUM_TILE_COLS] = g_param_spec_uint ("num-tile-cols",
       "number of tile columns",
       "The number of columns for tile encoding", 1, GST_AV1_MAX_TILE_COLS, 1,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      param_flags);
 
   /**
    * GstVaAV1Enc:num-tile-rows:
@@ -4524,7 +4601,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
   properties[PROP_NUM_TILE_ROWS] = g_param_spec_uint ("num-tile-rows",
       "number of tile rows",
       "The number of rows for tile encoding", 1, GST_AV1_MAX_TILE_ROWS, 1,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      param_flags);
 
   /**
    * GstVaAV1Enc:tile-groups:
@@ -4533,8 +4610,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
    */
   properties[PROP_TILE_GROUPS] = g_param_spec_uint ("tile-groups",
       "Number of tile groups", "Number of tile groups for each frame",
-      1, GST_AV1_MAX_TILE_COLS * GST_AV1_MAX_TILE_ROWS, 1,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      1, GST_AV1_MAX_TILE_COLS * GST_AV1_MAX_TILE_ROWS, 1, param_flags);
 
   /**
    * GstVaAV1Enc:mbbrc:
@@ -4545,8 +4621,7 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
   properties[PROP_MBBRC] = g_param_spec_enum ("mbbrc",
       "Macroblock level Bitrate Control",
       "Macroblock level Bitrate Control. It is not compatible with CQP",
-      GST_TYPE_VA_FEATURE, GST_VA_FEATURE_AUTO,
-      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+      GST_TYPE_VA_FEATURE, GST_VA_FEATURE_AUTO, param_flags);
 
   if (vaav1enc_class->rate_control_type > 0) {
     properties[PROP_RATE_CONTROL] = g_param_spec_enum ("rate-control",
@@ -4554,24 +4629,14 @@ gst_va_av1_enc_class_init (gpointer g_klass, gpointer class_data)
         "The desired rate control mode for the encoder",
         vaav1enc_class->rate_control_type,
         vaav1enc_class->rate_control[0].value,
-        GST_PARAM_CONDITIONALLY_AVAILABLE | G_PARAM_READWRITE |
-        G_PARAM_STATIC_STRINGS | G_PARAM_CONSTRUCT);
+        GST_PARAM_CONDITIONALLY_AVAILABLE | GST_PARAM_MUTABLE_PLAYING
+        | param_flags);
   } else {
     n_props--;
     properties[PROP_RATE_CONTROL] = NULL;
   }
 
   g_object_class_install_properties (object_class, n_props, properties);
-
-  /**
-   * GstVaFeature:
-   * @GST_VA_FEATURE_DISABLED: The feature is disabled.
-   * @GST_VA_FEATURE_ENABLED: The feature is enabled.
-   * @GST_VA_FEATURE_AUTO: The feature is enabled automatically.
-   *
-   * Since: 1.22
-   */
-  gst_type_mark_as_plugin_api (GST_TYPE_VA_FEATURE, 0);
 }
 
 static GstCaps *

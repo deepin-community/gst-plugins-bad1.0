@@ -232,7 +232,7 @@ gst_vtdec_start (GstVideoDecoder * decoder)
   vtdec->is_flushing = FALSE;
   vtdec->is_draining = FALSE;
   vtdec->downstream_ret = GST_FLOW_OK;
-  vtdec->reorder_queue = gst_queue_array_new (0);
+  vtdec->reorder_queue = gst_vec_deque_new (0);
 
   /* Create the output task, but pause it immediately */
   vtdec->pause_task = TRUE;
@@ -262,10 +262,10 @@ gst_vtdec_stop (GstVideoDecoder * decoder)
   gst_vtdec_drain_decoder (GST_VIDEO_DECODER_CAST (vtdec), TRUE);
   vtdec->downstream_ret = GST_FLOW_FLUSHING;
 
-  while ((frame = gst_queue_array_pop_head (vtdec->reorder_queue))) {
+  while ((frame = gst_vec_deque_pop_head (vtdec->reorder_queue))) {
     gst_video_decoder_release_frame (decoder, frame);
   }
-  gst_queue_array_free (vtdec->reorder_queue);
+  gst_vec_deque_free (vtdec->reorder_queue);
   vtdec->reorder_queue = NULL;
 
   gst_pad_stop_task (GST_VIDEO_DECODER_SRC_PAD (decoder));
@@ -303,10 +303,9 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
   GstVideoCodecFrame *frame;
   GstFlowReturn ret = GST_FLOW_OK;
   GstVideoDecoder *decoder = GST_VIDEO_DECODER (vtdec);
-  gboolean is_flushing;
 
   g_mutex_lock (&vtdec->queue_mutex);
-  while (gst_queue_array_is_empty (vtdec->reorder_queue)
+  while (gst_vec_deque_is_empty (vtdec->reorder_queue)
       && !vtdec->pause_task && !vtdec->is_flushing && !vtdec->is_draining) {
     g_cond_wait (&vtdec->queue_cond, &vtdec->queue_mutex);
   }
@@ -319,9 +318,11 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
 
   /* push a buffer if there are enough frames to guarantee 
    * that we push in PTS order, or if we're draining/flushing */
-  while ((gst_queue_array_get_length (vtdec->reorder_queue) >=
+  while ((gst_vec_deque_get_length (vtdec->reorder_queue) >=
           vtdec->dbp_size) || vtdec->is_flushing || vtdec->is_draining) {
-    frame = gst_queue_array_pop_head (vtdec->reorder_queue);
+    gboolean is_flushing;
+
+    frame = gst_vec_deque_pop_head (vtdec->reorder_queue);
     is_flushing = vtdec->is_flushing;
     g_cond_signal (&vtdec->queue_cond);
     g_mutex_unlock (&vtdec->queue_mutex);
@@ -358,22 +359,25 @@ gst_vtdec_output_loop (GstVtdec * vtdec)
 
   g_mutex_unlock (&vtdec->queue_mutex);
   GST_VIDEO_DECODER_STREAM_LOCK (vtdec);
-  vtdec->downstream_ret = ret;
 
   /* We need to empty the queue immediately so that session_output_callback() 
    * can push out the current buffer, otherwise it can deadlock */
   if (ret != GST_FLOW_OK) {
     g_mutex_lock (&vtdec->queue_mutex);
 
-    while ((frame = gst_queue_array_pop_head (vtdec->reorder_queue))) {
+    while ((frame = gst_vec_deque_pop_head (vtdec->reorder_queue))) {
       GST_LOG_OBJECT (vtdec, "flushing frame %d", frame->system_frame_number);
       gst_video_decoder_release_frame (decoder, frame);
     }
 
+    if (vtdec->is_flushing && ret == GST_FLOW_FLUSHING) {
+      ret = GST_FLOW_OK;
+    }
     g_cond_signal (&vtdec->queue_cond);
     g_mutex_unlock (&vtdec->queue_mutex);
   }
 
+  vtdec->downstream_ret = ret;
   GST_VIDEO_DECODER_STREAM_UNLOCK (vtdec);
 
   if (ret != GST_FLOW_OK) {
@@ -555,7 +559,7 @@ gst_vtdec_negotiate (GstVideoDecoder * decoder)
         GST_CAPS_FEATURE_MEMORY_GL_MEMORY);
     if (output_textures)
       gst_caps_set_simple (output_state->caps, "texture-target", G_TYPE_STRING,
-#if !HAVE_IOS
+#ifndef HAVE_IOS
           GST_GL_TEXTURE_TARGET_RECTANGLE_STR,
 #else
           GST_GL_TEXTURE_TARGET_2D_STR,
@@ -643,17 +647,9 @@ gst_vtdec_negotiate (GstVideoDecoder * decoder)
       gst_vulkan_ensure_element_data (GST_ELEMENT (vtdec), NULL,
           &vtdec->instance);
 
-      if (!gst_vulkan_device_run_context_query (GST_ELEMENT (vtdec),
-              &vtdec->device)) {
-        GError *error = NULL;
-        GST_DEBUG_OBJECT (vtdec, "No device retrieved from peer elements");
-        if (!(vtdec->device =
-                gst_vulkan_instance_create_device (vtdec->instance, &error))) {
-          GST_ELEMENT_ERROR (vtdec, RESOURCE, NOT_FOUND,
-              ("Failed to create vulkan device"), ("%s", error->message));
-          g_clear_error (&error);
-          return FALSE;
-        }
+      if (!gst_vulkan_ensure_element_device (GST_ELEMENT (vtdec),
+              vtdec->instance, &vtdec->device, 0)) {
+        return FALSE;
       }
 
       GST_INFO_OBJECT (vtdec, "pushing vulkan images, device %" GST_PTR_FORMAT
@@ -685,6 +681,7 @@ gst_vtdec_negotiate (GstVideoDecoder * decoder)
 static gboolean
 gst_vtdec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
 {
+  gboolean negotiate_now = TRUE;
   GstStructure *structure;
   CMVideoCodecType cm_format = 0;
   CMFormatDescriptionRef format_description = NULL;
@@ -718,15 +715,20 @@ gst_vtdec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
   if ((cm_format == kCMVideoCodecType_H264
           || cm_format == kCMVideoCodecType_HEVC)
       && state->codec_data == NULL) {
-    GST_INFO_OBJECT (vtdec, "no codec data, wait for one");
-    return TRUE;
+    GST_INFO_OBJECT (vtdec, "waiting for codec_data before negotiation");
+    negotiate_now = FALSE;
   }
 
   gst_video_info_from_caps (&vtdec->video_info, state->caps);
 
-  if (!gst_vtdec_compute_dpb_size (vtdec, cm_format, state->codec_data))
+  if (negotiate_now &&
+      !gst_vtdec_compute_dpb_size (vtdec, cm_format, state->codec_data)) {
+    GST_INFO_OBJECT (vtdec, "Failed to compute DPB size");
     return FALSE;
-  gst_vtdec_set_latency (vtdec);
+  }
+
+  if (negotiate_now)
+    gst_vtdec_set_latency (vtdec);
 
   if (state->codec_data) {
     format_description = create_format_description_from_codec_data (vtdec,
@@ -743,7 +745,7 @@ gst_vtdec_set_format (GstVideoDecoder * decoder, GstVideoCodecState * state)
     gst_video_codec_state_unref (vtdec->input_state);
   vtdec->input_state = gst_video_codec_state_ref (state);
 
-  return gst_vtdec_negotiate (decoder);
+  return negotiate_now ? gst_vtdec_negotiate (decoder) : TRUE;
 }
 
 static gboolean
@@ -1278,16 +1280,17 @@ gst_vtdec_session_output_callback (void *decompression_output_ref_con,
    * which will lock up if we decide to wait in this callback, creating a deadlock. */
   push_anyway = vtdec->is_flushing || vtdec->is_draining;
   while (!push_anyway
-      && gst_queue_array_get_length (vtdec->reorder_queue) >
+      && gst_vec_deque_get_length (vtdec->reorder_queue) >
       vtdec->dbp_size * 2 + 1) {
     g_cond_wait (&vtdec->queue_cond, &vtdec->queue_mutex);
     push_anyway = vtdec->is_flushing || vtdec->is_draining;
   }
 
-  gst_queue_array_push_sorted (vtdec->reorder_queue, frame, sort_frames_by_pts,
+  gst_vec_deque_push_sorted (vtdec->reorder_queue, frame, sort_frames_by_pts,
       NULL);
-  GST_LOG ("pushed frame %d, queue length %d", frame->decode_frame_number,
-      gst_queue_array_get_length (vtdec->reorder_queue));
+  GST_LOG ("pushed frame %d, queue length %" G_GSIZE_FORMAT,
+      frame->decode_frame_number,
+      gst_vec_deque_get_length (vtdec->reorder_queue));
   g_cond_signal (&vtdec->queue_cond);
   g_mutex_unlock (&vtdec->queue_mutex);
 }
@@ -1384,6 +1387,10 @@ get_dpb_max_mb_s_from_level (GstVtdec * vtdec, int level)
     case 51:
     case 52:
       return 184320;
+    case 60:
+    case 61:
+    case 62:
+      return 696320;
     default:
       GST_ERROR_OBJECT (vtdec, "unknown level %d", level);
       return -1;

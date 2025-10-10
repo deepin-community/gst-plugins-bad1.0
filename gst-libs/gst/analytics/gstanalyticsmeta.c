@@ -111,10 +111,12 @@ typedef struct _GstAnalyticsRelationMeta
 static guint
 gst_analytics_relation_meta_get_next_id (GstAnalyticsRelationMeta * meta);
 
+static void
+gst_analytics_relation_meta_clear (GstBuffer * buffer, GstMeta * meta);
 
 static GstAnalyticsRelatableMtdData *
-gst_analytics_relation_meta_get_mtd_data_internal (GstAnalyticsRelationMeta *
-    meta, guint an_meta_id)
+gst_analytics_relation_meta_get_mtd_data_internal (const
+    GstAnalyticsRelationMeta * meta, guint an_meta_id)
 {
   GstAnalyticsRelatableMtdData *rv;
   g_return_val_if_fail (meta, NULL);
@@ -130,7 +132,6 @@ gst_analytics_relation_meta_get_mtd_data_internal (GstAnalyticsRelationMeta *
 
 /**
  * gst_analytics_mtd_get_mtd_type:
- *
  * @instance: Instance of #GstAnalyticsMtd
  * Get analysis result type.
  *
@@ -138,11 +139,12 @@ gst_analytics_relation_meta_get_mtd_data_internal (GstAnalyticsRelationMeta *
  * Since: 1.24
  */
 GstAnalyticsMtdType
-gst_analytics_mtd_get_mtd_type (GstAnalyticsMtd * handle)
+gst_analytics_mtd_get_mtd_type (const GstAnalyticsMtd * instance)
 {
   GstAnalyticsRelatableMtdData *rlt;
-  rlt = gst_analytics_relation_meta_get_mtd_data_internal (handle->meta,
-      handle->id);
+
+  rlt = gst_analytics_relation_meta_get_mtd_data_internal (instance->meta,
+      instance->id);
 
   g_return_val_if_fail (rlt != NULL, 0);
 
@@ -159,9 +161,9 @@ gst_analytics_mtd_get_mtd_type (GstAnalyticsMtd * handle)
  * Since: 1.24
  */
 guint
-gst_analytics_mtd_get_id (GstAnalyticsMtd * handle)
+gst_analytics_mtd_get_id (const GstAnalyticsMtd * instance)
 {
-  return handle->id;
+  return instance->id;
 }
 
 /**
@@ -174,11 +176,13 @@ gst_analytics_mtd_get_id (GstAnalyticsMtd * handle)
  * Since: 1.24
  */
 gsize
-gst_analytics_mtd_get_size (GstAnalyticsMtd * handle)
+gst_analytics_mtd_get_size (const GstAnalyticsMtd * instance)
 {
   GstAnalyticsRelatableMtdData *rlt;
-  rlt = gst_analytics_relation_meta_get_mtd_data_internal (handle->meta,
-      handle->id);
+
+  rlt = gst_analytics_relation_meta_get_mtd_data_internal (instance->meta,
+      instance->id);
+
   if (rlt == NULL) {
     GST_CAT_ERROR (GST_CAT_AN_RELATION, "Invalid parameter");
     return 0;
@@ -220,7 +224,7 @@ gst_analytics_mtd_type_get_name (GstAnalyticsMtdType type)
  * Since: 1.24
  */
 gsize
-gst_analytics_relation_get_length (GstAnalyticsRelationMeta * instance)
+gst_analytics_relation_get_length (const GstAnalyticsRelationMeta * instance)
 {
   gsize rv;
   g_return_val_if_fail (instance, 0);
@@ -344,6 +348,8 @@ gst_analytics_relation_meta_free (GstMeta * meta, GstBuffer * buffer)
       "Content analysis meta-data(%p) freed for buffer(%p)",
       (gpointer) rmeta, (gpointer) buffer);
 
+  gst_analytics_relation_meta_clear (buffer, meta);
+
   g_free (rmeta->analysis_results);
   g_free (rmeta->adj_mat);
   g_free (rmeta->mtd_data_lookup);
@@ -440,6 +446,19 @@ static void
 gst_analytics_relation_meta_clear (GstBuffer * buffer, GstMeta * meta)
 {
   GstAnalyticsRelationMeta *rmeta = (GstAnalyticsRelationMeta *) meta;
+  GstAnalyticsRelatableMtdData *rlt_mtd_data = NULL;
+
+  for (gsize index = 0; index < rmeta->length; index++) {
+    rlt_mtd_data = (GstAnalyticsRelatableMtdData *)
+        (rmeta->mtd_data_lookup[index] + rmeta->analysis_results);
+    if (rlt_mtd_data->impl && rlt_mtd_data->impl->mtd_meta_clear) {
+      GstAnalyticsMtd mtd;
+      mtd.id = rlt_mtd_data->id;
+      mtd.meta = rmeta;
+      rlt_mtd_data->impl->mtd_meta_clear (buffer, &mtd);
+    }
+  }
+
   gsize adj_mat_data_size =
       (sizeof (guint8) * rmeta->rel_order * rmeta->rel_order);
 
@@ -581,7 +600,7 @@ gst_analytics_relation_meta_get_next_id (GstAnalyticsRelationMeta * meta)
  * Since: 1.24
  */
 GstAnalyticsRelTypes
-gst_analytics_relation_meta_get_relation (GstAnalyticsRelationMeta * meta,
+gst_analytics_relation_meta_get_relation (const GstAnalyticsRelationMeta * meta,
     guint an_meta_first_id, guint an_meta_second_id)
 {
   GstAnalyticsRelTypes types = GST_ANALYTICS_REL_TYPE_NONE;
@@ -630,7 +649,7 @@ gboolean
 gst_analytics_relation_meta_set_relation (GstAnalyticsRelationMeta * meta,
     GstAnalyticsRelTypes type, guint an_meta_first_id, guint an_meta_second_id)
 {
-  g_return_val_if_fail (type < GST_ANALYTICS_REL_TYPE_LAST, FALSE);
+  g_return_val_if_fail (type <= 0xFF, FALSE);
   g_return_val_if_fail (meta, FALSE);
   if (an_meta_first_id >= meta->rel_order
       || an_meta_second_id >= meta->rel_order) {
@@ -673,7 +692,7 @@ gst_analytics_relation_meta_set_relation (GstAnalyticsRelationMeta * meta,
  * Since: 1.24
  */
 gboolean
-gst_analytics_relation_meta_exist (GstAnalyticsRelationMeta * rmeta,
+gst_analytics_relation_meta_exist (const GstAnalyticsRelationMeta * rmeta,
     guint an_meta_first_id,
     guint an_meta_second_id,
     gint max_relation_span,
@@ -863,7 +882,7 @@ gst_buffer_get_analytics_relation_meta (GstBuffer * buffer)
  * @meta: Instance
  * @impl: Implementation of relatable (#GstAnalyticsRelatableMtd)
  * @size: Size required
- * @rlt_mtd: Updated handle
+ * @rlt_mtd: (out caller-allocates)(nullable): Updated handle
  *
  * Add a relatable metadata to @meta. This method is meant to be used by
  * new struct sub-classing GstAnalyticsRelatableMtd.
@@ -925,8 +944,10 @@ gst_analytics_relation_meta_add_mtd (GstAnalyticsRelationMeta * meta,
     meta->mtd_data_lookup[dest->id] = meta->offset;
     meta->offset += object_size;
     meta->length++;
-    rlt_mtd->id = dest->id;
-    rlt_mtd->meta = meta;
+    if (rlt_mtd) {
+      rlt_mtd->id = dest->id;
+      rlt_mtd->meta = meta;
+    }
     GST_CAT_TRACE (GST_CAT_AN_RELATION, "Add %p relatable type=%s (%"
         G_GSIZE_FORMAT " / %" G_GSIZE_FORMAT ").", dest,
         impl->name, new_size, meta->max_size);
@@ -997,7 +1018,7 @@ gst_analytics_relation_meta_get_mtd (GstAnalyticsRelationMeta * meta,
  * Since: 1.24
  */
 gpointer
-gst_analytics_relation_meta_get_mtd_data (GstAnalyticsRelationMeta *
+gst_analytics_relation_meta_get_mtd_data (const GstAnalyticsRelationMeta *
     meta, guint an_meta_id)
 {
   GstAnalyticsRelatableMtdData *rv =
@@ -1016,7 +1037,7 @@ gst_analytics_relation_meta_get_mtd_data (GstAnalyticsRelationMeta *
  * @state: (inout) (not nullable): Opaque data to store state of the query.
  *    If @state point to NULL, the first analytics-metadata directly related
  *    to @an_meta_id will be set in @rlt_mtd. Doesn't need to be free.
- * @rlt_mtd: Handle updated to directly related relatable meta.
+ * @rlt_mtd: (out caller-allocates)(not nullable): Handle updated to directly related relatable meta.
  *
  * Returns: TRUE if @rlt_mtd was updated, other wise FALSE
  * Since: 1.24
@@ -1088,7 +1109,7 @@ gst_analytics_relation_meta_get_direct_related (GstAnalyticsRelationMeta * meta,
  *    free it.
  * @type: Type of GstAnalyticsMtd to iterate on or use
  *  %GST_ANALYTICS_MTD_TYPE_ANY for any.
- * @rlt_mtd: Handle updated to iterated GstAnalyticsRelatableMtd.
+ * @rlt_mtd: (out caller-allocates)(not nullable): Handle updated to iterated GstAnalyticsRelatableMtd.
  *
  * Returns: FALSE if end was reached and iteration is completed.
  * Since: 1.24

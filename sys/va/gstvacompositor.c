@@ -262,6 +262,7 @@ struct _GstVaCompositor
   GstBufferPool *other_pool;    /* downstream pool */
 
   guint32 scale_method;
+  guint32 interpolation_method;
 };
 
 struct CData
@@ -274,6 +275,7 @@ enum
 {
   PROP_DEVICE_PATH = 1,
   PROP_SCALE_METHOD,
+  PROP_INTERPOLATION_METHOD,
   N_PROPERTIES
 };
 
@@ -291,6 +293,13 @@ gst_va_compositor_set_property (GObject * object, guint prop_id,
     {
       GST_OBJECT_LOCK (object);
       self->scale_method = g_value_get_enum (value);
+      GST_OBJECT_UNLOCK (object);
+      break;
+    }
+    case PROP_INTERPOLATION_METHOD:
+    {
+      GST_OBJECT_LOCK (object);
+      self->interpolation_method = g_value_get_enum (value);
       GST_OBJECT_UNLOCK (object);
       break;
     }
@@ -322,6 +331,13 @@ gst_va_compositor_get_property (GObject * object, guint prop_id,
     {
       GST_OBJECT_LOCK (object);
       g_value_set_enum (value, self->scale_method);
+      GST_OBJECT_UNLOCK (object);
+      break;
+    }
+    case PROP_INTERPOLATION_METHOD:
+    {
+      GST_OBJECT_LOCK (object);
+      g_value_set_enum (value, self->interpolation_method);
       GST_OBJECT_UNLOCK (object);
       break;
     }
@@ -420,8 +436,7 @@ gst_va_compositor_set_context (GstElement * element, GstContext * context)
   if (!ret
       || (old_display && new_display && old_display != new_display
           && self->filter)) {
-    GST_ELEMENT_WARNING (element, RESOURCE, BUSY,
-        ("Can't replace VA display while operating"), (NULL));
+    GST_WARNING_OBJECT (element, "Can't replace VA display while operating");
   }
 
   gst_clear_object (&old_display);
@@ -636,6 +651,7 @@ gst_va_compositor_propose_allocation (GstAggregator * agg,
   gst_object_unref (pool);
 
   gst_query_add_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL);
+  gst_query_add_allocation_meta (query, GST_VIDEO_CROP_META_API_TYPE, NULL);
 
   return TRUE;
 
@@ -654,7 +670,7 @@ gst_va_compositor_decide_allocation (GstAggregator * agg, GstQuery * query)
   GstVideoAggregator *vagg = GST_VIDEO_AGGREGATOR (agg);
 
   GstAllocator *allocator = NULL, *other_allocator = NULL;
-  GstAllocationParams params, other_params;
+  GstAllocationParams params = { 0, }, other_params = { 0, };
   GstBufferPool *pool = NULL, *other_pool = NULL;
   GstCaps *caps = NULL;
   GstStructure *config;
@@ -1029,6 +1045,10 @@ gst_va_compositor_aggregate_frames (GstVideoAggregator * vagg,
   if (!gst_va_filter_set_scale_method (self->filter, self->scale_method))
     GST_WARNING_OBJECT (self, "couldn't set filter scale method");
 
+  if (!gst_va_filter_set_interpolation_method (self->filter,
+          self->interpolation_method))
+    GST_WARNING_OBJECT (self, "couldn't set filter interpolation method");
+
   if (!gst_va_filter_compose (self->filter, &tx)) {
     GST_ERROR_OBJECT (self, "couldn't apply filter");
     ret = GST_FLOW_ERROR;
@@ -1204,7 +1224,7 @@ _caps_from_format_and_feature (GstVideoFormat format,
   if (g_strcmp0 (feature, GST_CAPS_FEATURE_MEMORY_DMABUF) == 0 ||
       g_strcmp0 (feature, GST_CAPS_FEATURE_MEMORY_VA) == 0)
     gst_caps_set_features_simple (caps,
-        gst_caps_features_from_string (feature));
+        gst_caps_features_new_single_static_str (feature));
 
   return caps;
 }
@@ -1436,7 +1456,7 @@ gst_va_compositor_update_caps (GstVideoAggregator * vagg, GstCaps * src_caps)
     } else {
       clip_caps = gst_caps_new_empty_simple ("video/x-raw");
       gst_caps_set_features_simple (clip_caps,
-          gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_VA));
+          gst_caps_features_new_single_static_str (GST_CAPS_FEATURE_MEMORY_VA));
     }
   } else if (dma_formats) {
     g_assert (dma_formats->len == modifiers->len);
@@ -1455,7 +1475,8 @@ gst_va_compositor_update_caps (GstVideoAggregator * vagg, GstCaps * src_caps)
     } else {
       clip_caps = gst_caps_new_empty_simple ("video/x-raw");
       gst_caps_set_features_simple (clip_caps,
-          gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_DMABUF));
+          gst_caps_features_new_single_static_str
+          (GST_CAPS_FEATURE_MEMORY_DMABUF));
     }
   } else if (sys_formats) {
     if (best_sys != GST_VIDEO_FORMAT_UNKNOWN) {
@@ -1633,18 +1654,41 @@ gst_va_compositor_class_init (gpointer g_class, gpointer class_data)
       "Device Path", GST_VA_DEVICE_PATH_PROP_DESC, NULL,
       GST_PARAM_DOC_SHOW_DEFAULT | G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
 
+  g_object_class_install_property (object_class, PROP_DEVICE_PATH,
+      properties[PROP_DEVICE_PATH]);
+
   /**
    * GstVaCompositor:scale-method:
    *
    * Sets the scale method algorithm to use when resizing.
    */
-  properties[PROP_SCALE_METHOD] = g_param_spec_enum ("scale-method",
-      "Scale Method", "Scale method to use", GST_TYPE_VA_SCALE_METHOD,
-      VA_FILTER_SCALING_DEFAULT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+  if (GST_VA_DISPLAY_IS_IMPLEMENTATION (display, INTEL_IHD)) {
+    g_object_class_install_property (object_class,
+        GST_VA_FILTER_PROP_SCALE_METHOD,
+        g_param_spec_enum ("scale-method", "Scale Method",
+            "Scale method to use", GST_TYPE_VA_SCALE_METHOD,
+            VA_FILTER_SCALING_DEFAULT,
+            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+    gst_type_mark_as_plugin_api (GST_TYPE_VA_SCALE_METHOD, 0);
+  }
 
-  gst_type_mark_as_plugin_api (GST_TYPE_VA_SCALE_METHOD, 0);
+  /**
+   * GstVaCompositor:interpolation-method:
+   *
+   * Sets the interpolation method algorithm to use when resizing.
+   *
+   * Since: 1.26
+   */
+  if (GST_VA_DISPLAY_IS_IMPLEMENTATION (display, INTEL_IHD)) {
+    g_object_class_install_property (object_class,
+        PROP_INTERPOLATION_METHOD,
+        g_param_spec_enum ("interpolation-method", "Interpolation Method",
+            "Interpolation method to use for scaling",
+            GST_TYPE_VA_INTERPOLATION_METHOD, VA_FILTER_INTERPOLATION_DEFAULT,
+            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+    gst_type_mark_as_plugin_api (GST_TYPE_VA_INTERPOLATION_METHOD, 0);
+  }
 
-  g_object_class_install_properties (object_class, N_PROPERTIES, properties);
 
   g_free (long_name);
   g_free (cdata->description);

@@ -554,12 +554,14 @@ gst_object_detection_overlay_sink_event (GstBaseTransform * trans,
       GST_INFO_OBJECT (overlay, "EOS");
       overlay->eos = TRUE;
       g_mutex_unlock (&overlay->stream_event_mutex);
+      ret = GST_BASE_TRANSFORM_CLASS (parent_class)->sink_event (trans, event);
       break;
     case GST_EVENT_FLUSH_START:
       g_mutex_lock (&overlay->stream_event_mutex);
-      GST_INFO_OBJECT (overlay, "Flush stop");
+      GST_INFO_OBJECT (overlay, "Flush start");
       overlay->flushing = TRUE;
       g_mutex_unlock (&overlay->stream_event_mutex);
+      ret = GST_BASE_TRANSFORM_CLASS (parent_class)->sink_event (trans, event);
       break;
     case GST_EVENT_FLUSH_STOP:
       g_mutex_lock (&overlay->stream_event_mutex);
@@ -567,6 +569,7 @@ gst_object_detection_overlay_sink_event (GstBaseTransform * trans,
       overlay->eos = FALSE;
       overlay->flushing = FALSE;
       g_mutex_unlock (&overlay->stream_event_mutex);
+      ret = GST_BASE_TRANSFORM_CLASS (parent_class)->sink_event (trans, event);
       break;
     default:
       ret = GST_BASE_TRANSFORM_CLASS (parent_class)->sink_event (trans, event);
@@ -619,9 +622,8 @@ gst_object_detection_overlay_set_info (GstVideoFilter * filter,
     GstVideoInfo * out_info)
 {
   GstObjectDetectionOverlay *overlay = GST_OBJECT_DETECTION_OVERLAY (filter);
-  GST_DEBUG_OBJECT (filter, "set_info incaps:%s", gst_caps_to_string (incaps));
-  GST_DEBUG_OBJECT (filter, "set_info outcaps:%s",
-      gst_caps_to_string (outcaps));
+  GST_DEBUG_OBJECT (filter, "set_info incaps:%" GST_PTR_FORMAT, incaps);
+  GST_DEBUG_OBJECT (filter, "set_info outcaps:%" GST_PTR_FORMAT, outcaps);
 
   filter->in_info = *in_info;
   filter->out_info = *out_info;

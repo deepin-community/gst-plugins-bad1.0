@@ -27,7 +27,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
-#if !HAVE_IOS
+#ifndef HAVE_IOS
 #import <AppKit/AppKit.h>
 #endif
 #include <gst/video/video.h>
@@ -53,11 +53,14 @@ GST_DEBUG_CATEGORY (gst_avf_video_src_debug);
 static CMVideoDimensions
 get_oriented_dimensions(GstAVFVideoSourceOrientation orientation, CMVideoDimensions dimensions);
 
+static CMTime
+find_range_bound_close_enough_to_fps (AVFrameRateRange *range, int fps_n, int fps_d);
+
 static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS (
-#if !HAVE_IOS
+#ifndef HAVE_IOS
         GST_VIDEO_CAPS_MAKE_WITH_FEATURES
         (GST_CAPS_FEATURE_MEMORY_GL_MEMORY,
             "UYVY") ", "
@@ -233,7 +236,7 @@ gst_avf_video_source_device_type_get_type (void)
 - (BOOL)openDevice;
 - (void)closeDevice;
 - (GstVideoFormat)getGstVideoFormat:(NSNumber *)pixel_format;
-#if !HAVE_IOS
+#ifndef HAVE_IOS
 - (CGDirectDisplayID)getDisplayIdFromDeviceIndex;
 - (float)getScaleFactorFromDeviceIndex;
 #endif
@@ -257,7 +260,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 @end
 
-#if HAVE_IOS
+#ifdef HAVE_IOS
 
 static AVCaptureDeviceType GstAVFVideoSourceDeviceType2AVCaptureDeviceType(GstAVFVideoSourceDeviceType deviceType) {
   switch (deviceType) {
@@ -451,7 +454,7 @@ G_GNUC_END_IGNORE_DEPRECATIONS
 
 - (BOOL)openScreenInput
 {
-#if HAVE_IOS
+#ifdef HAVE_IOS
   return NO;
 #else
   CGDirectDisplayID displayId;
@@ -598,7 +601,7 @@ G_GNUC_END_IGNORE_DEPRECATIONS
   return gst_format;
 }
 
-#if !HAVE_IOS
+#ifndef HAVE_IOS
 - (CGDirectDisplayID)getDisplayIdFromDeviceIndex
 {
   NSDictionary *description;
@@ -662,8 +665,11 @@ G_GNUC_END_IGNORE_DEPRECATIONS
         device.activeFormat = fmt;
         for (AVFrameRateRange *range in fmt.videoSupportedFrameRateRanges) {
           CMTime dur = CMTimeMake (info->fps_d, info->fps_n);
-          if (CMTIME_COMPARE_INLINE (range.minFrameDuration, <=, dur) &&
-              CMTIME_COMPARE_INLINE (range.maxFrameDuration, >=, dur)) {
+          // Either the value is directly supported, or we rounded it to the nearest 'sane' value in get_caps(),
+          // in which case AVF might refuse to accept it, so we try to use one of the range bounds if it's close enough.
+          if ((CMTIME_COMPARE_INLINE (range.minFrameDuration, <=, dur) &&
+               CMTIME_COMPARE_INLINE (range.maxFrameDuration, >=, dur)) ||
+               CMTIME_IS_VALID (dur = find_range_bound_close_enough_to_fps (range, info->fps_n, info->fps_d))) {
             device.activeVideoMinFrameDuration = dur;
             device.activeVideoMaxFrameDuration = dur;
             found_framerate = TRUE;
@@ -699,7 +705,7 @@ G_GNUC_END_IGNORE_DEPRECATIONS
   pixel_formats = output.availableVideoCVPixelFormatTypes;
 
   if (captureScreen) {
-#if !HAVE_IOS
+#ifndef HAVE_IOS
     CGRect rect;
     AVCaptureScreenInput *screenInput = (AVCaptureScreenInput *)input;
     if (CGRectIsEmpty (screenInput.cropRect)) {
@@ -751,7 +757,7 @@ G_GNUC_END_IGNORE_DEPRECATIONS
         forKey:(NSString*)kCVPixelBufferPixelFormatTypeKey];
 
     if (captureScreen) {
-#if !HAVE_IOS
+#ifndef HAVE_IOS
       AVCaptureScreenInput *screenInput = (AVCaptureScreenInput *)input;
       screenInput.minFrameDuration = CMTimeMake(info.fps_d, info.fps_n);
 #else
@@ -1145,7 +1151,7 @@ enum
   PROP_DEVICE_TYPE,
   PROP_DO_STATS,
   PROP_FPS,
-#if !HAVE_IOS
+#ifndef HAVE_IOS
   PROP_CAPTURE_SCREEN,
   PROP_CAPTURE_SCREEN_CURSOR,
   PROP_CAPTURE_SCREEN_MOUSE_CLICKS,
@@ -1258,7 +1264,7 @@ gst_avf_video_src_class_init (GstAVFVideoSrcClass * klass)
       g_param_spec_int ("fps", "Frames per second",
           "Last measured framerate, if statistics are enabled",
           -1, G_MAXINT, -1, G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
-#if !HAVE_IOS
+#ifndef HAVE_IOS
   g_object_class_install_property (gobject_class, PROP_CAPTURE_SCREEN,
       g_param_spec_boolean ("capture-screen", "Enable screen capture",
           "Enable screen capture functionality", FALSE,
@@ -1271,18 +1277,50 @@ gst_avf_video_src_class_init (GstAVFVideoSrcClass * klass)
       g_param_spec_boolean ("capture-screen-mouse-clicks", "Enable mouse clicks capture",
           "Enable mouse clicks capture while capturing screen", FALSE,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * avfvideosrc:screen-crop-x
+   *
+   * Horizontal coordinate of top left corner of the screen capture area
+   *
+   * Since: 1.22
+   */
   g_object_class_install_property (gobject_class, PROP_CAPTURE_SCREEN_CROP_X,
       g_param_spec_uint ("screen-crop-x", "Screen capture crop X",
           "Horizontal coordinate of top left corner of the screen capture area",
           0, G_MAXUINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * avfvideosrc:screen-crop-y
+   *
+   * Vertical coordinate of top left corner of the screen capture area
+   *
+   * Since: 1.22
+   */
   g_object_class_install_property (gobject_class, PROP_CAPTURE_SCREEN_CROP_Y,
       g_param_spec_uint ("screen-crop-y", "Screen capture crop Y",
           "Vertical coordinate of top left corner of the screen capture area",
           0, G_MAXUINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * avfvideosrc:screen-crop-width
+   *
+   * Width of the screen capture area (0 = maximum)
+   *
+   * Since: 1.22
+   */
   g_object_class_install_property (gobject_class, PROP_CAPTURE_SCREEN_CROP_WIDTH,
       g_param_spec_uint ("screen-crop-width", "Screen capture crop width",
           "Width of the screen capture area (0 = maximum)",
           0, G_MAXUINT, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * avfvideosrc:screen-crop-height
+   *
+   * Height of the screen capture area (0 = maximum)
+   *
+   * Since: 1.22
+   */
   g_object_class_install_property (gobject_class, PROP_CAPTURE_SCREEN_CROP_HEIGHT,
       g_param_spec_uint ("screen-crop-height", "Screen capture crop height",
           "Height of the screen capture area (0 = maximum)",
@@ -1317,7 +1355,7 @@ gst_avf_video_src_get_property (GObject * object, guint prop_id, GValue * value,
   GstAVFVideoSrcImpl *impl = GST_AVF_VIDEO_SRC_IMPL (object);
 
   switch (prop_id) {
-#if !HAVE_IOS
+#ifndef HAVE_IOS
     case PROP_CAPTURE_SCREEN:
       g_value_set_boolean (value, impl.captureScreen);
       break;
@@ -1376,7 +1414,7 @@ gst_avf_video_src_set_property (GObject * object, guint prop_id,
   GstAVFVideoSrcImpl *impl = GST_AVF_VIDEO_SRC_IMPL (object);
 
   switch (prop_id) {
-#if !HAVE_IOS
+#ifndef HAVE_IOS
     case PROP_CAPTURE_SCREEN:
       impl.captureScreen = g_value_get_boolean (value);
       break;
@@ -1533,7 +1571,7 @@ gst_av_capture_device_get_caps (AVCaptureDevice *device, AVCaptureVideoDataOutpu
 {
   GstCaps *result_caps, *result_gl_caps;
   gboolean is_gl_format;
-#if !HAVE_IOS
+#ifndef HAVE_IOS
   GstVideoFormat gl_formats[] = { GST_VIDEO_FORMAT_UYVY, GST_VIDEO_FORMAT_YUY2, 0 };
 #else
   GstVideoFormat gl_formats[] = { GST_VIDEO_FORMAT_NV12, 0 };
@@ -1549,16 +1587,20 @@ gst_av_capture_device_get_caps (AVCaptureDevice *device, AVCaptureVideoDataOutpu
 
     for (AVFrameRateRange *range in format.videoSupportedFrameRateRanges) {
       int min_fps_n, min_fps_d, max_fps_n, max_fps_d;
+      GstClockTime min_dur, max_dur;
 
-      /* CMTime duration is the inverse of fps*/
-      min_fps_n = range.maxFrameDuration.timescale;
-      min_fps_d = range.maxFrameDuration.value;
-      max_fps_n = range.minFrameDuration.timescale;
-      max_fps_d = range.minFrameDuration.value;
+      // For some third-party devices macOS sometimes reports silly framerates, like 750003/6250 instead of 120/1.
+      // Let's round all values here just in case, and then reverse that in setDeviceCaps when passing values to AVF.
+      // Note: In the past, min/maxFrameRate were used instead, but that also came with its own set of rounding issues.
+      min_dur = gst_util_uint64_scale (GST_SECOND, range.minFrameDuration.value, range.minFrameDuration.timescale);
+      max_dur = gst_util_uint64_scale (GST_SECOND, range.maxFrameDuration.value, range.maxFrameDuration.timescale);
 
-      GST_DEBUG ("dimensions %ix%i fps range is [%i/%i, %i/%i]",
-          dimensions.width, dimensions.height, min_fps_n, min_fps_d, max_fps_n,
-          max_fps_d);
+      gst_video_guess_framerate (min_dur, &max_fps_n, &max_fps_d);
+      gst_video_guess_framerate (max_dur, &min_fps_n, &min_fps_d);
+
+      GST_DEBUG ("dimensions %ix%i, duration range %s, assuming fps range [%d/%d - %d/%d]",
+          dimensions.width, dimensions.height, [range description].UTF8String,
+          min_fps_n, min_fps_d, max_fps_n, max_fps_d);
 
       for (NSNumber *pixel_format in output.availableVideoCVPixelFormatTypes) {
         GstCaps *caps;
@@ -1593,11 +1635,11 @@ gst_av_capture_device_get_caps (AVCaptureDevice *device, AVCaptureVideoDataOutpu
           gst_caps_append (result_caps, gst_caps_copy (caps));
           /* Set GLMemory features on caps */
           gst_caps_set_features (caps, 0,
-                                 gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_GL_MEMORY,
+                                 gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_GL_MEMORY,
                                                         NULL));
           gst_caps_set_simple (caps,
                                "texture-target", G_TYPE_STRING,
-#if !HAVE_IOS
+#ifndef HAVE_IOS
                                GST_GL_TEXTURE_TARGET_RECTANGLE_STR,
 #else
                                GST_GL_TEXTURE_TARGET_2D_STR,
@@ -1626,4 +1668,27 @@ get_oriented_dimensions (GstAVFVideoSourceOrientation orientation, CMVideoDimens
     orientedDimensions = dimensions;
   }
   return orientedDimensions;
+}
+
+static CMTime
+find_range_bound_close_enough_to_fps (AVFrameRateRange *range, int fps_n, int fps_d)
+{
+  GstClockTime min_dur, max_dur;
+  gint guessed_n, guessed_d;
+
+  min_dur = gst_util_uint64_scale (GST_SECOND, range.minFrameDuration.value, range.minFrameDuration.timescale);
+  gst_video_guess_framerate (min_dur, &guessed_n, &guessed_d);
+  if (guessed_n == fps_n && guessed_d == fps_d) {
+    GST_DEBUG ("Using min duration from range %s for fps %d/%d", [range description].UTF8String, fps_n, fps_d);
+    return range.minFrameDuration;
+  }
+
+  max_dur = gst_util_uint64_scale (GST_SECOND, range.maxFrameDuration.value, range.maxFrameDuration.timescale);
+  gst_video_guess_framerate (max_dur, &guessed_n, &guessed_d);
+  if (guessed_n == fps_n && guessed_d == fps_d) {
+    GST_DEBUG ("Using max duration from range %s for fps %d/%d", [range description].UTF8String, fps_n, fps_d);
+    return range.maxFrameDuration;
+  }
+
+  return kCMTimeInvalid;
 }

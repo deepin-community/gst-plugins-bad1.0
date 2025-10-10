@@ -36,6 +36,9 @@
 #ifndef WL_SHM_FORMAT_P010
 #define WL_SHM_FORMAT_P010 DRM_FORMAT_P010
 #endif
+#ifndef WL_SHM_FORMAT_NV15
+#define WL_SHM_FORMAT_NV15 DRM_FORMAT_NV15
+#endif
 
 #define GST_CAT_DEFAULT gst_wl_videoformat_debug
 GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
@@ -83,6 +86,7 @@ static const wl_VideoFormat wl_formats[] = {
   {WL_SHM_FORMAT_NV16, DRM_FORMAT_NV16, GST_VIDEO_FORMAT_NV16},
   {WL_SHM_FORMAT_NV61, DRM_FORMAT_NV61, GST_VIDEO_FORMAT_NV61},
   {WL_SHM_FORMAT_P010, DRM_FORMAT_P010, GST_VIDEO_FORMAT_P010_10LE},
+  {WL_SHM_FORMAT_NV15, DRM_FORMAT_NV15, GST_VIDEO_FORMAT_NV12_10LE40},
   {WL_SHM_FORMAT_YUV410, DRM_FORMAT_YUV410, GST_VIDEO_FORMAT_YUV9},
   {WL_SHM_FORMAT_YVU410, DRM_FORMAT_YVU410, GST_VIDEO_FORMAT_YVU9},
   {WL_SHM_FORMAT_YUV411, DRM_FORMAT_YUV411, GST_VIDEO_FORMAT_Y41B},
@@ -147,13 +151,4 @@ gst_wl_shm_format_to_string (enum wl_shm_format wl_format)
 {
   return gst_video_format_to_string
       (gst_wl_shm_format_to_video_format (wl_format));
-}
-
-gchar *
-gst_wl_dmabuf_format_to_string (guint wl_format, guint64 modifier)
-{
-  GstVideoFormat gst_format = gst_wl_dmabuf_format_to_video_format (wl_format);
-  const guint32 fourcc = gst_video_dma_drm_fourcc_from_format (gst_format);
-
-  return gst_video_dma_drm_fourcc_to_string (fourcc, modifier);
 }

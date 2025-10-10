@@ -1,15 +1,30 @@
 analytics_sources = files( 'gstanalyticsmeta.c',
                               'gstanalyticsclassificationmtd.c',
                               'gstanalyticsobjectdetectionmtd.c',
-                              'gstanalyticsobjecttrackingmtd.c')
+                              'gstanalyticsobjecttrackingmtd.c',
+                              'gstanalyticssegmentationmtd.c',
+                              'gsttensormeta.c',
+                              'gsttensor.c')
 
 analytics_headers = files(    'analytics.h',
                               'gstanalyticsmeta.h',
                               'analytics-meta-prelude.h',
                               'gstanalyticsclassificationmtd.h',
                               'gstanalyticsobjectdetectionmtd.h',
-                              'gstanalyticsobjecttrackingmtd.h')
+                              'gstanalyticsobjecttrackingmtd.h',
+                              'gstanalyticssegmentationmtd.h',
+                              'gsttensormeta.h',
+                              'gsttensor.h')
 install_headers(analytics_headers, subdir : 'gstreamer-1.0/gst/analytics')
+
+doc_sources = []
+foreach s: analytics_sources + analytics_headers
+  doc_sources += s.full_path()
+endforeach
+
+libs_sources += {
+  'analytics': pathsep.join(doc_sources)
+}
 
 pkg_name = 'gstreamer-analytics-1.0'
 gstanalytics = library('gstanalytics-' + api_version,
@@ -20,11 +35,11 @@ gstanalytics = library('gstanalytics-' + api_version,
   soversion : soversion,
   darwin_versions : osxversion,
   install : true,
-  dependencies : [gstbase_dep, gstvideo_dep])
+  dependencies : [gstbase_dep, gstvideo_dep],
+  link_args : ['-lm'])
 
-gst_libraries += [[pkg_name, {'lib': gstanalytics}]]
 pkgconfig.generate(gstanalytics,
-  libraries : [gst_dep, gstbase_dep],
+  libraries : [gst_dep, gstbase_dep, gstvideo_dep, '-lm'],
   variables : pkgconfig_variables,
   subdirs : pkgconfig_subdirs,
   name : pkg_name,
@@ -32,6 +47,7 @@ pkgconfig.generate(gstanalytics,
 )
 gen_sources = []
 
+library_def = {'lib': gstanalytics}
 if build_gir
   gir = {
     'sources' : analytics_sources + analytics_headers,
@@ -40,7 +56,7 @@ if build_gir
     'identifier_prefix' : ['GstAnalytics', 'Gst'],
     'symbol_prefix' : ['gst_analytics', 'gst'],
     'export_packages' : pkg_name,
-    'includes' : ['Gst-1.0', 'GstBase-1.0'],
+    'includes' : ['Gst-1.0', 'GstBase-1.0', 'GstVideo-1.0'],
     'install' : true,
     'extra_args' : gir_init_section + ['-DGST_USE_UNSTABLE_API'],
     'dependencies' : [gstbase_dep, gstvideo_dep]

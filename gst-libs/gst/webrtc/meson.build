@@ -36,6 +36,15 @@ webrtc_enumtypes_headers = files([
   'webrtc_fwd.h',
 ])
 
+doc_sources = []
+foreach s: webrtc_sources + webrtc_headers
+  doc_sources += s.full_path()
+endforeach
+
+libs_sources += {
+  'webrtc': pathsep.join(doc_sources)
+}
+
 webrtc_enums = gnome.mkenums_simple('webrtc-enumtypes',
   sources : webrtc_enumtypes_headers,
   body_prefix : '#ifdef HAVE_CONFIG_H\n#include "config.h"\n#endif',
@@ -65,7 +74,7 @@ gstwebrtc = library('gstwebrtc-' + api_version,
 library_def = {'lib': gstwebrtc}
 pkg_name = 'gstreamer-webrtc-1.0'
 pkgconfig.generate(gstwebrtc,
-  libraries : [gst_dep, gstbase_dep],
+  libraries : [gst_dep, gstsdp_dep, gstbase_dep],
   variables : pkgconfig_variables,
   subdirs : pkgconfig_subdirs,
   name : pkg_name,

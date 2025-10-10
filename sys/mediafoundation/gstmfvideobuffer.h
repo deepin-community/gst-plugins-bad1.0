@@ -28,12 +28,13 @@
 #include <mutex>
 
 #ifndef __cplusplus
-#error IGstMFVideoBuffer interface doesn't provide C API
+#error IGstMFVideoBuffer interface does not provide C API
 #endif
 
-/* Define UUID for QueryInterface() */
-class DECLSPEC_UUID("ce922806-a8a6-4e1e-871f-e0cdd5fc9899")
-IGstMFVideoBuffer : public IMFMediaBuffer, public IMF2DBuffer
+DEFINE_GUID (IID_IGstMFVideoBuffer, 0xce922806, 0xa8a6,
+    0x4e1e, 0x87, 0x1f, 0xe0, 0xcd, 0xd5, 0xfc, 0x98, 0x99);
+
+class IGstMFVideoBuffer : public IMFMediaBuffer, public IMF2DBuffer
 {
 public:
   static HRESULT CreateInstance (GstVideoInfo * info,
@@ -92,7 +93,7 @@ public:
 
 private:
   IGstMFVideoBuffer (void);
-  ~IGstMFVideoBuffer (void);
+  virtual ~IGstMFVideoBuffer (void);
 
   HRESULT Initialize (GstVideoInfo * info);
   HRESULT InitializeWrapped (GstVideoInfo * info,

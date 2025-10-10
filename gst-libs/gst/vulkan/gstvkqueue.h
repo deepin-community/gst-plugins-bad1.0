@@ -23,9 +23,6 @@
 
 #include <gst/vulkan/gstvkdevice.h>
 #include <gst/vulkan/gstvkcommandpool.h>
-#if GST_VULKAN_HAVE_VIDEO_EXTENSIONS
-#include <gst/vulkan/gstvkdecoder.h>
-#endif
 
 #define GST_TYPE_VULKAN_QUEUE         (gst_vulkan_queue_get_type())
 #define GST_VULKAN_QUEUE(o)           (G_TYPE_CHECK_INSTANCE_CAST((o), GST_TYPE_VULKAN_QUEUE, GstVulkanQueue))
@@ -83,15 +80,12 @@ struct _GstVulkanQueueClass
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GstVulkanQueue, gst_object_unref)
 
-  GST_VULKAN_API
+GST_VULKAN_API
 GstVulkanDevice *   gst_vulkan_queue_get_device (GstVulkanQueue * queue);
 
 GST_VULKAN_API
 GstVulkanCommandPool *  gst_vulkan_queue_create_command_pool    (GstVulkanQueue * queue,
                                                                  GError ** error);
-GST_VULKAN_API
-GstVulkanDecoder *  gst_vulkan_queue_create_decoder             (GstVulkanQueue * queue,
-                                                                 guint codec);
 
 GST_VULKAN_API
 void                gst_vulkan_queue_submit_lock                (GstVulkanQueue * queue);

@@ -102,6 +102,7 @@ GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (debugqroverlay, "debugqroverlay",
     GST_RANK_NONE, GST_TYPE_DEBUG_QR_OVERLAY, qroverlay_element_init (plugin));
 
 
+static void gst_debug_qr_overlay_finalize (GObject * object);
 static void gst_debug_qr_overlay_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec);
 static void gst_debug_qr_overlay_get_property (GObject * object, guint prop_id,
@@ -120,6 +121,7 @@ gst_debug_qr_overlay_class_init (GstDebugQROverlayClass * klass)
   GST_DEBUG_CATEGORY_INIT (gst_debug_qr_overlay_debug, "debugqroverlay", 0,
       "Qrcode overlay element");
 
+  gobject_class->finalize = gst_debug_qr_overlay_finalize;
   gobject_class->set_property = gst_debug_qr_overlay_set_property;
   gobject_class->get_property = gst_debug_qr_overlay_get_property;
 
@@ -128,25 +130,29 @@ gst_debug_qr_overlay_class_init (GstDebugQROverlayClass * klass)
       g_param_spec_int64 ("extra-data-interval-buffers",
           "extra-data-interval-buffers",
           "Extra data append into the Qrcode at the first buffer of each "
-          " interval", 0, G_MAXINT64, 60, G_PARAM_READWRITE));
+          " interval", 0, G_MAXINT64, 60,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class,
       PROP_DATA_SPAN_BUFFERS, g_param_spec_int64 ("extra-data-span-buffers",
           "extra-data-span-buffers",
           "Numbers of consecutive buffers that the extra data will be inserted "
-          " (counting the first buffer)", 0, G_MAXINT64, 1, G_PARAM_READWRITE));
+          " (counting the first buffer)", 0, G_MAXINT64, 1,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class,
       PROP_EXTRA_DATA_NAME, g_param_spec_string ("extra-data-name",
           "Extra data name",
-          "Json key name for extra append data", NULL, G_PARAM_READWRITE));
+          "Json key name for extra append data", NULL,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (gobject_class,
       PROP_EXTRA_DATA_ARRAY, g_param_spec_string ("extra-data-array",
           "Extra data array",
           "List of comma separated values that the extra data value will be "
           " cycled from at each interval, example array structure :"
-          " \"240,480,720,960,1200,1440,1680,1920\"", NULL, G_PARAM_READWRITE));
+          " \"240,480,720,960,1200,1440,1680,1920\"", NULL,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 
   gst_element_class_set_details_simple (gstelement_class,
@@ -178,6 +184,18 @@ gst_debug_qr_overlay_init (GstDebugQROverlay * filter)
 }
 
 static void
+gst_debug_qr_overlay_finalize (GObject * object)
+{
+  GstDebugQROverlay *filter = GST_DEBUG_QR_OVERLAY (object);
+
+  g_free (filter->extra_data_name);
+  g_free (filter->extra_data_str);
+  g_strfreev (filter->extra_data_array);
+
+  G_OBJECT_CLASS (parent_class)->finalize (object);
+}
+
+static void
 gst_debug_qr_overlay_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
 {
@@ -191,6 +209,7 @@ gst_debug_qr_overlay_set_property (GObject * object, guint prop_id,
       filter->extra_data_span_buffers = g_value_get_int64 (value);
       break;
     case PROP_EXTRA_DATA_NAME:
+      g_clear_pointer (&filter->extra_data_name, g_free);
       filter->extra_data_name = g_value_dup_string (value);
       break;
     case PROP_EXTRA_DATA_ARRAY:

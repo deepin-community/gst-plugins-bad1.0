@@ -81,6 +81,7 @@ psmux_stream_new (PsMux * mux, PsMuxStreamType stream_type)
     case PSMUX_ST_AUDIO_MPEG1:
     case PSMUX_ST_AUDIO_MPEG2:
       stream->max_buffer_size = 2484;   /* ISO/IEC 13818 2.5.2.4 */
+      /* FALLTHROUGH */
     case PSMUX_ST_AUDIO_AAC:
       if (info->id_mpga > PSMUX_STREAM_ID_MPGA_MAX)
         break;
@@ -512,7 +513,7 @@ psmux_stream_add_data (PsMuxStream * stream, GstBuffer * buffer,
     stream->last_pts = pts;
 
   stream->bytes_avail += packet->map.size;
-  /* FIXME: perhaps use GstQueueArray instead? */
+  /* FIXME: perhaps use GstVecDeque instead? */
   stream->buffers = g_list_append (stream->buffers, packet);
 
 }

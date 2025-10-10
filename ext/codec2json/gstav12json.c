@@ -80,6 +80,8 @@ gst_av1_2_json_finalize (GObject * object)
 
   gst_av1_parser_free (self->parser);
   json_object_unref (self->json);
+
+  G_OBJECT_CLASS (gst_av1_2_json_parent_class)->finalize (object);
 }
 
 static gchar *
@@ -869,7 +871,7 @@ gst_av1_2_json_chain (GstPad * sinkpad, GstObject * object, GstBuffer * in_buf)
 {
   GstAV12json *self = GST_AV1_2_JSON (object);
   JsonObject *json = self->json;
-  GstAV1ParserResult pres;
+  GstAV1ParserResult pres = GST_AV1_PARSER_OK;
   GstAV1OBU obu;
   GstBuffer *out_buf;
   gchar *json_string;

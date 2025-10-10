@@ -54,7 +54,7 @@
  * to enable users to easily add and remove meta data from json files. It can also dump
  * the names of all output layers, which can then be used to craft the json meta data file.
  *
- *
+ * Since: 1.20
  */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -331,6 +331,13 @@ gst_onnx_inference_class_init (GstOnnxInferenceClass * klass)
       GST_DEBUG_FUNCPTR (gst_onnx_inference_transform_caps);
   basetransform_class->set_caps =
       GST_DEBUG_FUNCPTR (gst_onnx_inference_set_caps);
+
+  gst_type_mark_as_plugin_api (GST_TYPE_ONNX_OPTIMIZATION_LEVEL,
+			       (GstPluginAPIFlags) 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_ONNX_EXECUTION_PROVIDER,
+			       (GstPluginAPIFlags) 0);
+  gst_type_mark_as_plugin_api (GST_TYPE_ML_MODEL_INPUT_IMAGE_FORMAT,
+			       (GstPluginAPIFlags) 0);
 }
 
 static void
@@ -489,7 +496,7 @@ gst_onnx_inference_transform_caps (GstBaseTransform *
       onnxClient->getWidth (), "height", G_TYPE_INT,
       onnxClient->getHeight (), NULL);
 
-  if (onnxClient->getInputImageDatatype() == GST_TENSOR_TYPE_UINT8 &&
+  if (onnxClient->getInputImageDatatype() == GST_TENSOR_DATA_TYPE_UINT8 &&
       onnxClient->getInputImageScale() == 1.0 &&
       onnxClient->getInputImageOffset() == 0.0) {
     switch (onnxClient->getChannels()) {
@@ -586,8 +593,7 @@ gst_onnx_inference_process (GstBaseTransform * trans, GstBuffer * buf)
       auto meta = client->copy_tensors_to_meta (outputs, buf);
       if (!meta)
         return FALSE;
-      GST_TRACE_OBJECT (trans, "Num tensors:%d", meta->num_tensors);
-      meta->batch_size = 1;
+      GST_TRACE_OBJECT (trans, "Num tensors:%zu", meta->num_tensors);
     }
     catch (Ort::Exception & ortex) {
       GST_ERROR_OBJECT (self, "%s", ortex.what ());

@@ -44,13 +44,13 @@
  * The following functions are then available for parsing the structure of the
  * #GstH264NalUnit, depending on the #GstH264NalUnitType:
  *
- *   * From #GST_H264_NAL_SLICE to #GST_H264_NAL_SLICE_IDR: #gst_h264_parser_parse_slice_hdr
+ *   * From %GST_H264_NAL_SLICE to %GST_H264_NAL_SLICE_IDR: #gst_h264_parser_parse_slice_hdr
  *
- *   * #GST_H264_NAL_SEI: #gst_h264_parser_parse_sei
+ *   * %GST_H264_NAL_SEI: #gst_h264_parser_parse_sei
  *
- *   * #GST_H264_NAL_SPS: #gst_h264_parser_parse_sps
+ *   * %GST_H264_NAL_SPS: #gst_h264_parser_parse_sps
  *
- *   * #GST_H264_NAL_PPS: #gst_h264_parser_parse_pps
+ *   * %GST_H264_NAL_PPS: #gst_h264_parser_parse_pps
  *
  *   * Any other: #gst_h264_parser_parse_nal
  *
@@ -78,7 +78,6 @@
 
 #include <gst/base/gstbytereader.h>
 #include <gst/base/gstbitreader.h>
-#include <string.h>
 
 #ifndef GST_DISABLE_GST_DEBUG
 #define GST_CAT_DEFAULT gst_h264_debug_category_get()
@@ -1112,12 +1111,6 @@ gst_h264_parser_parse_user_data_unregistered (GstH264NalParser * nalparser,
     READ_UINT8 (nr, data[i], 8);
   }
 
-  if (payload_size < 1) {
-    GST_WARNING ("No more remaining payload data to store");
-    g_clear_pointer (&data, g_free);
-    return GST_H264_PARSER_BROKEN_DATA;
-  }
-
   urud->data = data;
   GST_MEMDUMP ("SEI user data unregistered", data, payload_size);
   return GST_H264_PARSER_OK;
@@ -1414,6 +1407,7 @@ gst_h264_parser_parse_sei_message (GstH264NalParser * nalparser,
 
 error:
   GST_WARNING ("error parsing \"Sei message\"");
+  gst_h264_sei_clear (sei);
   return GST_H264_PARSER_ERROR;
 }
 
@@ -1441,7 +1435,7 @@ gst_h264_nal_parser_new (void)
  * gst_h264_nal_parser_free:
  * @nalparser: the #GstH264NalParser to free
  *
- * Frees @nalparser and sets it to %NULL
+ * Frees @nalparser
  */
 void
 gst_h264_nal_parser_free (GstH264NalParser * nalparser)
@@ -1453,8 +1447,6 @@ gst_h264_nal_parser_free (GstH264NalParser * nalparser)
   for (i = 0; i < GST_H264_MAX_PPS_COUNT; i++)
     gst_h264_pps_clear (&nalparser->pps[i]);
   g_free (nalparser);
-
-  nalparser = NULL;
 }
 
 /**
@@ -2249,7 +2241,7 @@ error:
 /**
  * gst_h264_parse_pps:
  * @nalparser: a #GstH264NalParser
- * @nalu: The #GST_H264_NAL_PPS #GstH264NalUnit to parse
+ * @nalu: The %GST_H264_NAL_PPS #GstH264NalUnit to parse
  * @pps: The #GstH264PPS to fill.
  *
  * Parses @data, and fills the @pps structure.
@@ -2320,7 +2312,8 @@ gst_h264_parse_pps (GstH264NalParser * nalparser, GstH264NalUnit * nalu,
       gint i;
 
       READ_UE (&nr, pps->pic_size_in_map_units_minus1);
-      bits = g_bit_storage (pps->num_slice_groups_minus1);
+      /* 7.4.2.2 7-23 slice_group_id */
+      bits = gst_util_ceil_log2 (pps->num_slice_groups_minus1 + 1);
 
       pps->slice_group_id =
           g_new (guint8, pps->pic_size_in_map_units_minus1 + 1);
@@ -2384,7 +2377,7 @@ error:
 /**
  * gst_h264_parser_parse_pps:
  * @nalparser: a #GstH264NalParser
- * @nalu: The #GST_H264_NAL_PPS #GstH264NalUnit to parse
+ * @nalu: The %GST_H264_NAL_PPS #GstH264NalUnit to parse
  * @pps: The #GstH264PPS to fill.
  *
  * Parses @nalu containing a Picture Parameter Set, and fills @pps.
@@ -2431,7 +2424,7 @@ gst_h264_pps_clear (GstH264PPS * pps)
 /**
  * gst_h264_parser_parse_slice_hdr:
  * @nalparser: a #GstH264NalParser
- * @nalu: The #GST_H264_NAL_SLICE to #GST_H264_NAL_SLICE_IDR #GstH264NalUnit to parse
+ * @nalu: The %GST_H264_NAL_SLICE to %GST_H264_NAL_SLICE_IDR #GstH264NalUnit to parse
  * @slice: The #GstH264SliceHdr to fill.
  * @parse_pred_weight_table: Whether to parse the pred_weight_table or not
  * @parse_dec_ref_pic_marking: Whether to parse the dec_ref_pic_marking or not
@@ -2600,11 +2593,12 @@ gst_h264_parser_parse_slice_hdr (GstH264NalParser * nalparser,
 
   if (pps->num_slice_groups_minus1 > 0 &&
       pps->slice_group_map_type >= 3 && pps->slice_group_map_type <= 5) {
-    /* Ceil(Log2(PicSizeInMapUnits / SliceGroupChangeRate + 1))  [7-33] */
+
     guint32 PicWidthInMbs = sps->pic_width_in_mbs_minus1 + 1;
     guint32 PicHeightInMapUnits = sps->pic_height_in_map_units_minus1 + 1;
     guint32 PicSizeInMapUnits = PicWidthInMbs * PicHeightInMapUnits;
     guint32 SliceGroupChangeRate = pps->slice_group_change_rate_minus1 + 1;
+    /* Ceil(Log2(PicSizeInMapUnits / SliceGroupChangeRate + 1))  [7-35] */
     const guint n =
         gst_util_ceil_log2 (PicSizeInMapUnits / SliceGroupChangeRate + 1);
     READ_UINT16 (&nr, slice->slice_group_change_cycle, n);
@@ -2712,7 +2706,7 @@ gst_h264_sei_clear (GstH264SEIMessage * sei)
 /**
  * gst_h264_parser_parse_sei:
  * @nalparser: a #GstH264NalParser
- * @nalu: The #GST_H264_NAL_SEI #GstH264NalUnit to parse
+ * @nalu: The %GST_H264_NAL_SEI #GstH264NalUnit to parse
  * @messages: The GArray of #GstH264SEIMessage to fill. The caller must free it when done.
  *
  * Parses @nalu containing one or more Supplementary Enhancement Information messages,
@@ -3781,8 +3775,6 @@ gst_h264_parser_parse_decoder_config_record (GstH264NalParser * nalparser,
   if (ret->length_size_minus_one == 2) {
     /* "length_size_minus_one + 1" should be 1, 2, or 4 */
     GST_WARNING ("Wrong nal-length-size");
-    result = GST_H264_PARSER_ERROR;
-    goto error;
   }
 
   /* reserved 3bits */

@@ -23,6 +23,7 @@
 
 #include <gst/codecparsers/gstvp9parser.h>
 #include <gst/video/video.h>
+#include <gst/pbutils/pbutils.h>
 #include "gstvideoparserselements.h"
 #include "gstvp9parse.h"
 
@@ -36,11 +37,13 @@ typedef enum
   GST_VP9_PARSE_ALIGN_NONE = 0,
   GST_VP9_PARSE_ALIGN_SUPER_FRAME,
   GST_VP9_PARSE_ALIGN_FRAME,
-} GstVp9ParseAligment;
+} GstVp9ParseAlignment;
 
 struct _GstVp9Parse
 {
   GstBaseParse parent;
+
+  gboolean first_frame;
 
   /* parsed from the last keyframe */
   gint width;
@@ -53,8 +56,8 @@ struct _GstVp9Parse
   GstVp9BitDepth bit_depth;
   gboolean codec_alpha;
 
-  GstVp9ParseAligment in_align;
-  GstVp9ParseAligment align;
+  GstVp9ParseAlignment in_align;
+  GstVp9ParseAlignment align;
 
   GstVp9Parser *parser;
   gboolean update_caps;
@@ -151,6 +154,7 @@ gst_vp9_parse_reset (GstVp9Parse * self)
   self->profile = GST_VP9_PROFILE_UNDEFINED;
   self->bit_depth = (GstVp9BitDepth) 0;
   self->codec_alpha = FALSE;
+  self->first_frame = TRUE;
   gst_vp9_parse_reset_super_frame (self);
 }
 
@@ -219,7 +223,7 @@ gst_vp9_parse_profile_from_string (const gchar * profile)
 }
 
 static const gchar *
-gst_vp9_parse_alignment_to_string (GstVp9ParseAligment align)
+gst_vp9_parse_alignment_to_string (GstVp9ParseAlignment align)
 {
   switch (align) {
     case GST_VP9_PARSE_ALIGN_SUPER_FRAME:
@@ -233,7 +237,7 @@ gst_vp9_parse_alignment_to_string (GstVp9ParseAligment align)
   return NULL;
 }
 
-static GstVp9ParseAligment
+static GstVp9ParseAlignment
 gst_vp9_parse_alignment_from_string (const gchar * align)
 {
   if (!align)
@@ -248,7 +252,7 @@ gst_vp9_parse_alignment_from_string (const gchar * align)
 }
 
 static void
-gst_vp9_parse_alignment_from_caps (GstCaps * caps, GstVp9ParseAligment * align)
+gst_vp9_parse_alignment_from_caps (GstCaps * caps, GstVp9ParseAlignment * align)
 {
   *align = GST_VP9_PARSE_ALIGN_NONE;
 
@@ -278,11 +282,11 @@ gst_vp9_parse_check_codec_alpha (GstStructure * s, gboolean codec_alpha)
 
 /* check downstream caps to configure format and alignment */
 static void
-gst_vp9_parse_negotiate (GstVp9Parse * self, GstVp9ParseAligment in_align,
+gst_vp9_parse_negotiate (GstVp9Parse * self, GstVp9ParseAlignment in_align,
     GstCaps * in_caps)
 {
   GstCaps *caps;
-  GstVp9ParseAligment align = self->align;
+  GstVp9ParseAlignment align = self->align;
 
   caps = gst_pad_get_allowed_caps (GST_BASE_PARSE_SRC_PAD (self));
   GST_DEBUG_OBJECT (self, "allowed caps: %" GST_PTR_FORMAT, caps);
@@ -442,6 +446,34 @@ gst_vp9_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
   if (!frame->buffer)
     return GST_FLOW_OK;
 
+  if (self->first_frame) {
+    GstTagList *taglist;
+    GstCaps *caps;
+
+    /* codec tag */
+    caps = gst_pad_get_current_caps (GST_BASE_PARSE_SRC_PAD (parse));
+    if (caps == NULL) {
+      if (GST_PAD_IS_FLUSHING (GST_BASE_PARSE_SRC_PAD (self))) {
+        GST_INFO_OBJECT (self, "Src pad is flushing");
+        return GST_FLOW_FLUSHING;
+      } else {
+        GST_INFO_OBJECT (self, "Src pad is not negotiated!");
+        return GST_FLOW_NOT_NEGOTIATED;
+      }
+    }
+
+    taglist = gst_tag_list_new_empty ();
+    gst_pb_utils_add_codec_description_to_tag_list (taglist,
+        GST_TAG_VIDEO_CODEC, caps);
+    gst_caps_unref (caps);
+
+    gst_base_parse_merge_tags (parse, taglist, GST_TAG_MERGE_REPLACE);
+    gst_tag_list_unref (taglist);
+
+    /* also signals the end of first-frame processing */
+    self->first_frame = FALSE;
+  }
+
   /* The super frame may contain more than one frames inside its buffer.
      When splitting a super frame into frames, the base parse class only
      assign the PTS to the first frame and leave the others' PTS invalid.
@@ -541,6 +573,10 @@ gst_vp9_parse_handle_frame (GstBaseParse * parse, GstBaseParseFrame * frame,
        * Real data is either taken from input by baseclass or
        * a replacement output buffer is provided anyway. */
       gst_vp9_parse_parse_frame (self, &subframe, &frame_hdr);
+
+      /* Only the last frame of the super-fame should be displayed */
+      if (i != superframe_info.frames_in_superframe - 1)
+        GST_BUFFER_FLAG_SET (subframe.buffer, GST_BUFFER_FLAG_DECODE_ONLY);
 
       ret = gst_base_parse_finish_frame (parse, &subframe, frame_size);
     } else {
@@ -787,7 +823,7 @@ gst_vp9_parse_set_sink_caps (GstBaseParse * parse, GstCaps * caps)
 {
   GstVp9Parse *self = GST_VP9_PARSE (parse);
   GstStructure *str;
-  GstVp9ParseAligment align;
+  GstVp9ParseAlignment align;
   GstCaps *in_caps = NULL;
   const gchar *profile;
 

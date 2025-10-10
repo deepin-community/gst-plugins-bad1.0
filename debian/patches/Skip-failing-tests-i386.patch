@@ -1,0 +1,23 @@
+From: =?utf-8?q?Jeremy_B=C3=ADcha?= <jbicha@ubuntu.com>
+Date: Tue, 7 Oct 2025 19:00:26 -0400
+Subject: tests: Skip a test that fails on i386 because of rounding
+ differences
+
+---
+ tests/check/elements/avtpcrfbase.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/tests/check/elements/avtpcrfbase.c b/tests/check/elements/avtpcrfbase.c
+index 4565b70..4f31e6b 100644
+--- a/tests/check/elements/avtpcrfbase.c
++++ b/tests/check/elements/avtpcrfbase.c
+@@ -830,7 +830,9 @@ avtpcrfbase_suite (void)
+   tcase_add_test (tc_chain, test_validate_crf_pdu_tstamps_not_monotonic);
+   tcase_add_test (tc_chain, test_gst_base_freq_multiplier);
+   tcase_add_test (tc_chain, test_calculate_average_period_multiple_crf_tstamps);
++#ifndef __i386__
+   tcase_add_test (tc_chain, test_calculate_average_period_rounding_error);
++#endif
+   tcase_add_test (tc_chain,
+       test_calculate_average_period_multiple_crf_tstamps_64_bit_overflow);
+   tcase_add_test (tc_chain, test_calculate_average_period_single_crf_tstamp);

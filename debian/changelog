@@ -1,8 +1,225 @@
-gst-plugins-bad1.0 (1.24.6-1deepin1) unstable; urgency=medium
+gst-plugins-bad1.0 (1.26.6-5) unstable; urgency=medium
 
-  *This patch fixes this critical warning when registering MSDK.
+  * autopkgtest: Don't run on riscv64
+  * Revert increasing the build test timeout since it was ineffective
 
- -- lichenggang <lichenggang@deepin.org>  Tue, 22 Oct 2024 16:13:02 +0800
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Thu, 09 Oct 2025 11:42:50 -0400
+
+gst-plugins-bad1.0 (1.26.6-4) unstable; urgency=medium
+
+  * Increase build test timeout for riscv64 autopkgtest
+  * Stop skipping the curl redirect build test (Closes: #1114141)
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Wed, 08 Oct 2025 15:22:53 -0400
+
+gst-plugins-bad1.0 (1.26.6-3) unstable; urgency=medium
+
+  * Team upload
+  * Fix logic error in big endian skip test patch
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Wed, 08 Oct 2025 04:46:44 -0400
+
+gst-plugins-bad1.0 (1.26.6-2) unstable; urgency=medium
+
+  * Team upload
+
+  [ Jeremy Bícha ]
+  * Skip a redirect test that began failing once curl was updated to 8.16
+    (Closes: #1098871. Mitigates: #1114141.)
+  * Add patches to skip specific tests on some architectures
+  * Stop ignoring non-skipped test failures on release architectures
+  * Add an autopkgtest to ensure that build tests still pass when dependencies
+    change
+  * Restore default soundfont patch (Closes: #1018145)
+
+  [ Simon McVittie ]
+  * d/control: Add Build-Depends on systematic names for gir1.2-*-dev packages
+  * d/control: Replace libgirepository1.0-dev B-D with gobject-introspection
+  * gir1.2-gst-plugins-bad-1.0: Add ${gir:Provides}
+  * libgstreamer-plugins-bad1.0-dev: Add ${gir:Provides}
+  * libgstreamer-plugins-bad1.0-dev: Add ${gir:Depends}
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Tue, 07 Oct 2025 20:24:44 -0400
+
+gst-plugins-bad1.0 (1.26.6-1) unstable; urgency=medium
+
+  * New upstream version 1.26.6
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Mon, 15 Sep 2025 10:59:29 +0200
+
+gst-plugins-bad1.0 (1.26.5-2) unstable; urgency=medium
+
+  * trixie has been released, re-upload to unstable
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Mon, 11 Aug 2025 09:27:09 +0200
+
+gst-plugins-bad1.0 (1.26.5-1) experimental; urgency=medium
+
+  * New upstream version 1.26.5
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Fri, 08 Aug 2025 09:07:45 +0200
+
+gst-plugins-bad1.0 (1.26.4-1) experimental; urgency=medium
+
+  * d/watch: pin to 1.26.x
+  * New upstream version 1.26.4
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Wed, 16 Jul 2025 20:01:00 +0200
+
+gst-plugins-bad1.0 (1.26.3-1) experimental; urgency=medium
+
+  * New upstream version 1.26.3
+  * d/copyright: superfluous-file-pattern
+  * d/copyright: correct SPDX format
+  * d/copyright: missing-license-paragraph-in-dep5-copyright
+  * d/patches: update failing tests
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Fri, 27 Jun 2025 12:21:28 +0200
+
+gst-plugins-bad1.0 (1.26.2-2) unstable; urgency=medium
+
+  * Revert "d/rules: gstcuda missing on arm" (Closes: #1107628)
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Wed, 11 Jun 2025 13:21:39 +0200
+
+gst-plugins-bad1.0 (1.26.2-1) unstable; urgency=medium
+
+  * d/copyright: start converting to dep-5
+  * New upstream version 1.26.2
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Fri, 30 May 2025 09:28:42 +0200
+
+gst-plugins-bad1.0 (1.26.1-1) unstable; urgency=medium
+
+  * d/copyright: add default
+  * d/patches: remove 0002-test-latomic.patch
+  * New upstream version 1.26.1
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Fri, 25 Apr 2025 09:47:03 +0200
+
+gst-plugins-bad1.0 (1.26.0-1) unstable; urgency=medium
+
+  [ Marc Leeman ]
+  * Revert "d/watch: pin on 1.24.x"
+  * New upstream version 1.26.0
+  * d/patches: remove 0001-fix-build-without-wayland.patch
+  * d/patches: refresh Skip-failing-tests.patch
+  * d/rules: cuda-nvmm not available in debian yet
+  * d/rules: disable android media
+  * d/rules: cevc not in debian yet
+  * d/rules: nvcomp not in debian yet
+  * d/rules: nvdswrapper not in debian yet
+  * d/rules: svtjpegxs not in debian yet
+  * d/install: install libgsttensordecoders.so
+  * d/control: bump GStreamer version dependency
+  * d/patches: test for latomic generic
+  * d/rules: gstcuda missing on arm
+  * d/patches: disable libs_vkwindow elements_vkdeviceprovider
+  * Revert "d/install: remove libweebrtcdsp"
+  * d/: disable webrtcdsp for hurd
+  * d/control: update dependency version to 1.25.90
+
+  [ Jeremy Bícha ]
+  * Mark -good as only needed for build tests
+
+  [ Marc Leeman ]
+  * d/control: update GStreamer dependencies to >= 1.26.0
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Wed, 12 Mar 2025 10:50:20 +0100
+
+gst-plugins-bad1.0 (1.24.12-3) unstable; urgency=medium
+
+  * d/: disable webrtcdsp for hurd
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Wed, 19 Feb 2025 13:04:59 +0100
+
+gst-plugins-bad1.0 (1.24.12-2) unstable; urgency=medium
+
+  * Revert "d/install: remove libweebrtcdsp"
+  * Revert "d/control: libwebrtc-audio-processing-dev removed"
+  * Revert "d/rules: webrtcdsp disabled" (Closes: #1094638)
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Thu, 30 Jan 2025 14:50:34 +0100
+
+gst-plugins-bad1.0 (1.24.12-1) unstable; urgency=medium
+
+  * d/watch: pin on 1.24.x
+  * New upstream version 1.24.12
+  * d/patches: refresh wayland patch
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Thu, 30 Jan 2025 09:17:48 +0100
+
+gst-plugins-bad1.0 (1.24.11-3) unstable; urgency=medium
+
+  * d/rules: remove modules that break hurd-any (Closes: #1091759)
+  * d/patches: fix build without wayland
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Thu, 09 Jan 2025 14:04:09 +0100
+
+gst-plugins-bad1.0 (1.24.11-2) unstable; urgency=medium
+
+  * d/rules: disable gudev support for hurd architectures
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Wed, 08 Jan 2025 15:32:41 +0100
+
+gst-plugins-bad1.0 (1.24.11-1) unstable; urgency=medium
+
+  * d/rules: disable compiling gl for hurd archs
+  * New upstream version 1.24.11
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Wed, 08 Jan 2025 10:24:23 +0100
+
+gst-plugins-bad1.0 (1.24.10-3) unstable; urgency=medium
+
+  * d: disable directfb support (Closes: #1083040)
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Fri, 03 Jan 2025 15:41:11 +0100
+
+gst-plugins-bad1.0 (1.24.10-2) unstable; urgency=medium
+
+  * d/patches: meson: Drop max version bound from neon
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Thu, 05 Dec 2024 11:38:16 +0100
+
+gst-plugins-bad1.0 (1.24.10-1) unstable; urgency=medium
+
+  [ Dylan Aïssi ]
+  * Build the ONNX neural network plugin
+
+  [ Marc Leeman ]
+  * New upstream version 1.24.10
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Wed, 04 Dec 2024 10:28:52 +0100
+
+gst-plugins-bad1.0 (1.24.9-1) unstable; urgency=medium
+
+  * New upstream version 1.24.9
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Thu, 31 Oct 2024 09:11:43 +0100
+
+gst-plugins-bad1.0 (1.24.8-2) unstable; urgency=medium
+
+  * Team upload
+  * Stop buildling the intel-mediasdk support: no longer developed by Intel
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Thu, 26 Sep 2024 08:52:08 -0400
+
+gst-plugins-bad1.0 (1.24.8-1) unstable; urgency=medium
+
+  [ Jeremy Bícha ]
+  * Remove unused Build-Depends: libiptcdata0-dev
+
+  [ Marc Leeman ]
+  * New upstream version 1.24.8
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Thu, 19 Sep 2024 14:23:17 +0200
+
+gst-plugins-bad1.0 (1.24.7-1) unstable; urgency=medium
+
+  * d/rules: debian-rules-parses-dpkg-parsechangelog
+  * New upstream version 1.24.7
+
+ -- Marc Leeman <marc.leeman@gmail.com>  Wed, 21 Aug 2024 17:28:03 +0200
 
 gst-plugins-bad1.0 (1.24.6-1) unstable; urgency=medium
 

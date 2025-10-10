@@ -60,7 +60,7 @@
 #include "gstmsdkallocator.h"
 
 #ifndef _WIN32
-#include <libdrm/drm_fourcc.h>
+#include <drm_fourcc.h>
 #include "gstmsdkallocator_libva.h"
 #include <gst/va/gstvaallocator.h>
 #include <gst/va/gstvavideoformat.h>
@@ -101,6 +101,9 @@ enum
   PROP_MIRRORING,
 #endif
   PROP_SCALING_MODE,
+#if (MFX_VERSION >= 1033)
+  PROP_INTERPOLATION_METHOD,
+#endif
   PROP_FORCE_ASPECT_RATIO,
   PROP_FRC_ALGORITHM,
   PROP_VIDEO_DIRECTION,
@@ -127,6 +130,10 @@ enum
 #define PROP_CONTRAST_DEFAULT            1
 #define PROP_DETAIL_DEFAULT              0
 #define PROP_SCALING_MODE_DEFAULT        MFX_SCALING_MODE_DEFAULT
+#if (MFX_VERSION >= 1033)
+#define PROP_INTERPOLATION_METHOD_DEFAULT \
+  MFX_INTERPOLATION_DEFAULT
+#endif
 #define PROP_FORCE_ASPECT_RATIO_DEFAULT  TRUE
 #define PROP_FRC_ALGORITHM_DEFAULT       _MFX_FRC_ALGORITHM_NONE
 #define PROP_VIDEO_DIRECTION_DEFAULT     GST_VIDEO_ORIENTATION_IDENTITY
@@ -138,6 +145,9 @@ enum
 
 /* 8 should enough for a normal encoder */
 #define SRC_POOL_SIZE_DEFAULT            8
+
+/* It is used to compensate timestamp for input mfx surface */
+#define PTS_OFFSET                       GST_SECOND * 60 * 60 * 1000
 
 /* *INDENT-OFF* */
 static const gchar *doc_sink_caps_str =
@@ -429,7 +439,8 @@ gst_msdk_create_va_pool (GstMsdkVPP * thiz, GstVideoInfo * info,
     usage_hint |= VA_SURFACE_ATTRIB_USAGE_HINT_VPP_READ |
         VA_SURFACE_ATTRIB_USAGE_HINT_VPP_WRITE;
     gst_caps_set_features (aligned_caps, 0,
-        gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_DMABUF, NULL));
+        gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_DMABUF,
+            NULL));
   } else
     aligned_caps = gst_video_info_to_caps (info);
 
@@ -862,8 +873,20 @@ gst_msdkvpp_transform (GstBaseTransform * trans, GstBuffer * inbuf,
   if (inbuf->pts == GST_CLOCK_TIME_NONE)
     in_surface->surface->Data.TimeStamp = MFX_TIMESTAMP_UNKNOWN;
   else
+    /* In the case of multi-channel transoding, for example:
+     * "gst-launch-1.0 -vf filesrc location=input.bin ! h265parse ! msdkh265dec !\
+     * tee name=t ! queue ! msdkh265enc ! h265parse ! filesink location=out.h265\
+     * t. ! queue ! msdkvpp denoise=10 ! fakesink",
+     * msdkenc and msdkvpp re-use surface from decoder and they both need to set
+     * timestamp for input mfx surface; but encoder use input frame->pts while vpp
+     * use input buffer->pts, and frame->pts has 1000h offset larger than inbuf->pts;
+     * It is very likely to cause conflict or mfx surface timestamp. So we add this
+     * PTS_OFFSET here to ensure enc and vpp set the same value to input mfx surface
+     * meanwhile does not break encoder's setting min_pts for dts protection.
+     */
     in_surface->surface->Data.TimeStamp =
-        gst_util_uint64_scale_round (inbuf->pts, 90000, GST_SECOND);
+        gst_util_uint64_scale_round
+        (inbuf->pts + PTS_OFFSET, 90000, GST_SECOND);
 
   if (thiz->use_video_memory) {
     out_surface = gst_msdk_import_to_msdk_surface (outbuf, thiz->context,
@@ -916,7 +939,9 @@ gst_msdkvpp_transform (GstBaseTransform * trans, GstBuffer * inbuf,
     if (timestamp == MFX_TIMESTAMP_UNKNOWN)
       timestamp = GST_CLOCK_TIME_NONE;
     else
-      timestamp = gst_util_uint64_scale_round (timestamp, GST_SECOND, 90000);
+      /* We remove PTS_OFFSET here to avoid 1000h delay introduced earlier */
+      timestamp = gst_util_uint64_scale_round (timestamp, GST_SECOND, 90000)
+          - PTS_OFFSET;
 
     if (status == MFX_WRN_INCOMPATIBLE_VIDEO_PARAM)
       GST_WARNING_OBJECT (thiz, "VPP returned: %s",
@@ -1090,8 +1115,9 @@ ensure_filters (GstMsdkVPP * thiz)
     gst_msdkvpp_add_extra_param (thiz, (mfxExtBuffer *) mfx_mirroring);
   }
 
-  /* Scaling Mode */
-  if (thiz->flags & GST_MSDK_FLAG_SCALING_MODE) {
+  /* Scaling Mode & Interpolation Method */
+  if (thiz->flags & (GST_MSDK_FLAG_SCALING_MODE |
+          GST_MSDK_FLAG_INTERPOLATION_METHOD)) {
     gboolean scaling_mode_is_compute = FALSE;
 #if (MFX_VERSION >= 2007)
     if (thiz->scaling_mode == MFX_SCALING_MODE_INTEL_GEN_COMPUTE)
@@ -1103,6 +1129,14 @@ ensure_filters (GstMsdkVPP * thiz)
       mfx_scaling->Header.BufferId = MFX_EXTBUFF_VPP_SCALING;
       mfx_scaling->Header.BufferSz = sizeof (mfxExtVPPScaling);
       mfx_scaling->ScalingMode = thiz->scaling_mode;
+      if (MFX_RUNTIME_VERSION_ATLEAST (thiz->version, 1, 33)) {
+#if (MFX_VERSION >= 1033)
+        mfx_scaling->InterpolationMethod = thiz->interpolation_method;
+#endif
+      } else if (thiz->flags & GST_MSDK_FLAG_INTERPOLATION_METHOD) {
+        GST_WARNING_OBJECT (thiz,
+            "Interpolation method not supported, ignore it...");
+      }
       gst_msdkvpp_add_extra_param (thiz, (mfxExtBuffer *) mfx_scaling);
     } else {
       GST_WARNING_OBJECT (thiz,
@@ -1649,6 +1683,12 @@ gst_msdkvpp_set_property (GObject * object, guint prop_id,
       thiz->scaling_mode = g_value_get_enum (value);
       thiz->flags |= GST_MSDK_FLAG_SCALING_MODE;
       break;
+#if (MFX_VERSION >= 1033)
+    case PROP_INTERPOLATION_METHOD:
+      thiz->interpolation_method = g_value_get_enum (value);
+      thiz->flags |= GST_MSDK_FLAG_INTERPOLATION_METHOD;
+      break;
+#endif
     case PROP_FORCE_ASPECT_RATIO:
       thiz->keep_aspect = g_value_get_boolean (value);
       break;
@@ -1729,6 +1769,11 @@ gst_msdkvpp_get_property (GObject * object, guint prop_id,
     case PROP_SCALING_MODE:
       g_value_set_enum (value, thiz->scaling_mode);
       break;
+#if (MFX_VERSION >= 1033)
+    case PROP_INTERPOLATION_METHOD:
+      g_value_set_enum (value, thiz->interpolation_method);
+      break;
+#endif
     case PROP_FORCE_ASPECT_RATIO:
       g_value_set_boolean (value, thiz->keep_aspect);
       break;
@@ -1781,17 +1826,15 @@ gst_msdkvpp_set_context (GstElement * element, GstContext * context)
     gst_object_unref (msdk_context);
   } else
 #ifndef _WIN32
-    if (gst_msdk_context_from_external_va_display (context,
-          thiz->hardware, 0 /* GST_MSDK_JOB_VPP will be set later */ ,
-          &msdk_context)) {
+  if (gst_msdk_context_from_external_va_display (context,
+          thiz->hardware, GST_MSDK_JOB_VPP, &msdk_context)) {
     gst_object_replace ((GstObject **) & thiz->context,
         (GstObject *) msdk_context);
     gst_object_unref (msdk_context);
   }
 #else
-    if (gst_msdk_context_from_external_d3d11_device (context,
-          thiz->hardware, 0 /* GST_MSDK_JOB_VPP will be set later */ ,
-          &msdk_context)) {
+  if (gst_msdk_context_from_external_d3d11_device (context,
+          thiz->hardware, GST_MSDK_JOB_VPP, &msdk_context)) {
     gst_object_replace ((GstObject **) & thiz->context,
         (GstObject *) msdk_context);
     gst_object_unref (msdk_context);
@@ -1879,6 +1922,16 @@ _msdkvpp_install_properties (GObjectClass * gobject_class)
       g_param_spec_enum ("scaling-mode", "Scaling Mode",
       "The Scaling mode to use", gst_msdkvpp_scaling_mode_get_type (),
       PROP_SCALING_MODE_DEFAULT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
+#if (MFX_VERSION >= 1033)
+  obj_properties[PROP_INTERPOLATION_METHOD] =
+      g_param_spec_enum ("interpolation-method", "Interpolation Method",
+      "The Interpolation method used for scaling, note that not all interpolation-methods "
+      "may be compatible with all scaling-modes",
+      gst_msdkvpp_interpolation_method_get_type (),
+      PROP_INTERPOLATION_METHOD_DEFAULT, G_PARAM_READWRITE |
+      G_PARAM_STATIC_STRINGS);
+#endif
 
   obj_properties[PROP_FORCE_ASPECT_RATIO] =
       g_param_spec_boolean ("force-aspect-ratio", "Force Aspect Ratio",
@@ -2014,6 +2067,9 @@ gst_msdkvpp_init (GTypeInstance * instance, gpointer g_class)
   thiz->contrast = PROP_CONTRAST_DEFAULT;
   thiz->detail = PROP_DETAIL_DEFAULT;
   thiz->scaling_mode = PROP_SCALING_MODE_DEFAULT;
+#if (MFX_VERSION >= 1033)
+  thiz->interpolation_method = PROP_INTERPOLATION_METHOD_DEFAULT;
+#endif
   thiz->keep_aspect = PROP_FORCE_ASPECT_RATIO_DEFAULT;
   thiz->frc_algm = PROP_FRC_ALGORITHM_DEFAULT;
   thiz->video_direction = PROP_VIDEO_DIRECTION_DEFAULT;

@@ -160,6 +160,7 @@ gst_media_source_track_set_property (GObject * object, guint prop_id,
       self->track_type = g_value_get_enum (value);
       break;
     case PROP_TRACK_ID:
+      /* G_PARAM_CONSTRUCT_ONLY */
       self->track_id = g_value_dup_string (value);
       break;
     case PROP_ACTIVE:
@@ -345,7 +346,7 @@ gst_media_source_track_push (GstMediaSourceTrack * self, GstSample * sample)
 
   gboolean was_empty = gst_media_source_track_is_empty (self);
 
-  GstDataQueueItem *item = wrap_sample (sample);
+  GstDataQueueItem *item = wrap_sample (gst_sample_ref (sample));
 
   gboolean result = gst_data_queue_push (self->samples, item);
 
@@ -405,19 +406,6 @@ gst_media_source_track_resume (GstMediaSourceTrack * self)
 {
   g_return_if_fail (GST_IS_MEDIA_SOURCE_TRACK (self));
   gst_data_queue_set_flushing (self->samples, FALSE);
-}
-
-gboolean
-gst_media_source_track_try_push (GstMediaSourceTrack * self, GstSample * sample)
-{
-  g_return_val_if_fail (GST_IS_MEDIA_SOURCE_TRACK (self), FALSE);
-  g_return_val_if_fail (GST_IS_SAMPLE (sample), FALSE);
-
-  if (gst_data_queue_is_full (self->samples)) {
-    return FALSE;
-  }
-
-  return gst_media_source_track_push (self, sample);
 }
 
 gboolean

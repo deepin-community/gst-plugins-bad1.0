@@ -17,8 +17,7 @@
  * Boston, MA 02110-1301, USA.
  */
 
-#ifndef __GST_V4L2_DECODER_H__
-#define __GST_V4L2_DECODER_H__
+#pragma once
 
 #include <gst/gst.h>
 #include <gst/video/video.h>
@@ -34,8 +33,8 @@
  *
  * Since: 1.24
  */
-#define GST_CODEC_PICTURE_TS_NS(picture)	\
-	gst_util_uint64_scale_int (GST_CODEC_PICTURE_FRAME_NUMBER(picture), 1000, 1)
+#define GST_CODEC_PICTURE_TS_NS(picture) \
+  gst_util_uint64_scale_int (GST_CODEC_PICTURE_FRAME_NUMBER(picture), 1000, 1)
 
 G_BEGIN_DECLS
 
@@ -70,13 +69,14 @@ gboolean          gst_v4l2_decoder_set_sink_fmt (GstV4l2Decoder * self, guint32 
 GstCaps *         gst_v4l2_decoder_enum_src_formats (GstV4l2Decoder * self,
                                                      GstStaticCaps * static_filter);
 
+GstCaps *         gst_v4l2_decoder_enum_all_src_formats (GstV4l2Decoder * self,
+                                                         GstStaticCaps * static_filter);
+
 gboolean          gst_v4l2_decoder_select_src_format (GstV4l2Decoder * self,
                                                       GstCaps * caps,
-                                                      GstVideoInfo * vinfo,
                                                       GstVideoInfoDmaDrm * vinfo_drm);
 
 GstVideoCodecState * gst_v4l2_decoder_set_output_state (GstVideoDecoder * decoder,
-                                                        GstVideoInfo * vinfo,
                                                         GstVideoInfoDmaDrm * drm_info,
                                                         guint width,
                                                         guint height,
@@ -85,6 +85,15 @@ GstVideoCodecState * gst_v4l2_decoder_set_output_state (GstVideoDecoder * decode
 gint              gst_v4l2_decoder_request_buffers (GstV4l2Decoder * self,
                                                     GstPadDirection direction,
                                                     guint num_buffers);
+
+gint              gst_v4l2_decoder_create_buffers (GstV4l2Decoder * self,
+                                                   GstPadDirection direction,
+                                                   guint num_buffers);
+
+gint              gst_v4l2_decoder_remove_buffers (GstV4l2Decoder * self,
+                                                   GstPadDirection direction,
+                                                   guint index,
+                                                   guint num_buffers);
 
 gboolean          gst_v4l2_decoder_export_buffer (GstV4l2Decoder * self,
                                                   GstPadDirection directon,
@@ -105,7 +114,7 @@ gboolean          gst_v4l2_decoder_get_controls (GstV4l2Decoder * self,
 
 gboolean          gst_v4l2_decoder_query_control_size (GstV4l2Decoder * self,
                                                  unsigned int control_id,
-						 unsigned int *control_size);
+                                                 unsigned int *control_size);
 
 void              gst_v4l2_decoder_install_properties (GObjectClass * gobject_class,
                                                        gint prop_offset,
@@ -119,9 +128,7 @@ void              gst_v4l2_decoder_get_property (GObject * object, guint prop_id
 
 void              gst_v4l2_decoder_register (GstPlugin * plugin,
                                              GType dec_type,
-                                             GClassInitFunc class_init,
-                                             gconstpointer class_data,
-                                             GInstanceInitFunc instance_init,
+                                             GTypeInfo * type_info,
                                              const gchar *element_name_tmpl,
                                              GstV4l2CodecDevice * device,
                                              guint rank,
@@ -141,6 +148,9 @@ void              gst_v4l2_decoder_set_render_delay (GstV4l2Decoder * self,
 
 guint             gst_v4l2_decoder_get_render_delay (GstV4l2Decoder * self);
 
+gboolean          gst_v4l2_decoder_has_remove_bufs (GstV4l2Decoder * self);
+
+gboolean          gst_v4l2_decoder_in_doc_mode (GstV4l2Decoder * self);
 
 GstV4l2Request *  gst_v4l2_request_ref (GstV4l2Request * request);
 
@@ -161,5 +171,3 @@ GstBuffer *       gst_v4l2_request_dup_pic_buf (GstV4l2Request * request);
 gint              gst_v4l2_request_get_fd (GstV4l2Request * request);
 
 G_END_DECLS
-
-#endif /* __GST_V4L2_DECODER_H__ */

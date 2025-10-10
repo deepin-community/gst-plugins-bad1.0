@@ -25,4 +25,6 @@ G_BEGIN_DECLS
 
 void gst_cuda_ipc_client_deinit (void);
 
+gboolean gst_nvcodec_is_windows_10_or_greater (void);
+
 G_END_DECLS

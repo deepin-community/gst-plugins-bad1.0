@@ -252,7 +252,7 @@ static GstBuffer *
 create_test_buffer (guint64 num, guint64 size)
 {
   GstBuffer *buffer;
-  guint64 *data = g_malloc (sizeof (guint64));
+  guint64 *data = g_malloc0 (size);
 
   *data = num;
 
@@ -316,6 +316,7 @@ dec_plc_test (void)
 
   gst_buffer_unref (buf);
   gst_harness_teardown (h);
+  gst_object_unref (dec);
 }
 
 GST_START_TEST (test_48k_8ch_10000us)

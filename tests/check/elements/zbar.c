@@ -83,6 +83,10 @@ GST_START_TEST (test_still_image)
   GstElement *pipeline;
   const gchar *type, *symbol;
   int qual;
+  const GValue *value;
+  GBytes *symbol_bytes;
+  gconstpointer bytes_data;
+  gsize bytes_size;
 
   pipeline = setup_pipeline ();
 
@@ -99,6 +103,7 @@ GST_START_TEST (test_still_image)
   fail_unless (gst_structure_has_field (s, "timestamp"));
   fail_unless (gst_structure_has_field (s, "type"));
   fail_unless (gst_structure_has_field (s, "symbol"));
+  fail_unless (gst_structure_has_field (s, "symbol-bytes"));
   fail_unless (gst_structure_has_field (s, "quality"));
   fail_unless (gst_structure_get_int (s, "quality", &qual));
   fail_unless (qual >= 90);
@@ -106,6 +111,13 @@ GST_START_TEST (test_still_image)
   fail_unless_equals_string (type, "EAN-13");
   symbol = gst_structure_get_string (s, "symbol");
   fail_unless_equals_string (symbol, "9876543210128");
+  value = gst_structure_get_value (s, "symbol-bytes");
+  fail_unless (G_VALUE_HOLDS (value, G_TYPE_BYTES));
+  symbol_bytes = g_value_get_boxed (value);
+  bytes_data = g_bytes_get_data (symbol_bytes, &bytes_size);
+  fail_unless_equals_uint64 (bytes_size, 13);
+  fail_unless (memcmp (bytes_data, "9876543210128", 13) == 0,
+      "Bad symbol-bytes data: %.13s", bytes_data);
 
   fail_if (gst_structure_has_field (s, "frame"));
 

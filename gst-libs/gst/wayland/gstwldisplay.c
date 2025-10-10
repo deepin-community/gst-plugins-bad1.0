@@ -98,6 +98,7 @@ gst_wl_display_init (GstWlDisplay * self)
   g_rec_mutex_init (&priv->sync_mutex);
 
   gst_wl_linux_dmabuf_init_once ();
+  gst_wl_shm_init_once ();
   gst_shm_allocator_init_once ();
   gst_wl_videoformat_init_once ();
 }
@@ -203,38 +204,35 @@ dmabuf_modifier (void *data, struct zwp_linux_dmabuf_v1 *zwp_linux_dmabuf,
 {
   GstWlDisplay *self = data;
   guint64 modifier = (guint64) modifier_hi << 32 | modifier_lo;
-  static gboolean table_header = TRUE;
+  GstVideoFormat gst_format = gst_wl_dmabuf_format_to_video_format (format);
+  static uint32_t last_format = 0;
 
   GstWlDisplayPrivate *priv = gst_wl_display_get_instance_private (self);
 
-  if (gst_wl_dmabuf_format_to_video_format (format) != GST_VIDEO_FORMAT_UNKNOWN) {
-    GstVideoFormat gst_format = gst_wl_dmabuf_format_to_video_format (format);
-    const guint32 fourcc = gst_video_dma_drm_fourcc_from_format (gst_format);
+  /*
+   * Ignore unsupported formats along with implicit modifiers. Implicit
+   * modifiers have been source of garbled output for many many years and it
+   * was decided that we prefer disabling zero-copy over risking a bad output.
+   */
+  if (format == DRM_FORMAT_INVALID || modifier == DRM_FORMAT_MOD_INVALID)
+    return;
 
-    /*
-     * Ignore unsupported formats along with implicit modifiers. Implicit
-     * modifiers have been source of garbled output for many many years and it
-     * was decided that we prefer disabling zero-copy over risking a bad output.
-     */
-    if (fourcc == DRM_FORMAT_INVALID || modifier == DRM_FORMAT_MOD_INVALID)
-      return;
-
-    if (table_header == TRUE) {
-      GST_INFO ("===== All DMA Formats With Modifiers =====");
-      GST_INFO ("| Gst Format   | DRM Format              |");
-      table_header = FALSE;
-    }
-
-    if (modifier == 0)
-      GST_INFO ("|-----------------------------------------");
-
-    GST_INFO ("| %-12s | %-23s |",
-        (modifier == 0) ? gst_video_format_to_string (gst_format) : "",
-        gst_video_dma_drm_fourcc_to_string (fourcc, modifier));
-
-    g_array_append_val (priv->dmabuf_formats, format);
-    g_array_append_val (priv->dmabuf_modifiers, modifier);
+  if (last_format == 0) {
+    GST_INFO ("===== All DMA Formats With Modifiers =====");
+    GST_INFO ("| Gst Format   | DRM Format              |");
   }
+
+  if (last_format != format) {
+    GST_INFO ("|-----------------------------------------");
+    last_format = format;
+  }
+
+  GST_INFO ("| %-12s | %-23s |",
+      (modifier == 0) ? gst_video_format_to_string (gst_format) : "",
+      gst_video_dma_drm_fourcc_to_string (format, modifier));
+
+  g_array_append_val (priv->dmabuf_formats, format);
+  g_array_append_val (priv->dmabuf_modifiers, modifier);
 }
 
 static const struct zwp_linux_dmabuf_v1_listener dmabuf_listener = {
@@ -365,8 +363,12 @@ gst_wl_display_thread_run (gpointer data)
   /* main loop */
   while (1) {
     g_rec_mutex_lock (&priv->sync_mutex);
-    while (wl_display_prepare_read_queue (priv->display, priv->queue) != 0)
-      wl_display_dispatch_queue_pending (priv->display, priv->queue);
+    while (wl_display_prepare_read_queue (priv->display, priv->queue) != 0) {
+      if (wl_display_dispatch_queue_pending (priv->display, priv->queue) == -1) {
+        g_rec_mutex_unlock (&priv->sync_mutex);
+        goto error;
+      }
+    }
     g_rec_mutex_unlock (&priv->sync_mutex);
     wl_display_flush (priv->display);
 
@@ -382,7 +384,10 @@ gst_wl_display_thread_run (gpointer data)
       goto error;
 
     g_rec_mutex_lock (&priv->sync_mutex);
-    wl_display_dispatch_queue_pending (priv->display, priv->queue);
+    if (wl_display_dispatch_queue_pending (priv->display, priv->queue) == -1) {
+      g_rec_mutex_unlock (&priv->sync_mutex);
+      goto error;
+    }
     g_rec_mutex_unlock (&priv->sync_mutex);
   }
 
@@ -560,6 +565,28 @@ gst_wl_display_sync (GstWlDisplay * self,
   return callback;
 }
 
+/* gst_wl_display_object_destroy
+ *
+ * A syncronized version of `xxx_destroy` that ensures that the
+ * once this function returns, the destroy_func will either have already completed,
+ * or will never be called.
+ */
+void
+gst_wl_display_object_destroy (GstWlDisplay * self,
+    gpointer * object, GDestroyNotify destroy_func)
+{
+  GstWlDisplayPrivate *priv = gst_wl_display_get_instance_private (self);
+
+  g_rec_mutex_lock (&priv->sync_mutex);
+
+  if (*object) {
+    destroy_func (*object);
+    *object = NULL;
+  }
+
+  g_rec_mutex_unlock (&priv->sync_mutex);
+}
+
 /* gst_wl_display_callback_destroy
  *
  * A syncronized version of `wl_callback_destroy` that ensures that the
@@ -570,16 +597,8 @@ void
 gst_wl_display_callback_destroy (GstWlDisplay * self,
     struct wl_callback **callback)
 {
-  GstWlDisplayPrivate *priv = gst_wl_display_get_instance_private (self);
-
-  g_rec_mutex_lock (&priv->sync_mutex);
-
-  if (*callback) {
-    wl_callback_destroy (*callback);
-    *callback = NULL;
-  }
-
-  g_rec_mutex_unlock (&priv->sync_mutex);
+  gst_wl_display_object_destroy (self, (gpointer *) callback,
+      (GDestroyNotify) wl_callback_destroy);
 }
 
 struct wl_display *
@@ -676,6 +695,61 @@ gst_wl_display_get_dmabuf_formats (GstWlDisplay * self)
   GstWlDisplayPrivate *priv = gst_wl_display_get_instance_private (self);
 
   return priv->dmabuf_formats;
+}
+
+/**
+ * gst_wl_display_fill_shm_format_list:
+ * @self: A #GstWlDisplay
+ * @format_list: A #GValue of type #GST_TYPE_LIST
+ *
+ * Append supported SHM formats to a given list, suitable for use with the "format" caps value.
+ *
+ * Since: 1.26
+ */
+void
+gst_wl_display_fill_shm_format_list (GstWlDisplay * self, GValue * format_list)
+{
+  GstWlDisplayPrivate *priv = gst_wl_display_get_instance_private (self);
+  GValue value = G_VALUE_INIT;
+  guint fmt;
+  GstVideoFormat gfmt;
+
+  for (gint i = 0; i < priv->shm_formats->len; i++) {
+    fmt = g_array_index (priv->shm_formats, uint32_t, i);
+    gfmt = gst_wl_shm_format_to_video_format (fmt);
+    if (gfmt != GST_VIDEO_FORMAT_UNKNOWN) {
+      g_value_init (&value, G_TYPE_STRING);
+      g_value_set_static_string (&value, gst_video_format_to_string (gfmt));
+      gst_value_list_append_and_take_value (format_list, &value);
+    }
+  }
+}
+
+/**
+ * gst_wl_display_fill_drm_format_list:
+ * @self: A #GstWlDisplay
+ * @format_list: A #GValue of type #GST_TYPE_LIST
+ *
+ * Append supported DRM formats to a given list, suitable for use with the "drm-format" caps value.
+ *
+ * Since: 1.26
+ */
+void
+gst_wl_display_fill_dmabuf_format_list (GstWlDisplay * self,
+    GValue * format_list)
+{
+  GstWlDisplayPrivate *priv = gst_wl_display_get_instance_private (self);
+  GValue value = G_VALUE_INIT;
+  guint fmt;
+  guint64 mod;
+
+  for (gint i = 0; i < priv->dmabuf_formats->len; i++) {
+    fmt = g_array_index (priv->dmabuf_formats, uint32_t, i);
+    mod = g_array_index (priv->dmabuf_modifiers, guint64, i);
+    g_value_init (&value, G_TYPE_STRING);
+    g_value_take_string (&value, gst_video_dma_drm_fourcc_to_string (fmt, mod));
+    gst_value_list_append_and_take_value (format_list, &value);
+  }
 }
 
 struct wp_single_pixel_buffer_manager_v1 *

@@ -40,6 +40,8 @@ extra_comm_args = [
   '-DBUILDING_GST_D3D11',
   '-DG_LOG_DOMAIN="GStreamer-D3D11"',
 ]
+# Definition issues in external headers
+extra_comm_args += cc.get_supported_arguments(['-Wno-undef'])
 
 have_d3d11sdk_h = false
 have_dxgidebug_h = false
@@ -50,6 +52,13 @@ d3d11_lib = cc.find_library('d3d11', required: d3d11_opt)
 dxgi_lib = cc.find_library('dxgi', required: d3d11_opt)
 d3dcompiler_lib = cc.find_library('d3dcompiler', required: false)
 runtimeobject_lib = cc.find_library('runtimeobject', required: false)
+
+if not gstd3dshader_dep.found()
+  if d3d11_option.enabled()
+    error('The d3d11 was enabled explicitly, but required d3dshader dep were not found.')
+  endif
+  subdir_done()
+endif
 
 if not d3d11_lib.found() or not dxgi_lib.found()
   subdir_done()
@@ -169,16 +178,11 @@ endif
 if cc.get_id() != 'msvc'
   extra_args = cc.get_supported_arguments([
     '-Wno-redundant-decls',
+    # include/directxmath/DirectXMathMatrix.inl:1161:16: error: variable 'aa' set but not used
+    '-Wno-unused-but-set-variable',
   ])
 
   extra_comm_args += extra_args
-endif
-
-hlsl_precompiled = []
-fxc = find_program ('fxc', required : get_option ('d3d11-hlsl-precompile'))
-if cc.get_id() == 'msvc' and fxc.found()
-  subdir('hlsl')
-  extra_comm_args += ['-DHLSL_PRECOMPILED']
 endif
 
 have_dx_math = cxx.compiles('''
@@ -227,6 +231,23 @@ if host_machine.cpu_family() != 'x86'
   endif
 endif
 
+if cxx.compiles('''
+    #include <d3d11_4.h>
+    #include <d3d11.h>
+    int main(int argc, char ** argv) {
+      D3D11_FEATURE_DATA_D3D11_OPTIONS options;
+      D3D11_FEATURE_DATA_D3D11_OPTIONS4 options4;
+      D3D11_FEATURE_DATA_D3D11_OPTIONS5 options5;
+      D3D11_FEATURE fo = D3D11_FEATURE_D3D11_OPTIONS;
+      D3D11_FEATURE fo4 = D3D11_FEATURE_D3D11_OPTIONS4;
+      D3D11_FEATURE fo5 = D3D11_FEATURE_D3D11_OPTIONS5;
+      return 0;
+    }
+    ''',
+    name: 'D3D11_FEATURE_DATA_* symbols in d3d11 header')
+  extra_comm_args += ['-DHAVE_D3D11_FEATURE_DATA_D3D11_OPTIONS5']
+endif
+
 configure_file(
   input : 'gstd3d11config.h.meson',
   output : 'gstd3d11config.h',
@@ -237,14 +258,14 @@ configure_file(
 
 pkg_name = 'gstreamer-d3d11-' + api_version
 gstd3d11 = library('gstd3d11-' + api_version,
-  d3d11_sources + hlsl_precompiled,
+  d3d11_sources,
   c_args : gst_plugins_bad_args + extra_c_args + extra_comm_args,
   cpp_args : gst_plugins_bad_args + extra_comm_args,
   include_directories : [configinc, libsinc],
   version : libversion,
   soversion : soversion,
   install : true,
-  dependencies : [gstbase_dep, gstvideo_dep, gmodule_dep, d3d11_lib, dxgi_lib] + extra_deps
+  dependencies : [gstbase_dep, gstvideo_dep, gmodule_dep, gstd3dshader_dep, d3d11_lib, dxgi_lib] + extra_deps
 )
 
 pkgconfig.generate(gstd3d11,

@@ -263,6 +263,7 @@ gst_transcoder_finalize (GObject * object)
   g_free (self->dest_uri);
   g_cond_clear (&self->cond);
   gst_object_unref (self->api_bus);
+  gst_clear_object (&self->profile);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -276,6 +277,7 @@ gst_transcoder_constructed (GObject * object)
 
   self->transcodebin =
       gst_element_factory_make ("uritranscodebin", "uritranscodebin");
+  gst_object_ref_sink (self->transcodebin);
 
   g_object_set (self->transcodebin, "source-uri", self->source_uri,
       "dest-uri", self->dest_uri, "profile", self->profile,
@@ -323,6 +325,7 @@ gst_transcoder_set_property (GObject * object, guint prop_id,
       gst_transcoder_set_position_update_interval_internal (self);
       break;
     case PROP_PROFILE:
+      /* G_PARAM_CONSTRUCT_ONLY */
       GST_OBJECT_LOCK (self);
       self->profile = g_value_dup_object (value);
       GST_OBJECT_UNLOCK (self);
@@ -841,7 +844,7 @@ gst_transcoder_main (gpointer data)
   self->current_state = GST_STATE_NULL;
   if (self->transcodebin) {
     gst_element_set_state (self->transcodebin, GST_STATE_NULL);
-    g_clear_object (&self->transcodebin);
+    gst_clear_object (&self->transcodebin);
   }
 
   GST_TRACE_OBJECT (self, "Stopped main thread");

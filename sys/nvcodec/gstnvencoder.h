@@ -22,6 +22,10 @@
 #include <gst/gst.h>
 #include <gst/video/video.h>
 
+#ifdef HAVE_GST_D3D12
+#include <gst/d3d12/gstd3d12.h>
+#endif
+
 #ifdef G_OS_WIN32
 #include <gst/d3d11/gstd3d11.h>
 #endif
@@ -35,6 +39,7 @@
 #include <gst/cuda/gstcuda.h>
 #include "nvEncodeAPI.h"
 #include "gstnvenc.h"
+#include "gstnvcodecutils.h"
 
 G_BEGIN_DECLS
 
@@ -83,9 +88,11 @@ GType gst_nv_encoder_rc_mode_get_type (void);
 
 typedef enum
 {
+  GST_NV_ENCODER_RC_MODE_DEFAULT,
   GST_NV_ENCODER_RC_MODE_CONSTQP,
-  GST_NV_ENCODER_RC_MODE_VBR,
   GST_NV_ENCODER_RC_MODE_CBR,
+  GST_NV_ENCODER_RC_MODE_VBR,
+  GST_NV_ENCODER_RC_MODE_VBR_MINQP,
   GST_NV_ENCODER_RC_MODE_CBR_LOWDELAY_HQ,
   GST_NV_ENCODER_RC_MODE_CBR_HQ,
   GST_NV_ENCODER_RC_MODE_VBR_HQ,
@@ -121,6 +128,29 @@ typedef enum
   GST_NV_ENCODER_TUNE_ULTRA_LOW_LATENCY = 3,
   GST_NV_ENCODER_TUNE_LOSSLESS = 4,
 } GstNvEncoderTune;
+
+typedef enum
+{
+  GST_NV_ENCODER_PRESET_720,
+  GST_NV_ENCODER_PRESET_1080,
+  GST_NV_ENCODER_PRESET_2160,
+} GstNvEncoderPresetResolution;
+
+typedef struct
+{
+  GstNvEncoderPreset preset;
+  GstNvEncoderTune tune;
+  GstNvEncoderRCMode rc_mode;
+  GstNvEncoderMultiPass multi_pass;
+} GstNvEncoderPresetOptions;
+
+typedef struct
+{
+  GUID preset;
+  NV_ENC_TUNING_INFO tune;
+  NV_ENC_PARAMS_RC_MODE rc_mode;
+  NV_ENC_MULTI_PASS multi_pass;
+} GstNvEncoderPresetOptionsNative;
 
 typedef struct
 {
@@ -249,16 +279,13 @@ struct _GstNvEncoderClass
 
 GType gst_nv_encoder_get_type (void);
 
-void gst_nv_encoder_preset_to_native (GstNvEncoderPreset preset,
-                                      GstNvEncoderTune tune,
-                                      GUID * preset_guid,
-                                      NV_ENC_TUNING_INFO * tune_info);
+void gst_nv_encoder_preset_to_native_h264 (GstNvEncoderPresetResolution resolution,
+                                      const GstNvEncoderPresetOptions * input,
+                                      GstNvEncoderPresetOptionsNative * output);
 
-void gst_nv_encoder_rc_mode_to_native (GstNvEncoderRCMode rc_mode,
-                                       GstNvEncoderMultiPass multipass,
-                                       NV_ENC_PARAMS_RC_MODE * rc_mode_native,
-                                       NV_ENC_MULTI_PASS * multipass_native);
-
+void gst_nv_encoder_preset_to_native (GstNvEncoderPresetResolution resolution,
+                                      const GstNvEncoderPresetOptions * input,
+                                      GstNvEncoderPresetOptionsNative * output);
 
 void gst_nv_encoder_set_device_mode (GstNvEncoder * encoder,
                                      GstNvEncoderDeviceMode mode,

@@ -98,6 +98,31 @@
 GST_DEBUG_CATEGORY_STATIC (gst_nv_h265_dec_debug);
 #define GST_CAT_DEFAULT gst_nv_h265_dec_debug
 
+#define DOC_SINK_CAPS \
+    "video/x-h265, width = (int) [ 144, 8192 ], height = (int) [ 144, 8192 ], " \
+    "stream-format= (string) { hev1, hvc1, byte-stream  }, " \
+    "alignment= (string) au, " \
+    "profile = (string) { main, main-10, main-12, main-444, main-444-10, main-444-12 }"
+
+#define DOC_SRC_CAPS_COMM \
+    "format = (string) { NV12, P010_10LE, P012_LE, Y444, Y444_16LE, GBR, GBR_16LE }, " \
+    "width = (int) [ 144, 8192 ], height = (int) [ 144, 8192 ]"
+
+#define DOC_SRC_CAPS_D3D11 \
+    "format = (string) { I420, I420_10LE, I420_12LE, Y444, Y444_16LE, GBR, GBR_16LE }, " \
+    "width = (int) [ 144, 8192 ], height = (int) [ 144, 8192 ]"
+
+#define DOC_SRC_CAPS_GL \
+    "format = (string) { I420, I420_10LE, I420_12LE, Y444, Y444_16LE, GBR }, " \
+    "width = (int) [ 144, 8192 ], height = (int) [ 144, 8192 ]"
+
+#define DOC_SRC_CAPS \
+    "video/x-raw(memory:CUDAMemory), " DOC_SRC_CAPS_COMM "; " \
+    "video/x-raw(memory:D3D12Memory), " DOC_SRC_CAPS_COMM "; " \
+    "video/x-raw(memory:D3D11Memory), " DOC_SRC_CAPS_D3D11 "; " \
+    "video/x-raw(memory:GLMemory), " DOC_SRC_CAPS_GL "; " \
+    "video/x-raw, " DOC_SRC_CAPS_COMM
+
 typedef struct _GstNvH265Dec
 {
   GstH265Decoder parent;
@@ -128,6 +153,7 @@ typedef struct _GstNvH265Dec
   gint max_display_delay;
 
   GstVideoFormat out_format;
+  GstVideoInterlaceMode interlace_mode;
 } GstNvH265Dec;
 
 typedef struct _GstNvH265DecClass
@@ -168,6 +194,7 @@ static void gst_nv_h265_dec_set_context (GstElement * element,
     GstContext * context);
 static gboolean gst_nv_h265_dec_open (GstVideoDecoder * decoder);
 static gboolean gst_nv_h265_dec_close (GstVideoDecoder * decoder);
+static gboolean gst_nv_h265_dec_start (GstVideoDecoder * decoder);
 static gboolean gst_nv_h265_dec_stop (GstVideoDecoder * decoder);
 static gboolean gst_nv_h265_dec_negotiate (GstVideoDecoder * decoder);
 static gboolean gst_nv_h265_dec_decide_allocation (GstVideoDecoder *
@@ -293,15 +320,23 @@ gst_nv_h265_dec_class_init (GstNvH265DecClass * klass,
       "Codec/Decoder/Video/Hardware",
       "NVIDIA H.265 video decoder", "Seungha Yang <seungha@centricular.com>");
 
-  gst_element_class_add_pad_template (element_class,
-      gst_pad_template_new ("sink", GST_PAD_SINK, GST_PAD_ALWAYS,
-          cdata->sink_caps));
-  gst_element_class_add_pad_template (element_class,
-      gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
-          cdata->src_caps));
+  auto pad_templ = gst_pad_template_new ("sink",
+      GST_PAD_SINK, GST_PAD_ALWAYS, cdata->sink_caps);
+  auto doc_caps = gst_caps_from_string (DOC_SINK_CAPS);
+  gst_pad_template_set_documentation_caps (pad_templ, doc_caps);
+  gst_caps_unref (doc_caps);
+  gst_element_class_add_pad_template (element_class, pad_templ);
+
+  pad_templ = gst_pad_template_new ("src",
+      GST_PAD_SRC, GST_PAD_ALWAYS, cdata->src_caps);
+  doc_caps = gst_caps_from_string (DOC_SRC_CAPS);
+  gst_pad_template_set_documentation_caps (pad_templ, doc_caps);
+  gst_caps_unref (doc_caps);
+  gst_element_class_add_pad_template (element_class, pad_templ);
 
   decoder_class->open = GST_DEBUG_FUNCPTR (gst_nv_h265_dec_open);
   decoder_class->close = GST_DEBUG_FUNCPTR (gst_nv_h265_dec_close);
+  decoder_class->start = GST_DEBUG_FUNCPTR (gst_nv_h265_dec_start);
   decoder_class->stop = GST_DEBUG_FUNCPTR (gst_nv_h265_dec_stop);
   decoder_class->negotiate = GST_DEBUG_FUNCPTR (gst_nv_h265_dec_negotiate);
   decoder_class->decide_allocation =
@@ -458,6 +493,23 @@ gst_nv_h265_dec_close (GstVideoDecoder * decoder)
 }
 
 static gboolean
+gst_nv_h265_dec_start (GstVideoDecoder * decoder)
+{
+  GstNvH265Dec *self = GST_NV_H265_DEC (decoder);
+
+  self->width = 0;
+  self->height = 0;
+  self->coded_width = 0;
+  self->coded_height = 0;
+  self->interlace_mode = GST_VIDEO_INTERLACE_MODE_PROGRESSIVE;
+  self->chroma_format_idc = 0;
+  self->bitdepth = 0;
+  self->max_dpb_size = 0;
+
+  return GST_VIDEO_DECODER_CLASS (parent_class)->start (decoder);
+}
+
+static gboolean
 gst_nv_h265_dec_stop (GstVideoDecoder * decoder)
 {
   GstNvH265Dec *self = GST_NV_H265_DEC (decoder);
@@ -549,6 +601,7 @@ gst_nv_h265_dec_new_sequence (GstH265Decoder * decoder, const GstH265SPS * sps,
   gboolean modified = FALSE;
   guint max_width, max_height;
   GstVideoFormat out_format = GST_VIDEO_FORMAT_UNKNOWN;
+  GstVideoInterlaceMode interlace_mode = GST_VIDEO_INTERLACE_MODE_PROGRESSIVE;
   gboolean is_gbr = FALSE;
   const GstH265VUIParams *vui = &sps->vui_params;
 
@@ -598,6 +651,26 @@ gst_nv_h265_dec_new_sequence (GstH265Decoder * decoder, const GstH265SPS * sps,
     is_gbr = TRUE;
   }
 
+  if (sps->vui_parameters_present_flag && sps->vui_params.field_seq_flag) {
+    GST_ELEMENT_WARNING (self, STREAM, NOT_IMPLEMENTED, (nullptr),
+        ("alternate interlace mode is not properly supported. Output might have wrong aspect ratio"));
+  } else {
+    /* 7.4.4 Profile, tier and level sementics */
+    if (sps->profile_tier_level.progressive_source_flag &&
+        !sps->profile_tier_level.interlaced_source_flag) {
+      interlace_mode = GST_VIDEO_INTERLACE_MODE_PROGRESSIVE;
+    } else {
+      interlace_mode = GST_VIDEO_INTERLACE_MODE_MIXED;
+    }
+  }
+
+  if (self->interlace_mode != interlace_mode) {
+    GST_INFO_OBJECT (self, "Interlace mode change %d -> %d",
+        self->interlace_mode, interlace_mode);
+    self->interlace_mode = interlace_mode;
+    modified = TRUE;
+  }
+
   switch (self->bitdepth) {
     case 8:
       if (self->chroma_format_idc == 1)
@@ -645,8 +718,8 @@ gst_nv_h265_dec_new_sequence (GstH265Decoder * decoder, const GstH265SPS * sps,
   if (modified || !gst_nv_decoder_is_configured (self->decoder)) {
     GstVideoInfo info;
 
-    gst_video_info_set_format (&info,
-        self->out_format, self->width, self->height);
+    gst_video_info_set_interlaced_format (&info,
+        self->out_format, self->interlace_mode, self->width, self->height);
 
     self->max_dpb_size = max_dpb_size;
     max_width = gst_nv_decoder_get_max_output_size (self->coded_width,

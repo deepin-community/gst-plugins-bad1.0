@@ -15,7 +15,40 @@ vparse_sources = [
   'gstjpeg2000parse.c',
   'gstvp9parse.c',
   'gstav1parse.c',
+  'gsth266parse.c',
 ]
+
+vparse_headers = [
+  'gstvc1parse.h',
+  'gstmpeg4videoparse.h',
+  'gstvideoparserselements.h',
+  'gstmpegvideoparse.h',
+  'gsth264parse.h',
+  'gstjpeg2000parse.h',
+  'gstvp9parse.h',
+  'gsth263parse.h',
+  'gstdiracparse.h',
+  'gstvideoparseutils.h',
+  'gstav1parse.h',
+  'gstpngparse.h',
+  'gsth265parse.h',
+  'gsth266parse.h',
+  'dirac_parse.h',
+  'h263parse.h',
+]
+
+doc_sources = []
+foreach s: vparse_sources + vparse_headers
+  doc_sources += meson.current_source_dir() / s
+endforeach
+
+plugin_sources += {
+  'videoparsersbad': pathsep.join(doc_sources)
+}
+
+if get_option('videoparsers').disabled()
+  subdir_done()
+endif
 
 gstvideoparsersbad = library('gstvideoparsersbad',
   vparse_sources,

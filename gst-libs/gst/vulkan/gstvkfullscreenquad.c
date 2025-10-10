@@ -84,7 +84,7 @@ struct Vertex vertices[] = {
 };
 
 gushort indices[] = {
-  0, 1, 2, 0, 2, 3,
+  0, 1, 3, 2,
 };
 
 static gboolean
@@ -378,6 +378,12 @@ create_pipeline (GstVulkanFullScreenQuad * self, GError ** error)
     return FALSE;
   }
 
+  if (GST_VIDEO_INFO_FORMAT (&self->out_info) == GST_VIDEO_FORMAT_UNKNOWN) {
+    g_set_error_literal (error, GST_VULKAN_ERROR,
+        VK_ERROR_INITIALIZATION_FAILED, "Output video info is unset");
+    return FALSE;
+  }
+
   if (!self->pipeline_layout)
     if (!create_pipeline_layout (self, error))
       return FALSE;
@@ -663,9 +669,15 @@ create_framebuffer (GstVulkanFullScreenQuad * self, GstVulkanImageView ** views,
 GstVulkanFence *
 gst_vulkan_full_screen_quad_get_last_fence (GstVulkanFullScreenQuad * self)
 {
+  GstVulkanFence *ret;
+
   g_return_val_if_fail (GST_IS_VULKAN_FULL_SCREEN_QUAD (self), NULL);
 
-  return LAST_FENCE_OR_ALWAYS_SIGNALLED (self, self->queue->device);
+  GST_OBJECT_LOCK (self);
+  ret = LAST_FENCE_OR_ALWAYS_SIGNALLED (self, self->queue->device);
+  GST_OBJECT_UNLOCK (self);
+
+  return ret;
 }
 
 #define clear_field(field,type,trash_free_func) \
@@ -898,8 +910,10 @@ gst_vulkan_full_screen_quad_class_init (GstVulkanFullScreenQuadClass * klass)
  */
 gboolean
 gst_vulkan_full_screen_quad_set_info (GstVulkanFullScreenQuad * self,
-    GstVideoInfo * in_info, GstVideoInfo * out_info)
+    const GstVideoInfo * in_info, const GstVideoInfo * out_info)
 {
+  GST_OBJECT_LOCK (self);
+
   self->out_info = *out_info;
   self->in_info = *in_info;
 
@@ -909,13 +923,15 @@ gst_vulkan_full_screen_quad_set_info (GstVulkanFullScreenQuad * self,
   clear_descriptor_cache (self);
   clear_uniform_data (self);
 
+  GST_OBJECT_UNLOCK (self);
+
   return TRUE;
 }
 
 /**
  * gst_vulkan_full_screen_quad_set_input_buffer:
  * @self: the #GstVulkanFullScreenQuad
- * @buffer: the input #GstBuffer to set
+ * @buffer: (nullable): the input #GstBuffer to set
  * @error: #GError to fill on failure
  *
  * Returns: whether the input buffer could be changed
@@ -932,15 +948,18 @@ gst_vulkan_full_screen_quad_set_input_buffer (GstVulkanFullScreenQuad * self,
 
   priv = GET_PRIV (self);
 
+  GST_OBJECT_LOCK (self);
   gst_buffer_replace (&priv->inbuf, buffer);
   clear_descriptor_set (self);
+  GST_OBJECT_UNLOCK (self);
+
   return TRUE;
 }
 
 /**
  * gst_vulkan_full_screen_quad_set_output_buffer:
  * @self: the #GstVulkanFullScreenQuad
- * @buffer: the output #GstBuffer to set
+ * @buffer: (nullable): the output #GstBuffer to set
  * @error: #GError to fill on failure
  *
  * Returns: whether the input buffer could be changed
@@ -957,8 +976,11 @@ gst_vulkan_full_screen_quad_set_output_buffer (GstVulkanFullScreenQuad * self,
 
   priv = GET_PRIV (self);
 
+  GST_OBJECT_LOCK (self);
   gst_buffer_replace (&priv->outbuf, buffer);
   clear_framebuffer (self);
+  GST_OBJECT_UNLOCK (self);
+
   return TRUE;
 }
 
@@ -986,11 +1008,14 @@ gst_vulkan_full_screen_quad_set_shaders (GstVulkanFullScreenQuad * self,
 
   priv = GET_PRIV (self);
 
+  GST_OBJECT_LOCK (self);
   clear_shaders (self);
   destroy_pipeline (self);
 
   priv->vert = gst_vulkan_handle_ref (vert);
   priv->frag = gst_vulkan_handle_ref (frag);
+
+  GST_OBJECT_UNLOCK (self);
 
   return TRUE;
 }
@@ -1017,11 +1042,13 @@ gst_vulkan_full_screen_quad_set_uniform_buffer (GstVulkanFullScreenQuad * self,
 
   priv = GET_PRIV (self);
 
+  GST_OBJECT_LOCK (self);
   clear_uniform_data (self);
   if (uniforms) {
     priv->uniforms = gst_memory_ref (uniforms);
     priv->uniform_size = gst_memory_get_sizes (uniforms, NULL, NULL);
   }
+  GST_OBJECT_UNLOCK (self);
 
   return TRUE;
 }
@@ -1051,11 +1078,13 @@ gst_vulkan_full_screen_quad_set_index_buffer (GstVulkanFullScreenQuad * self,
 
   priv = GET_PRIV (self);
 
+  GST_OBJECT_LOCK (self);
   clear_index_data (self);
   if (indices) {
     priv->indices = gst_memory_ref (indices);
     priv->n_indices = n_indices;
   }
+  GST_OBJECT_UNLOCK (self);
 
   return TRUE;
 }
@@ -1082,10 +1111,12 @@ gst_vulkan_full_screen_quad_set_vertex_buffer (GstVulkanFullScreenQuad * self,
 
   priv = GET_PRIV (self);
 
+  GST_OBJECT_LOCK (self);
   clear_vertex_data (self);
   if (vertices) {
     priv->vertices = gst_memory_ref (vertices);
   }
+  GST_OBJECT_UNLOCK (self);
 
   return TRUE;
 }
@@ -1148,85 +1179,6 @@ failure:
     gst_memory_unref (priv->indices);
   priv->indices = NULL;
   priv->n_indices = 0;
-  return FALSE;
-}
-
-/**
- * gst_vulkan_full_screen_quad_draw:
- * @self: the #GstVulkanFullScreenQuad
- * @error: a #GError filled on error
- *
- * Helper function for creation and submission of a command buffer that draws
- * a full screen quad.  If you need to add other things to the command buffer,
- * create the command buffer manually and call
- * gst_vulkan_full_screen_quad_prepare_draw(),
- * gst_vulkan_full_screen_quad_fill_command_buffer() and
- * gst_vulkan_full_screen_quad_submit() instead.
- *
- * Returns: whether the draw was successful
- *
- * Since: 1.18
- */
-gboolean
-gst_vulkan_full_screen_quad_draw (GstVulkanFullScreenQuad * self,
-    GError ** error)
-{
-  GstVulkanCommandBuffer *cmd = NULL;
-  GstVulkanFence *fence = NULL;
-  VkResult err;
-
-  g_return_val_if_fail (GST_IS_VULKAN_FULL_SCREEN_QUAD (self), FALSE);
-
-  fence = gst_vulkan_device_create_fence (self->queue->device, error);
-  if (!fence)
-    goto error;
-
-  if (!gst_vulkan_full_screen_quad_prepare_draw (self, fence, error))
-    goto error;
-
-  if (!(cmd = gst_vulkan_command_pool_create (self->cmd_pool, error)))
-    goto error;
-
-  {
-    VkCommandBufferBeginInfo cmd_buf_info = { 0, };
-
-    /* *INDENT-OFF* */
-    cmd_buf_info = (VkCommandBufferBeginInfo) {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .pNext = NULL,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        .pInheritanceInfo = NULL
-    };
-    /* *INDENT-ON* */
-
-    gst_vulkan_command_buffer_lock (cmd);
-    err = vkBeginCommandBuffer (cmd->cmd, &cmd_buf_info);
-    if (gst_vulkan_error_to_g_error (err, error, "vkBeginCommandBuffer") < 0)
-      goto unlock_error;
-  }
-
-  if (!gst_vulkan_full_screen_quad_fill_command_buffer (self, cmd, fence,
-          error))
-    goto unlock_error;
-
-  err = vkEndCommandBuffer (cmd->cmd);
-  gst_vulkan_command_buffer_unlock (cmd);
-  if (gst_vulkan_error_to_g_error (err, error, "vkEndCommandBuffer") < 0)
-    goto error;
-
-  if (!gst_vulkan_full_screen_quad_submit (self, cmd, fence, error))
-    goto error;
-
-  gst_vulkan_fence_unref (fence);
-
-  return TRUE;
-
-unlock_error:
-  gst_vulkan_command_buffer_unlock (cmd);
-
-error:
-  gst_clear_mini_object ((GstMiniObject **) & cmd);
-  gst_clear_mini_object ((GstMiniObject **) & fence);
   return FALSE;
 }
 
@@ -1358,19 +1310,8 @@ gst_vulkan_full_screen_quad_enable_clear (GstVulkanFullScreenQuad * self,
   clear_render_pass (self);
 }
 
-/**
- * gst_vulkan_full_screen_quad_prepare_draw:
- * @self: the #GstVulkanFullScreenQuad
- * @fence: a #GstVulkanFence that will be signalled after submission
- * @error: a #GError filled on error
- *
- * Returns: whether the necessary information could be generated for drawing a
- * frame.
- *
- * Since: 1.18
- */
-gboolean
-gst_vulkan_full_screen_quad_prepare_draw (GstVulkanFullScreenQuad * self,
+static gboolean
+prepare_draw_internal (GstVulkanFullScreenQuad * self,
     GstVulkanFence * fence, GError ** error)
 {
   GstVulkanFullScreenQuadPrivate *priv;
@@ -1388,7 +1329,7 @@ gst_vulkan_full_screen_quad_prepare_draw (GstVulkanFullScreenQuad * self,
       return FALSE;
 
   if (!ensure_vertex_data (self, error))
-    goto error;
+    return FALSE;
 
   if (!self->descriptor_cache)
     if (!create_descriptor_pool (self, error))
@@ -1449,17 +1390,31 @@ error:
 }
 
 /**
- * gst_vulkan_full_screen_quad_fill_command_buffer:
- * @self: a #GstVulkanFullScreenQuad
- * @cmd: the #GstVulkanCommandBuffer to fill with commands
- * @error: a #GError to fill on error
+ * gst_vulkan_full_screen_quad_prepare_draw:
+ * @self: the #GstVulkanFullScreenQuad
+ * @fence: a #GstVulkanFence that will be signalled after submission
+ * @error: a #GError filled on error
  *
- * Returns: whether @cmd could be filled with the necessary commands
+ * Returns: whether the necessary information could be generated for drawing a
+ * frame.
  *
  * Since: 1.18
  */
 gboolean
-gst_vulkan_full_screen_quad_fill_command_buffer (GstVulkanFullScreenQuad * self,
+gst_vulkan_full_screen_quad_prepare_draw (GstVulkanFullScreenQuad * self,
+    GstVulkanFence * fence, GError ** error)
+{
+  gboolean ret;
+
+  GST_OBJECT_LOCK (self);
+  ret = prepare_draw_internal (self, fence, error);
+  GST_OBJECT_UNLOCK (self);
+
+  return ret;
+}
+
+static gboolean
+fill_command_buffer_internal (GstVulkanFullScreenQuad * self,
     GstVulkanCommandBuffer * cmd, GstVulkanFence * fence, GError ** error)
 {
   GstVulkanFullScreenQuadPrivate *priv;
@@ -1471,6 +1426,12 @@ gst_vulkan_full_screen_quad_fill_command_buffer (GstVulkanFullScreenQuad * self,
   g_return_val_if_fail (GST_IS_VULKAN_FULL_SCREEN_QUAD (self), FALSE);
   g_return_val_if_fail (cmd != NULL, FALSE);
   g_return_val_if_fail (fence != NULL, FALSE);
+
+  if (GST_VIDEO_INFO_FORMAT (&self->out_info) == GST_VIDEO_FORMAT_UNKNOWN) {
+    g_set_error_literal (error, GST_VULKAN_ERROR,
+        VK_ERROR_INITIALIZATION_FAILED, "Output video info is unset");
+    return FALSE;
+  }
 
   priv = GET_PRIV (self);
 
@@ -1607,19 +1568,33 @@ error:
 }
 
 /**
- * gst_vulkan_full_screen_quad_submit:
+ * gst_vulkan_full_screen_quad_fill_command_buffer:
  * @self: a #GstVulkanFullScreenQuad
- * @cmd: (transfer full): a #GstVulkanCommandBuffer to submit
- * @fence: a #GstVulkanFence to signal on completion
+ * @cmd: the #GstVulkanCommandBuffer to fill with commands
  * @error: a #GError to fill on error
  *
- * Returns: whether @cmd could be submitted to the queue
+ * @cmd must be locked with gst_vulkan_command_buffer_lock().
+ *
+ * Returns: whether @cmd could be filled with the necessary commands
  *
  * Since: 1.18
  */
 gboolean
-gst_vulkan_full_screen_quad_submit (GstVulkanFullScreenQuad * self,
+gst_vulkan_full_screen_quad_fill_command_buffer (GstVulkanFullScreenQuad * self,
     GstVulkanCommandBuffer * cmd, GstVulkanFence * fence, GError ** error)
+{
+  gboolean ret;
+
+  GST_OBJECT_LOCK (self);
+  ret = fill_command_buffer_internal (self, cmd, fence, error);
+  GST_OBJECT_UNLOCK (self);
+
+  return ret;
+}
+
+static gboolean
+submit_internal (GstVulkanFullScreenQuad * self, GstVulkanCommandBuffer * cmd,
+    GstVulkanFence * fence, GError ** error)
 {
   VkResult err;
 
@@ -1651,6 +1626,17 @@ gst_vulkan_full_screen_quad_submit (GstVulkanFullScreenQuad * self,
       goto error;
   }
 
+  return TRUE;
+
+error:
+  return FALSE;
+}
+
+
+static void
+submit_final_unlocked (GstVulkanFullScreenQuad * self,
+    GstVulkanCommandBuffer * cmd, GstVulkanFence * fence)
+{
   gst_vulkan_trash_list_add (self->trash_list,
       gst_vulkan_trash_list_acquire (self->trash_list, fence,
           gst_vulkan_trash_mini_object_unref, GST_MINI_OBJECT_CAST (cmd)));
@@ -1660,9 +1646,143 @@ gst_vulkan_full_screen_quad_submit (GstVulkanFullScreenQuad * self,
   if (self->last_fence)
     gst_vulkan_fence_unref (self->last_fence);
   self->last_fence = gst_vulkan_fence_ref (fence);
+}
+
+/**
+ * gst_vulkan_full_screen_quad_submit:
+ * @self: a #GstVulkanFullScreenQuad
+ * @cmd: (transfer full): a #GstVulkanCommandBuffer to submit
+ * @fence: a #GstVulkanFence to signal on completion
+ * @error: a #GError to fill on error
+ *
+ * Returns: whether @cmd could be submitted to the queue
+ *
+ * Since: 1.18
+ */
+gboolean
+gst_vulkan_full_screen_quad_submit (GstVulkanFullScreenQuad * self,
+    GstVulkanCommandBuffer * cmd, GstVulkanFence * fence, GError ** error)
+{
+  if (!submit_internal (self, cmd, fence, error))
+    return FALSE;
+
+  GST_OBJECT_LOCK (self);
+  submit_final_unlocked (self, cmd, fence);
+  GST_OBJECT_UNLOCK (self);
+
+  return TRUE;
+}
+
+/**
+ * gst_vulkan_full_screen_quad_draw:
+ * @self: the #GstVulkanFullScreenQuad
+ * @error: a #GError filled on error
+ *
+ * Helper function for creation and submission of a command buffer that draws
+ * a full screen quad.  If you need to add other things to the command buffer,
+ * create the command buffer manually and call
+ * gst_vulkan_full_screen_quad_prepare_draw(),
+ * gst_vulkan_full_screen_quad_fill_command_buffer() and
+ * gst_vulkan_full_screen_quad_submit() instead.
+ *
+ * Returns: whether the draw was successful
+ *
+ * Since: 1.18
+ */
+gboolean
+gst_vulkan_full_screen_quad_draw (GstVulkanFullScreenQuad * self,
+    GError ** error)
+{
+  GstVulkanCommandBuffer *cmd = NULL;
+  GstVulkanFence *fence = NULL;
+  VkResult err;
+
+  g_return_val_if_fail (GST_IS_VULKAN_FULL_SCREEN_QUAD (self), FALSE);
+
+  fence = gst_vulkan_device_create_fence (self->queue->device, error);
+  if (!fence)
+    goto error;
+
+  GST_OBJECT_LOCK (self);
+  if (!prepare_draw_internal (self, fence, error)) {
+    GST_OBJECT_UNLOCK (self);
+    goto error;
+  }
+
+  if (!(cmd = gst_vulkan_command_pool_create (self->cmd_pool, error))) {
+    GST_OBJECT_UNLOCK (self);
+    goto error;
+  }
+
+  {
+    VkCommandBufferBeginInfo cmd_buf_info = { 0, };
+
+    /* *INDENT-OFF* */
+    cmd_buf_info = (VkCommandBufferBeginInfo) {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .pNext = NULL,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        .pInheritanceInfo = NULL
+    };
+    /* *INDENT-ON* */
+
+    gst_vulkan_command_buffer_lock (cmd);
+    err = vkBeginCommandBuffer (cmd->cmd, &cmd_buf_info);
+    if (gst_vulkan_error_to_g_error (err, error, "vkBeginCommandBuffer") < 0) {
+      GST_OBJECT_UNLOCK (self);
+      goto unlock_error;
+    }
+  }
+
+  if (!fill_command_buffer_internal (self, cmd, fence, error)) {
+    GST_OBJECT_UNLOCK (self);
+    goto unlock_error;
+  }
+
+  err = vkEndCommandBuffer (cmd->cmd);
+  gst_vulkan_command_buffer_unlock (cmd);
+  if (gst_vulkan_error_to_g_error (err, error, "vkEndCommandBuffer") < 0) {
+    GST_OBJECT_UNLOCK (self);
+    goto error;
+  }
+
+  if (!submit_internal (self, cmd, fence, error)) {
+    GST_OBJECT_UNLOCK (self);
+    goto error;
+  }
+
+  submit_final_unlocked (self, cmd, fence);
+  GST_OBJECT_UNLOCK (self);
+
+  gst_vulkan_fence_unref (fence);
 
   return TRUE;
 
+unlock_error:
+  gst_vulkan_command_buffer_unlock (cmd);
+
 error:
+  gst_clear_mini_object ((GstMiniObject **) & cmd);
+  gst_clear_mini_object ((GstMiniObject **) & fence);
   return FALSE;
+}
+
+/**
+ * gst_vulkan_full_screen_quad_get_queue:
+ * @self: a #GstVulkanFullScreenQuad
+ *
+ * Returns: (transfer full) (nullable): The currently configured
+ *     #GstVulkanQueue
+ *
+ * Since: 1.26
+ */
+GstVulkanQueue *
+gst_vulkan_full_screen_quad_get_queue (GstVulkanFullScreenQuad * self)
+{
+  g_return_val_if_fail (GST_IS_VULKAN_FULL_SCREEN_QUAD (self), NULL);
+
+  if (self->queue)
+    return gst_object_ref (self->queue);
+  else
+    return NULL;
 }

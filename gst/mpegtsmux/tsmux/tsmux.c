@@ -67,7 +67,9 @@
 
 #include <string.h>
 
+#include <gst/base/gstbytewriter.h>
 #include <gst/mpegts/mpegts.h>
+#include <gst/mpegtsdemux/gstmpegdesc.h>
 
 #include "tsmux.h"
 #include "tsmuxstream.h"
@@ -819,6 +821,8 @@ tsmux_program_remove_stream (TsMuxProgram * program, TsMuxStream * stream)
     return FALSE;
   }
 
+  program->pmt_changed = TRUE;
+
   return streams->len == 0;
 }
 
@@ -1460,7 +1464,7 @@ rewrite_si (TsMux * mux, gint64 cur_ts)
       next_pcr = get_current_pcr (mux, cur_ts);
     }
 
-    if (program->scte35_pid != 0) {
+    if (program->scte35_pid != 0 && program->scte35_null_interval != 0) {
       gboolean write_scte_null = FALSE;
       if (program->next_scte35_pcr == -1)
         write_scte_null = TRUE;
@@ -1853,6 +1857,27 @@ tsmux_write_pmt (TsMux * mux, TsMuxProgram * program)
       g_ptr_array_add (pmt->descriptors, descriptor);
     }
 
+    /* Scan the streams looking for metadata streams */
+    for (i = 0; i < program->streams->len; i++) {
+      TsMuxStream *stream = g_ptr_array_index (program->streams, i);
+
+      if (stream->internal_stream_type == TSMUX_ST_PS_ID3) {
+        GstMpegtsMetadataPointerDescriptor metadata_pointer_descriptor;
+        metadata_pointer_descriptor.metadata_application_format =
+            GST_MPEGTS_METADATA_APPLICATION_FORMAT_IDENTIFIER_FIELD;
+        metadata_pointer_descriptor.metadata_format =
+            GST_MPEGTS_METADATA_FORMAT_IDENTIFIER_FIELD;
+        metadata_pointer_descriptor.metadata_format_identifier = DRF_ID_ID3;
+        metadata_pointer_descriptor.metadata_service_id = 0;
+        metadata_pointer_descriptor.program_number = program->pgm_number;
+
+        descriptor =
+            gst_mpegts_descriptor_from_metadata_pointer
+            (&metadata_pointer_descriptor);
+        g_ptr_array_add (pmt->descriptors, descriptor);
+      }
+    }
+
     /* Write out the entries */
     for (i = 0; i < program->streams->len; i++) {
       GstMpegtsPMTStream *pmt_stream;
@@ -1906,5 +1931,13 @@ tsmux_write_scte_null (TsMux * mux, TsMuxProgram * program)
 void
 tsmux_set_bitrate (TsMux * mux, guint64 bitrate)
 {
+  if (bitrate != 0 && mux->bitrate != 0 && mux->n_bytes != 0) {
+    guint64 new_byte_counter =
+        gst_util_uint64_scale (mux->n_bytes, bitrate, mux->bitrate);
+    GST_LOG ("bitrate transition %" G_GUINT64_FORMAT " => %" G_GUINT64_FORMAT
+        ", adjusting byte counter %" G_GUINT64_FORMAT " => %" G_GUINT64_FORMAT,
+        mux->bitrate, bitrate, mux->n_bytes, new_byte_counter);
+    mux->n_bytes = new_byte_counter;
+  }
   mux->bitrate = bitrate;
 }

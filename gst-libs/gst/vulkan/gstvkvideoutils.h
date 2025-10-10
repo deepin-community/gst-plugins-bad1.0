@@ -39,12 +39,30 @@ struct _GstVulkanVideoProfile
   VkVideoProfileInfoKHR profile;
   union {
     VkVideoDecodeUsageInfoKHR decode;
+    /**
+     * GstVulkanVideoProfile.usage.encode:
+     *
+     * Since: 1.26
+     **/
+    VkVideoEncodeUsageInfoKHR encode;
   } usage;
 
   union {
     VkBaseInStructure base;
     VkVideoDecodeH264ProfileInfoKHR h264dec;
     VkVideoDecodeH265ProfileInfoKHR h265dec;
+    /**
+     * GstVulkanVideoProfile.usage.codec.h264enc:
+     *
+     * Since: 1.26
+     **/
+    VkVideoEncodeH264ProfileInfoKHR h264enc;
+    /**
+     * GstVulkanVideoProfile.usage.codec.h265enc:
+     *
+     * Since: 1.26
+     **/
+    VkVideoEncodeH265ProfileInfoKHR h265enc;
   } codec;
 #endif
   gpointer _reserved[GST_PADDING];
@@ -62,11 +80,31 @@ struct _GstVulkanVideoCapabilities
   VkVideoCapabilitiesKHR caps;
   union
   {
-    VkBaseInStructure base;
-    VkVideoDecodeH264CapabilitiesKHR h264dec;
-    VkVideoDecodeH265CapabilitiesKHR h265dec;
-  } codec;
+    struct
+    {
+      /*< private >*/
+      VkVideoDecodeCapabilitiesKHR caps;
+      union
+      {
+        /*< private >*/
+        VkVideoDecodeH264CapabilitiesKHR h264;
+        VkVideoDecodeH265CapabilitiesKHR h265;
+      } codec;
+    } decoder;
+    struct
+    {
+      /*< private >*/
+      VkVideoEncodeCapabilitiesKHR caps;
+      union
+      {
+        /*< private >*/
+        VkVideoEncodeH264CapabilitiesKHR h264;
+        VkVideoEncodeH265CapabilitiesKHR h265;
+      } codec;
+    } encoder;
+  };
 #endif
+  /*< private >*/
   gpointer _reserved[GST_PADDING];
 };
 

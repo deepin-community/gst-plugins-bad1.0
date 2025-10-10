@@ -67,6 +67,7 @@ enum
 {
   SIGNAL_KEY_EVENT,
   SIGNAL_MOUSE_EVENT,
+  SIGNAL_MOUSE_SCROLL_EVENT,
   SIGNAL_PRESENT,
   SIGNAL_LAST
 };
@@ -178,7 +179,14 @@ gst_d3d11_window_class_init (GstD3D11WindowClass * klass)
   d3d11_window_signals[SIGNAL_MOUSE_EVENT] =
       g_signal_new ("mouse-event", G_TYPE_FROM_CLASS (klass),
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-      G_TYPE_NONE, 4, G_TYPE_STRING, G_TYPE_INT, G_TYPE_DOUBLE, G_TYPE_DOUBLE);
+      G_TYPE_NONE, 5, G_TYPE_STRING, G_TYPE_INT, G_TYPE_DOUBLE, G_TYPE_DOUBLE,
+      G_TYPE_UINT);
+
+  d3d11_window_signals[SIGNAL_MOUSE_SCROLL_EVENT] =
+      g_signal_new ("mouse-scroll-event", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+      G_TYPE_NONE, 6, G_TYPE_STRING, G_TYPE_DOUBLE, G_TYPE_DOUBLE,
+      G_TYPE_INT, G_TYPE_INT, G_TYPE_UINT);
 
   d3d11_window_signals[SIGNAL_PRESENT] =
       g_signal_new ("present", G_TYPE_FROM_CLASS (klass),
@@ -213,6 +221,7 @@ gst_d3d11_window_set_property (GObject * object, guint prop_id,
 
   switch (prop_id) {
     case PROP_D3D11_DEVICE:
+      /* G_PARAM_CONSTRUCT_ONLY */
       self->device = (GstD3D11Device *) g_value_dup_object (value);
       break;
     case PROP_FORCE_ASPECT_RATIO:
@@ -477,7 +486,7 @@ gst_d3d11_window_on_key_event (GstD3D11Window * window, const gchar * event,
 
 void
 gst_d3d11_window_on_mouse_event (GstD3D11Window * window, const gchar * event,
-    gint button, gdouble x, gdouble y)
+    gint button, gdouble x, gdouble y, guint modifier)
 {
   RECT render_rect;
   GstVideoOrientationMethod method;
@@ -567,7 +576,21 @@ gst_d3d11_window_on_mouse_event (GstD3D11Window * window, const gchar * event,
   }
 
   g_signal_emit (window, d3d11_window_signals[SIGNAL_MOUSE_EVENT], 0,
-      event, button, x, y);
+      event, button, x, y, modifier);
+}
+
+void
+gst_d3d11_window_on_mouse_scroll_event (GstD3D11Window * window,
+    const gchar * event, gdouble x, gdouble y, gint delta_x, gint delta_y,
+    guint modifier)
+{
+  g_return_if_fail (GST_IS_D3D11_WINDOW (window));
+
+  if (!window->enable_navigation_events)
+    return;
+
+  g_signal_emit (window, d3d11_window_signals[SIGNAL_MOUSE_SCROLL_EVENT], 0,
+      event, x, y, delta_x, delta_y, modifier);
 }
 
 typedef struct

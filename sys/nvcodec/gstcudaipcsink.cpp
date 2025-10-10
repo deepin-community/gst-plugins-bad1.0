@@ -166,9 +166,10 @@ gst_cuda_ipc_sink_class_init (GstCudaIpcSinkClass * klass)
   g_object_class_install_property (object_class, PROP_ADDRESS,
       g_param_spec_string ("address", "Address",
           "Server address. Specifies name of WIN32 named pipe "
-          "or unix domain socket path on Linux",
-          DEFAULT_ADDRESS, (GParamFlags) (G_PARAM_READWRITE |
-              G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
+          "or unix domain socket path on Linux", "",
+          (GParamFlags) (G_PARAM_READWRITE |
+              G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY |
+              GST_PARAM_DOC_SHOW_DEFAULT)));
 
   g_object_class_install_property (object_class, PROP_IPC_MODE,
       g_param_spec_enum ("ipc-mode", "IPC Mode",
@@ -437,7 +438,8 @@ gst_cuda_ipc_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
   }
 
   gst_caps_set_features_simple (new_caps,
-      gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY, nullptr));
+      gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY,
+          nullptr));
 
   gst_clear_caps (&priv->caps);
   priv->caps = new_caps;
@@ -459,6 +461,9 @@ gst_cuda_ipc_sink_set_caps (GstBaseSink * sink, GstCaps * caps)
   if (priv->configured_ipc_mode == GST_CUDA_IPC_MMAP) {
     gst_buffer_pool_config_set_cuda_alloc_method (config,
         GST_CUDA_MEMORY_ALLOC_MMAP);
+  } else {
+    /* legacy CUDA ipc requires default cuda allocation */
+    gst_buffer_pool_config_set_cuda_stream_ordered_alloc (config, FALSE);
   }
 
   if (!gst_buffer_pool_set_config (priv->fallback_pool, config)) {
@@ -514,6 +519,9 @@ gst_cuda_ipc_sink_propose_allocation (GstBaseSink * sink, GstQuery * query)
     if (priv->configured_ipc_mode == GST_CUDA_IPC_MMAP) {
       gst_buffer_pool_config_set_cuda_alloc_method (config,
           GST_CUDA_MEMORY_ALLOC_MMAP);
+    } else {
+      /* legacy CUDA ipc requires default cuda allocation */
+      gst_buffer_pool_config_set_cuda_stream_ordered_alloc (config, FALSE);
     }
 
     size = GST_VIDEO_INFO_SIZE (&info);
@@ -613,7 +621,10 @@ gst_cuda_ipc_sink_prepare (GstBaseSink * sink, GstBuffer * buf)
         (priv->configured_ipc_mode == GST_CUDA_IPC_MMAP &&
             alloc_method != GST_CUDA_MEMORY_ALLOC_MMAP) ||
         (priv->configured_ipc_mode == GST_CUDA_IPC_LEGACY &&
-            alloc_method != GST_CUDA_MEMORY_ALLOC_MALLOC)) {
+            alloc_method != GST_CUDA_MEMORY_ALLOC_MALLOC) ||
+        (priv->configured_ipc_mode == GST_CUDA_IPC_LEGACY &&
+            alloc_method == GST_CUDA_MEMORY_ALLOC_MALLOC &&
+            gst_cuda_memory_is_stream_ordered (mem))) {
       if (gst_buffer_pool_acquire_buffer (priv->fallback_pool, &cuda_buf,
               nullptr) != GST_FLOW_OK) {
         GST_ERROR_OBJECT (self, "Couldn't acquire fallback buffer");

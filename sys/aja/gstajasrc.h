@@ -47,7 +47,7 @@ struct _GstAjaSrc {
   // Everything below protected by queue lock
   GMutex queue_lock;
   GCond queue_cond;
-  GstQueueArray *queue;
+  GstVecDeque *queue;
   guint queue_num_frames;
   gboolean playing;
   gboolean shutdown;
@@ -59,6 +59,8 @@ struct _GstAjaSrc {
   GstBufferPool *buffer_pool;
   GstBufferPool *audio_buffer_pool;
   GstBufferPool *anc_buffer_pool;
+
+  GstClock *clock;
 
   // Properties
   gchar *device_identifier;

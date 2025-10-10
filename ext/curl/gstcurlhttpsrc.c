@@ -566,6 +566,7 @@ gst_curl_http_src_set_property (GObject * object, guint prop_id,
       source->strict_ssl = g_value_get_boolean (value);
       break;
     case PROP_SSL_CA_FILE:
+      g_free (source->custom_ca_file);
       source->custom_ca_file = g_value_dup_string (value);
       break;
     case PROP_RETRIES:
@@ -1056,12 +1057,13 @@ escape:
  * understand.
  */
 static gboolean
-_headers_to_curl_slist (GQuark field_id, const GValue * value, gpointer ptr)
+_headers_to_curl_slist (const GstIdStr * fieldname, const GValue * value,
+    gpointer ptr)
 {
   gchar *field;
   struct curl_slist **p_slist = ptr;
 
-  field = g_strdup_printf ("%s: %s", g_quark_to_string (field_id),
+  field = g_strdup_printf ("%s: %s", gst_id_str_as_str (fieldname),
       g_value_get_string (value));
 
   *p_slist = curl_slist_append (*p_slist, field);
@@ -1124,7 +1126,7 @@ gst_curl_http_src_create_easy_handle (GstCurlHttpSrc * s)
 
   /* curl_slist_append dynamically allocates memory, but I need to free it */
   if (s->request_headers != NULL) {
-    gst_structure_foreach (s->request_headers, _headers_to_curl_slist,
+    gst_structure_foreach_id_str (s->request_headers, _headers_to_curl_slist,
         &s->slist);
     if (curl_easy_setopt (handle, CURLOPT_HTTPHEADER, s->slist) != CURLE_OK) {
       GST_WARNING_OBJECT (s, "Failed to set HTTP headers!");
@@ -1475,6 +1477,11 @@ gst_curl_http_src_cleanup_instance (GstCurlHttpSrc * src)
   g_mutex_unlock (&src->uri_mutex);
   g_mutex_clear (&src->uri_mutex);
 
+  g_free (src->username);
+  src->username = NULL;
+  g_free (src->password);
+  src->password = NULL;
+
   g_free (src->proxy_uri);
   src->proxy_uri = NULL;
   g_free (src->no_proxy_list);
@@ -1493,6 +1500,9 @@ gst_curl_http_src_cleanup_instance (GstCurlHttpSrc * src)
 
   g_free (src->user_agent);
   src->user_agent = NULL;
+
+  g_free (src->custom_ca_file);
+  src->custom_ca_file = NULL;
 
   g_mutex_clear (&src->buffer_mutex);
 

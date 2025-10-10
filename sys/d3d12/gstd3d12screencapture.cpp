@@ -49,14 +49,14 @@ gst_d3d12_screen_capture_init (GstD3D12ScreenCapture * self)
 }
 
 GstFlowReturn
-gst_d3d12_screen_capture_prepare (GstD3D12ScreenCapture * capture)
+gst_d3d12_screen_capture_prepare (GstD3D12ScreenCapture * capture, guint flags)
 {
   g_return_val_if_fail (GST_IS_D3D12_SCREEN_CAPTURE (capture), GST_FLOW_ERROR);
 
   auto klass = GST_D3D12_SCREEN_CAPTURE_GET_CLASS (capture);
   g_assert (klass->prepare);
 
-  return klass->prepare (capture);
+  return klass->prepare (capture, flags);
 }
 
 gboolean
@@ -71,6 +71,19 @@ gst_d3d12_screen_capture_get_size (GstD3D12ScreenCapture * capture,
   g_assert (klass->get_size);
 
   return klass->get_size (capture, width, height);
+}
+
+GstVideoFormat
+gst_d3d12_screen_capture_get_format (GstD3D12ScreenCapture * capture)
+{
+  g_return_val_if_fail (GST_IS_D3D12_SCREEN_CAPTURE (capture),
+      GST_VIDEO_FORMAT_BGRA);
+
+  auto klass = GST_D3D12_SCREEN_CAPTURE_GET_CLASS (capture);
+  if (klass->get_format)
+    return klass->get_format (capture);
+
+  return GST_VIDEO_FORMAT_BGRA;
 }
 
 gboolean
@@ -97,31 +110,6 @@ gst_d3d12_screen_capture_unlock_stop (GstD3D12ScreenCapture * capture)
     return klass->unlock_stop (capture);
 
   return TRUE;
-}
-
-void
-gst_d3d12_screen_capture_show_border (GstD3D12ScreenCapture * capture,
-    gboolean show)
-{
-  g_return_if_fail (GST_IS_D3D12_SCREEN_CAPTURE (capture));
-
-  auto klass = GST_D3D12_SCREEN_CAPTURE_GET_CLASS (capture);
-
-  if (klass->show_border)
-    klass->show_border (capture, show);
-}
-
-GstFlowReturn
-gst_d3d12_screen_capture_do_capture (GstD3D12ScreenCapture * capture,
-    GstBuffer * buffer, const D3D12_BOX * crop_box, gboolean draw_mouse)
-{
-  g_return_val_if_fail (GST_IS_D3D12_SCREEN_CAPTURE (capture), GST_FLOW_ERROR);
-  g_return_val_if_fail (GST_IS_BUFFER (buffer), GST_FLOW_ERROR);
-
-  auto klass = GST_D3D12_SCREEN_CAPTURE_GET_CLASS (capture);
-  g_assert (klass->do_capture);
-
-  return klass->do_capture (capture, buffer, crop_box, draw_mouse);
 }
 
 HRESULT

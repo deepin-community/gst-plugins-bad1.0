@@ -40,6 +40,15 @@ mf_header_deps = [
   'codecapi.h',
 ]
 
+doc_sources = []
+foreach s: mf_sources + mf_desktop_sources + mf_app_sources
+  doc_sources += meson.current_source_dir() / s
+endforeach
+
+plugin_sources += {
+  'mediafoundation': pathsep.join(doc_sources)
+}
+
 winapi_desktop = false
 winapi_app = false
 have_capture_engine = false
@@ -51,13 +60,6 @@ extra_cpp_args = []
 
 mf_option = get_option('mediafoundation')
 if host_system != 'windows' or mf_option.disabled()
-  subdir_done()
-endif
-
-if cc.get_id() != 'msvc'
-  if mf_option.enabled()
-    error('mediafoundation plugin can only be built with MSVC')
-  endif
   subdir_done()
 endif
 

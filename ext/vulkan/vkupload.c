@@ -50,7 +50,7 @@ _set_caps_features_with_passthrough (const GstCaps * caps,
     GstCapsFeatures *features, *orig_features;
 
     orig_features = gst_caps_get_features (caps, i);
-    features = gst_caps_features_new (feature_name, NULL);
+    features = gst_caps_features_new_static_str (feature_name, NULL);
 
     m = gst_caps_features_get_size (orig_features);
     for (j = 0; j < m; j++) {
@@ -283,7 +283,7 @@ _raw_to_buffer_perform (gpointer impl, GstBuffer * inbuf, GstBuffer ** outbuf)
     plane_size =
         GST_VIDEO_INFO_PLANE_STRIDE (&raw->out_info,
         i) * GST_VIDEO_INFO_COMP_HEIGHT (&raw->out_info, i);
-    g_assert (plane_size < map_info.size);
+    g_assert (plane_size <= map_info.size);
     memcpy (map_info.data, v_frame.data[i], plane_size);
 
     gst_memory_unmap (GST_MEMORY_CAST (mem), &map_info);
@@ -392,6 +392,7 @@ _buffer_to_image_perform (gpointer impl, GstBuffer * inbuf, GstBuffer ** outbuf)
   GArray *barriers = NULL;
   VkImageLayout dst_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   GstBufferPool *pool;
+  GstVideoMeta *in_vmeta, *out_vmeta;
 
   pool = gst_base_transform_get_buffer_pool
       (GST_BASE_TRANSFORM_CAST (raw->upload));
@@ -423,8 +424,9 @@ _buffer_to_image_perform (gpointer impl, GstBuffer * inbuf, GstBuffer ** outbuf)
   cmd_buf = raw->exec->cmd_buf;
 
   if (!gst_vulkan_operation_add_frame_barrier (raw->exec, *outbuf,
-          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, NULL))
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+          NULL))
     goto unlock_error;
 
   barriers = gst_vulkan_operation_retrieve_image_barriers (raw->exec);
@@ -457,7 +459,10 @@ _buffer_to_image_perform (gpointer impl, GstBuffer * inbuf, GstBuffer ** outbuf)
   g_clear_pointer (&barriers, g_array_unref);
 
   n_mems = gst_buffer_n_memory (*outbuf);
+  out_vmeta = gst_buffer_get_video_meta (*outbuf);
   n_planes = GST_VIDEO_INFO_N_PLANES (&raw->out_info);
+
+  in_vmeta = gst_buffer_get_video_meta (inbuf);
 
   for (i = 0; i < n_planes; i++) {
     VkBufferImageCopy region;
@@ -468,9 +473,19 @@ _buffer_to_image_perform (gpointer impl, GstBuffer * inbuf, GstBuffer ** outbuf)
       VK_IMAGE_ASPECT_PLANE_1_BIT, VK_IMAGE_ASPECT_PLANE_2_BIT,
     };
     VkImageAspectFlags plane_aspect;
-    guint idx;
+    guint idx, len;
+    gsize offset, skip;
 
+    offset = in_vmeta ? in_vmeta->offset[i]
+        : GST_VIDEO_INFO_PLANE_OFFSET (&raw->in_info, i);
+    if (!gst_buffer_find_memory (inbuf, offset, 1, &idx, &len, &skip)) {
+      GST_WARNING_OBJECT (raw->upload,
+          "Input buffer plane %u, no memory at offset %" G_GSIZE_FORMAT, i,
+          offset);
+      goto unlock_error;
+    }
     in_mem = gst_buffer_peek_memory (inbuf, i);
+
     if (!gst_is_vulkan_buffer_memory (in_mem)) {
       GST_WARNING_OBJECT (raw->upload, "Input is not a GstVulkanBufferMemory");
       goto unlock_error;
@@ -501,8 +516,16 @@ _buffer_to_image_perform (gpointer impl, GstBuffer * inbuf, GstBuffer ** outbuf)
         }
     };
 
-    idx = MIN (i, n_mems - 1);
+    offset = out_vmeta ? out_vmeta->offset[i]
+        : GST_VIDEO_INFO_PLANE_OFFSET (&raw->out_info, i);
+    if (!gst_buffer_find_memory (*outbuf, offset, 1, &idx, &len, &skip)) {
+      GST_WARNING_OBJECT (raw->upload,
+          "Output buffer plane %u, no memory at offset %" G_GSIZE_FORMAT, i,
+          offset);
+      goto unlock_error;
+    }
     out_mem = gst_buffer_peek_memory (*outbuf, idx);
+
     if (!gst_is_vulkan_image_memory (out_mem)) {
       GST_WARNING_OBJECT (raw->upload, "Output is not a GstVulkanImageMemory");
       goto unlock_error;
@@ -653,9 +676,10 @@ _raw_to_image_perform (gpointer impl, GstBuffer * inbuf, GstBuffer ** outbuf)
   GstVulkanCommandBuffer *cmd_buf;
   GError *error = NULL;
   GArray *barriers = NULL;
-  guint i, n_mems, n_planes, n_out_mems;
+  guint i, n_planes, n_out_mems;
   VkImageLayout dst_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   GstBufferPool *pool;
+  GstVideoMeta *in_vmeta, *out_vmeta;
 
   pool = gst_base_transform_get_buffer_pool
       (GST_BASE_TRANSFORM_CAST (raw->upload));
@@ -685,8 +709,9 @@ _raw_to_image_perform (gpointer impl, GstBuffer * inbuf, GstBuffer ** outbuf)
   cmd_buf = raw->exec->cmd_buf;
 
   if (!gst_vulkan_operation_add_frame_barrier (raw->exec, *outbuf,
-          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, NULL))
+          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+          NULL))
     goto unlock_error;
 
   barriers = gst_vulkan_operation_retrieve_image_barriers (raw->exec);
@@ -718,24 +743,33 @@ _raw_to_image_perform (gpointer impl, GstBuffer * inbuf, GstBuffer ** outbuf)
   }
   g_clear_pointer (&barriers, g_array_unref);
 
-  n_mems = gst_buffer_n_memory (inbuf);
+  in_vmeta = gst_buffer_get_video_meta (inbuf);
   n_out_mems = gst_buffer_n_memory (*outbuf);
-  if (n_mems != n_out_mems)
-    goto unlock_error;
+  out_vmeta = gst_buffer_get_video_meta (*outbuf);
   n_planes = GST_VIDEO_INFO_N_PLANES (&raw->in_info);
 
-  for (i = 0; i < n_mems; i++) {
+  for (i = 0; i < n_planes; i++) {
     VkBufferImageCopy region;
-    GstMemory *in_mem, *out_mem;
+    GstMemory *in_mem = NULL, *out_mem;
     GstVulkanBufferMemory *buf_mem;
     GstVulkanImageMemory *img_mem;
     const VkImageAspectFlags aspects[] = { VK_IMAGE_ASPECT_PLANE_0_BIT,
       VK_IMAGE_ASPECT_PLANE_1_BIT, VK_IMAGE_ASPECT_PLANE_2_BIT,
     };
     VkImageAspectFlags plane_aspect;
-    guint idx;
+    guint idx, len;
+    gsize offset, skip;
 
-    in_mem = gst_buffer_peek_memory (inbuf, i);
+    offset = in_vmeta ? in_vmeta->offset[i] :
+        GST_VIDEO_INFO_PLANE_OFFSET (&raw->in_info, i);
+    if (!gst_buffer_find_memory (inbuf, offset, 1, &idx, &len, &skip)) {
+      GST_WARNING_OBJECT (raw->upload,
+          "Input buffer plane %u, no memory at offset %" G_GSIZE_FORMAT, i,
+          offset);
+      goto unlock_error;
+    }
+    in_mem = gst_buffer_peek_memory (inbuf, idx);
+
     if (gst_is_vulkan_buffer_memory (in_mem)) {
       GST_TRACE_OBJECT (raw->upload, "Input is a GstVulkanBufferMemory");
       buf_mem = (GstVulkanBufferMemory *) in_mem;
@@ -798,15 +832,22 @@ _raw_to_image_perform (gpointer impl, GstBuffer * inbuf, GstBuffer ** outbuf)
       buf_mem = (GstVulkanBufferMemory *) in_mem;
     }
 
-    idx = MIN (i, n_mems - 1);
+    offset = out_vmeta ? out_vmeta->offset[i] : GST_VIDEO_INFO_PLANE_OFFSET (&raw->out_info, i);
+    if (!gst_buffer_find_memory (*outbuf, offset, 1, &idx, &len, &skip)) {
+      GST_WARNING_OBJECT (raw->upload,
+          "Output buffer plane %u, no memory at offset %" G_GSIZE_FORMAT, i,
+          offset);
+      goto unlock_error;
+    }
     out_mem = gst_buffer_peek_memory (*outbuf, idx);
+
     if (!gst_is_vulkan_image_memory (out_mem)) {
       GST_WARNING_OBJECT (raw->upload, "Output is not a GstVulkanImageMemory");
       goto unlock_error;
     }
     img_mem = (GstVulkanImageMemory *) out_mem;
 
-    if (n_planes == n_mems)
+    if (n_planes == n_out_mems)
       plane_aspect = VK_IMAGE_ASPECT_COLOR_BIT;
     else
       plane_aspect = aspects[i];
@@ -1149,31 +1190,35 @@ gst_vulkan_upload_change_state (GstElement * element, GstStateChange transition)
             ("Failed to retrieve vulkan instance"), (NULL));
         return GST_STATE_CHANGE_FAILURE;
       }
-      if (!gst_vulkan_device_run_context_query (GST_ELEMENT (vk_upload),
-              &vk_upload->device)) {
-        GError *error = NULL;
-        GST_DEBUG_OBJECT (vk_upload, "No device retrieved from peer elements");
-        if (!(vk_upload->device =
-                gst_vulkan_instance_create_device (vk_upload->instance,
-                    &error))) {
-          GST_ELEMENT_ERROR (vk_upload, RESOURCE, NOT_FOUND,
-              ("Failed to create vulkan device"), ("%s",
-                  error ? error->message : ""));
-          g_clear_error (&error);
-          return GST_STATE_CHANGE_FAILURE;
+      if (!gst_vulkan_ensure_element_device (element, vk_upload->instance,
+              &vk_upload->device, 0)) {
+        return GST_STATE_CHANGE_FAILURE;
+      }
+      // Issue with NVIDIA driver where the output gets artifacts if I select another
+      // queue seen the codec one does not support VK_QUEUE_GRAPHICS_BIT but VK_QUEUE_TRANSFER_BIT.
+      if (gst_vulkan_queue_run_context_query (GST_ELEMENT (vk_upload),
+              &vk_upload->queue)) {
+        guint32 flags, idx;
+
+        GST_DEBUG_OBJECT (vk_upload, "Queue retrieved from peer elements");
+        idx = vk_upload->queue->family;
+        flags = vk_upload->device->physical_device->queue_family_props[idx]
+            .queueFlags;
+        if ((flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_TRANSFER_BIT)) == 0) {
+          GST_DEBUG_OBJECT (vk_upload,
+              "Queue does not support VK_QUEUE_GRAPHICS_BIT with VK_QUEUE_TRANSFER_BIT");
+          gst_clear_object (&vk_upload->queue);
         }
       }
 
-      if (!gst_vulkan_queue_run_context_query (GST_ELEMENT (vk_upload),
-              &vk_upload->queue)) {
-        GST_DEBUG_OBJECT (vk_upload, "No queue retrieved from peer elements");
+      if (!vk_upload->queue) {
         vk_upload->queue =
             gst_vulkan_device_select_queue (vk_upload->device,
             VK_QUEUE_GRAPHICS_BIT);
       }
       if (!vk_upload->queue) {
         GST_ELEMENT_ERROR (vk_upload, RESOURCE, NOT_FOUND,
-            ("Failed to create/retrieve vulkan queue"), (NULL));
+            ("Failed to create/retrieve a valid vulkan queue"), (NULL));
         return GST_STATE_CHANGE_FAILURE;
       }
       break;
@@ -1330,6 +1375,20 @@ gst_vulkan_upload_propose_allocation (GstBaseTransform * bt,
   return TRUE;
 }
 
+static GstBufferPool *
+gst_vulkan_upload_create_buffer_pool (GstVulkanUpload * vk_upload)
+{
+  gboolean is_image;
+  GstCapsFeatures *feats = gst_caps_get_features (vk_upload->out_caps, 0);
+
+  is_image =
+      gst_caps_features_contains (feats, GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE);
+
+  if (is_image)
+    return gst_vulkan_image_buffer_pool_new (vk_upload->device);
+  return gst_vulkan_buffer_pool_new (vk_upload->device);
+}
+
 static gboolean
 gst_vulkan_upload_decide_allocation (GstBaseTransform * bt, GstQuery * query)
 {
@@ -1338,7 +1397,13 @@ gst_vulkan_upload_decide_allocation (GstBaseTransform * bt, GstQuery * query)
   GstStructure *config;
   GstCaps *caps;
   guint min, max, size;
-  gboolean update_pool;
+  gboolean update_pool, is_vulkan_pool;
+  VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+      | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+      | VK_IMAGE_USAGE_STORAGE_BIT;
+  VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkMemoryPropertyFlags mem_props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+  guint64 access = 0;           /* VK_ACCESS_NONE */
 
   gst_query_parse_allocation (query, &caps, NULL);
   if (!caps)
@@ -1348,29 +1413,51 @@ gst_vulkan_upload_decide_allocation (GstBaseTransform * bt, GstQuery * query)
     gst_query_parse_nth_allocation_pool (query, 0, &pool, &size, &min, &max);
 
     update_pool = TRUE;
+    is_vulkan_pool = GST_IS_VULKAN_IMAGE_BUFFER_POOL (pool)
+        || GST_IS_VULKAN_BUFFER_POOL (pool);
   } else {
     GstVideoInfo vinfo;
 
     gst_video_info_init (&vinfo);
     gst_video_info_from_caps (&vinfo, caps);
-    size = vinfo.size;
+
+    size = GST_VIDEO_INFO_SIZE (&vinfo);
     min = max = 0;
-    update_pool = FALSE;
+    is_vulkan_pool = update_pool = FALSE;
   }
 
-  if (!pool || !GST_IS_VULKAN_IMAGE_BUFFER_POOL (pool)) {
+  if (!pool || !is_vulkan_pool) {
     if (pool)
       gst_object_unref (pool);
-    pool = gst_vulkan_image_buffer_pool_new (vk_upload->device);
+    pool = gst_vulkan_upload_create_buffer_pool (vk_upload);
   }
 
   config = gst_buffer_pool_get_config (pool);
 
+  if (GST_IS_VULKAN_IMAGE_BUFFER_POOL (pool)) {
+    gst_vulkan_image_buffer_pool_config_get_allocation_params (config, &usage,
+        &mem_props, &layout, &access);
+    /* these usage parameters are essential for upload */
+    usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  }
+
   gst_buffer_pool_config_set_params (config, caps, size, min, max);
 
+  if (GST_IS_VULKAN_IMAGE_BUFFER_POOL (pool)) {
+    gst_vulkan_image_buffer_pool_config_set_allocation_params (config, usage,
+        mem_props, layout, access);
+  }
+
+  if (gst_buffer_pool_has_option (pool, GST_BUFFER_POOL_OPTION_VIDEO_META)) {
+    gst_buffer_pool_config_add_option (config,
+        GST_BUFFER_POOL_OPTION_VIDEO_META);
+  }
+
   if (!gst_buffer_pool_set_config (pool, config)) {
+    GST_ERROR_OBJECT (pool, "Vulkan Image buffer pool doesn't support requested"
+        " configuration");
     gst_object_unref (pool);
-    return TRUE;
+    return FALSE;
   }
 
   if (update_pool)

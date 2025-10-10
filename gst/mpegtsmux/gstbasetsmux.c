@@ -85,6 +85,7 @@
 #include "gstbasetsmuxttxt.h"
 #include "gstbasetsmuxopus.h"
 #include "gstbasetsmuxjpeg2000.h"
+#include "gstbasetsmuxjpegxs.h"
 
 GST_DEBUG_CATEGORY (gst_base_ts_mux_debug);
 #define GST_CAT_DEFAULT gst_base_ts_mux_debug
@@ -255,10 +256,12 @@ enum
   PROP_BITRATE,
   PROP_PCR_INTERVAL,
   PROP_SCTE_35_PID,
-  PROP_SCTE_35_NULL_INTERVAL
+  PROP_SCTE_35_NULL_INTERVAL,
+  PROP_ENABLE_CUSTOM_MAPPINGS
 };
 
 #define DEFAULT_SCTE_35_PID 0
+#define DEFAULT_ENABLE_CUSTOM_MAPPINGS FALSE
 
 #define BASETSMUX_DEFAULT_ALIGNMENT    -1
 
@@ -268,6 +271,8 @@ enum
 #define TS_MUX_CLOCK_BASE (TSMUX_CLOCK_FREQ * 10 * 360)
 
 #define GSTTIME_TO_MPEGTIME(time) \
+  (gst_util_uint64_scale (time, CLOCK_BASE, GST_MSECOND/10))
+#define GSTTIMEDIFF_TO_MPEGTIME(time) \
     (((time) > 0 ? (gint64) 1 : (gint64) -1) * \
     (gint64) gst_util_uint64_scale (ABS(time), CLOCK_BASE, GST_MSECOND/10))
 /* 27 MHz SCR conversions: */
@@ -440,6 +445,140 @@ release_buffer_cb (guint8 * data, void *user_data)
   stream_data_free ((StreamData *) user_data);
 }
 
+static GstMpegtsJpegXsDescriptor *
+gst_base_ts_mux_jpegxs_descriptor (GstBaseTsMux * mux,
+    GstBaseTsMuxPad * ts_pad, GstCaps * caps)
+{
+  GstStructure *s = gst_caps_get_structure (caps, 0);
+  gint codestream_length, depth;
+  GstMpegtsJpegXsDescriptor *jpegxs_descriptor;
+  GstVideoInfo video_info;
+  const gchar *sampling;
+
+  if (!gst_video_info_from_caps (&video_info, caps))
+    return NULL;
+
+  /* Get (and calculate) all fields from the caps information */
+  sampling = gst_structure_get_string (s, "sampling");
+  if (!gst_structure_get_int (s, "codestream-length", &codestream_length)
+      || !sampling || !gst_structure_get_int (s, "depth", &depth) || !depth) {
+    GST_ERROR_OBJECT (ts_pad,
+        "JPEG-XS caps doesn't contain all required fields");
+    return NULL;
+  }
+
+  jpegxs_descriptor = g_new0 (GstMpegtsJpegXsDescriptor, 1);
+
+  jpegxs_descriptor->horizontal_size = GST_VIDEO_INFO_WIDTH (&video_info);
+  jpegxs_descriptor->vertical_size = GST_VIDEO_INFO_HEIGHT (&video_info);
+
+  {
+    /* FIXME : Cap according to limit defined by profile/level */
+    guint32 brat = G_MAXUINT32;
+    if (GST_VIDEO_INFO_FPS_N (&video_info) > 0
+        && GST_VIDEO_INFO_FPS_D (&video_info) > 0) {
+      // 125000 = * 8 / 1000000 (convert to bits, divide to Mbps)
+      guint64 v =
+          gst_util_uint64_scale_ceil (GST_VIDEO_INFO_FPS_N (&video_info),
+          codestream_length,
+          GST_VIDEO_INFO_FPS_D (&video_info) * 125000);
+      if (v < G_MAXUINT32)
+        brat = v & 0xffffffff;
+    }
+    jpegxs_descriptor->brat = brat;
+  }
+
+  {
+    guint32 frat = 0;
+    gint fps_n = GST_VIDEO_INFO_FPS_N (&video_info);
+    gint fps_d = GST_VIDEO_INFO_FPS_D (&video_info);
+    gint denom_value = 1;
+
+    /* Only framerate divisible by 1 or 1.001 are allowed */
+    if (fps_d == 1001) {
+      fps_n /= 1000;
+      denom_value = 2;
+    } else if (fps_d != 1) {
+      GST_ERROR_OBJECT (ts_pad, "framerate %d/%d is not allowed for JPEG-XS",
+          fps_n, fps_d);
+      goto free_return;
+    }
+    if (fps_n > G_MAXUINT16) {
+      GST_ERROR_OBJECT (ts_pad, "framerate %d/%d exceeds limits for JPEG-XS",
+          fps_n, fps_d);
+      goto free_return;
+    }
+
+    if (GST_VIDEO_INFO_IS_INTERLACED (&video_info)) {
+      if (GST_VIDEO_INFO_FIELD_ORDER (&video_info) ==
+          GST_VIDEO_FIELD_ORDER_TOP_FIELD_FIRST) {
+        frat |= 1 << 30;
+      } else if (GST_VIDEO_INFO_FIELD_ORDER (&video_info) ==
+          GST_VIDEO_FIELD_ORDER_BOTTOM_FIELD_FIRST) {
+        frat |= 1 << 31;
+      } else {
+        GST_ERROR_OBJECT (ts_pad, "Unknown interlace mode (no field order)");
+        goto free_return;
+      }
+    }
+
+    frat |= denom_value << 24;
+    frat |= fps_n;
+
+    jpegxs_descriptor->frat = frat;
+  }
+
+  {
+    guint16 schar = ((depth - 1) & 0xf) << 4;
+    /* FIXME : Support all other variants */
+    if (!g_strcmp0 (sampling, "YCbCr-4:2:2")) {
+      schar |= 0;
+    } else if (!g_strcmp0 (sampling, "YCbCr-4:4:4")) {
+      schar |= 1;
+    } else {
+      GST_ERROR_OBJECT (ts_pad, "Unsupported sampling %s", sampling);
+      goto free_return;
+    }
+
+    /* schar is valid */
+    schar |= 1 << 15;
+
+    jpegxs_descriptor->schar = schar;
+  }
+
+  /* FIXME : Handle profile/level/sublevel once provided by caps. For now we are unrestricted */
+  jpegxs_descriptor->Ppih = 0;
+  jpegxs_descriptor->Plev = 0;
+
+  /* FIXME : Calculate max_buffer_size based on profile/level if specified */
+  jpegxs_descriptor->max_buffer_size = jpegxs_descriptor->brat / 160;
+
+  /* Hardcoded buffer_model_type of 2 accordingly to H.222.0 specification */
+  jpegxs_descriptor->buffer_model_type = 2;
+
+  jpegxs_descriptor->colour_primaries =
+      gst_video_color_primaries_to_iso (video_info.colorimetry.primaries);
+  jpegxs_descriptor->transfer_characteristics =
+      gst_video_transfer_function_to_iso (video_info.colorimetry.transfer);
+  jpegxs_descriptor->matrix_coefficients =
+      gst_video_color_matrix_to_iso (video_info.colorimetry.matrix);
+  jpegxs_descriptor->video_full_range_flag =
+      video_info.colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255;
+
+  /* We don't accept still pictures */
+  jpegxs_descriptor->still_mode = FALSE;
+
+  /* FIXME : Add support for Mastering Display Metadata parsing */
+
+  return jpegxs_descriptor;
+
+free_return:
+  {
+    g_free (jpegxs_descriptor);
+    return NULL;
+  }
+}
+
 /* Must be called with mux->lock held */
 static GstFlowReturn
 gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
@@ -459,6 +598,7 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
   const gchar *stream_format = NULL;
   const char *interlace_mode = NULL;
   gchar *pmt_name;
+  GstMpegtsDescriptor *pmt_descriptor = NULL;
 
   GST_DEBUG_OBJECT (ts_pad,
       "%s stream with PID 0x%04x for caps %" GST_PTR_FORMAT,
@@ -488,6 +628,32 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
     st = TSMUX_ST_VIDEO_H264;
   } else if (strcmp (mt, "video/x-h265") == 0) {
     st = TSMUX_ST_VIDEO_HEVC;
+  } else if (strcmp (mt, "video/x-h266") == 0) {
+    st = TSMUX_ST_VIDEO_VVC;
+  } else if (strcmp (mt, "video/x-vp9") == 0) {
+    if (mux->enable_custom_mappings) {
+      st = TSMUX_ST_PS_VP9;
+    } else {
+      GST_ERROR_OBJECT (mux,
+          "VP9 requires enabling custom mapping which does not have a public specification");
+    }
+  } else if (strcmp (mt, "video/x-av1") == 0) {
+    if (mux->enable_custom_mappings) {
+      st = TSMUX_ST_PS_VIDEO_AV1;
+      if (!codec_data)
+        codec_data = gst_codec_utils_av1_create_av1c_from_caps (caps);
+      if (codec_data) {
+        GstMapInfo map;
+        if (gst_buffer_map (codec_data, &map, GST_MAP_READ)) {
+          pmt_descriptor =
+              gst_mpegts_descriptor_from_custom (0x80, map.data, map.size);
+          gst_buffer_unmap (codec_data, &map);
+        }
+      }
+    } else {
+      GST_ERROR_OBJECT (mux,
+          "AV1 requires enabling custom mapping which does not have a public specification yet");
+    }
   } else if (strcmp (mt, "audio/mpeg") == 0) {
     gint mpegversion;
 
@@ -674,6 +840,28 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
     ts_pad->prepare_func = gst_base_ts_mux_prepare_opus;
   } else if (strcmp (mt, "meta/x-klv") == 0) {
     st = TSMUX_ST_PS_KLV;
+  } else if (strcmp (mt, "meta/x-st-2038") == 0) {
+    st = TSMUX_ST_PS_ST_2038;
+  } else if (strcmp (mt, "meta/x-id3") == 0) {
+    st = TSMUX_ST_PS_ID3;
+  } else if (strcmp (mt, "image/x-jxsc") == 0) {
+    /* FIXME: Get actual values from caps */
+    GstMpegtsJpegXsDescriptor *jpegxs_descriptor =
+        gst_base_ts_mux_jpegxs_descriptor (mux, ts_pad, caps);
+    if (!jpegxs_descriptor)
+      goto not_negotiated;
+
+    pmt_descriptor = gst_mpegts_descriptor_from_jpeg_xs (jpegxs_descriptor);
+    if (!pmt_descriptor) {
+      g_free (jpegxs_descriptor);
+      goto not_negotiated;
+    }
+    st = TSMUX_ST_VIDEO_JPEG_XS;
+    ts_pad->prepare_func = gst_base_ts_mux_prepare_jpegxs;
+    ts_pad->prepare_data = jpegxs_descriptor;
+    ts_pad->free_func = gst_base_ts_mux_free_jpegxs;
+  } else if (strcmp (mt, "audio/x-smpte-302m") == 0) {
+    st = TSMUX_ST_PS_S302M;
   } else if (strcmp (mt, "image/x-jpc") == 0) {
     /*
      * See this document for more details on standard:
@@ -778,14 +966,17 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
   }
 
   if (st == TSMUX_ST_RESERVED) {
-    GST_ERROR_OBJECT (ts_pad, "Failed to determine stream type");
+    GST_ELEMENT_ERROR (mux, STREAM, MUX,
+        ("Failed to determine stream type or mapping is not supported"),
+        ("If you're using an experimental or non-standard mapping you may have to "
+            "set the enable-custom-mappings property to TRUE."));
     goto error;
   }
 
-  if (ts_pad->stream && st != ts_pad->stream->stream_type) {
+  if (ts_pad->stream && st != ts_pad->stream->internal_stream_type) {
     GST_ELEMENT_ERROR (mux, STREAM, MUX,
         ("Stream type change from %02x to %02x not supported",
-            ts_pad->stream->stream_type, st), NULL);
+            ts_pad->stream->internal_stream_type, st), NULL);
     goto error;
   }
 
@@ -798,6 +989,10 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
         ts_pad->language, ts_pad->bitrate, ts_pad->max_bitrate);
     if (ts_pad->stream == NULL)
       goto error;
+  }
+
+  if (pmt_descriptor) {
+    ts_pad->stream->pmt_descriptor = pmt_descriptor;
   }
 
   pmt_name = g_strdup_printf ("PMT_%d", ts_pad->pid);
@@ -840,9 +1035,13 @@ gst_base_ts_mux_create_or_update_stream (GstBaseTsMux * mux,
 
   /* ERRORS */
 not_negotiated:
+  if (pmt_descriptor)
+    gst_mpegts_descriptor_free (pmt_descriptor);
   return GST_FLOW_NOT_NEGOTIATED;
 
 error:
+  if (pmt_descriptor)
+    gst_mpegts_descriptor_free (pmt_descriptor);
   return GST_FLOW_ERROR;
 }
 
@@ -1411,7 +1610,8 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
     buf = tmp;
   }
 
-  if (mux->force_key_unit_event != NULL && best->stream->is_video_stream) {
+  if (mux->force_key_unit_event != NULL
+      && best->stream->gst_stream_type == GST_STREAM_TYPE_VIDEO) {
     GstEvent *event;
 
     g_mutex_unlock (&mux->lock);
@@ -1432,7 +1632,7 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
       GST_INFO_OBJECT (mux, "pushing downstream force-key-unit event %d "
           "%" GST_TIME_FORMAT " count %d", gst_event_get_seqnum (event),
           GST_TIME_ARGS (running_time), count);
-      gst_pad_push_event (GST_AGGREGATOR_SRC_PAD (mux), event);
+      gst_aggregator_push_src_event (GST_AGGREGATOR (mux), event);
 
       g_mutex_lock (&mux->lock);
       /* output PAT, SI tables */
@@ -1481,7 +1681,7 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
   }
 
   if (GST_CLOCK_STIME_IS_VALID (best->dts)) {
-    dts = GSTTIME_TO_MPEGTIME (best->dts);
+    dts = GSTTIMEDIFF_TO_MPEGTIME (best->dts);
     GST_DEBUG_OBJECT (mux, "Buffer has DTS %" GST_STIME_FORMAT " dts %"
         G_GINT64_FORMAT, GST_STIME_ARGS (best->dts), dts);
   }
@@ -1492,12 +1692,13 @@ gst_base_ts_mux_aggregate_buffer (GstBaseTsMux * mux,
     pts = dts;
   }
 
-  if (best->stream->is_video_stream) {
+  if (best->stream->gst_stream_type == GST_STREAM_TYPE_VIDEO) {
     delta = GST_BUFFER_FLAG_IS_SET (buf, GST_BUFFER_FLAG_DELTA_UNIT);
     header = GST_BUFFER_FLAG_IS_SET (buf, GST_BUFFER_FLAG_HEADER);
   }
 
-  if (best->stream->is_meta && gst_buffer_get_size (buf) > (G_MAXUINT16 - 3)) {
+  if (best->stream->internal_stream_type == TSMUX_ST_PS_KLV &&
+      gst_buffer_get_size (buf) > (G_MAXUINT16 - 3)) {
     GST_WARNING_OBJECT (mux, "KLV meta unit too big, splitting not supported");
 
     gst_buffer_unref (buf);
@@ -1583,8 +1784,10 @@ gst_base_ts_mux_request_new_pad (GstElement * element, GstPadTemplate * templ,
     }
     /* Make sure we don't use reserved PID.
      * FIXME : This should be extended to other variants (ex: ATSC) reserved PID */
-    if (pid < TSMUX_START_ES_PID)
+    if (pid < TSMUX_START_ES_PID) {
+      g_mutex_unlock (&mux->lock);
       goto invalid_stream_pid;
+    }
   } else {
     do {
       pid = tsmux_get_new_pid (mux->tsmux);
@@ -1617,7 +1820,7 @@ stream_exists:
 invalid_stream_pid:
   {
     GST_ELEMENT_ERROR (element, STREAM, MUX,
-        ("Invalid Elementary stream PID (0x%02u < 0x40)", pid), (NULL));
+        ("Invalid Elementary stream PID (0x%02x < 0x40)", pid), (NULL));
     return NULL;
   }
 }
@@ -2021,7 +2224,7 @@ handle_scte35_section (GstBaseTsMux * mux, GstEvent * event,
 
     /* Account for offsets potentially introduced between the demuxer and us */
     pts_adjust +=
-        GSTTIME_TO_MPEGTIME (gst_event_get_running_time_offset (event));
+        GSTTIMEDIFF_TO_MPEGTIME (gst_event_get_running_time_offset (event));
 
     pts_adjust &= 0x1ffffffff;
     section_data = g_memdup2 (section->data, section->section_length);
@@ -2449,7 +2652,8 @@ beach:
 }
 
 static GstBaseTsMuxPad *
-gst_base_ts_mux_find_best_pad (GstAggregator * aggregator)
+gst_base_ts_mux_find_best_pad (GstAggregator * aggregator,
+    GstClockTime * best_time, gboolean timeout)
 {
   GstBaseTsMuxPad *best = NULL;
   GstClockTime best_ts = GST_CLOCK_TIME_NONE;
@@ -2461,25 +2665,40 @@ gst_base_ts_mux_find_best_pad (GstAggregator * aggregator)
     GstBaseTsMuxPad *tpad = GST_BASE_TS_MUX_PAD (l->data);
     GstAggregatorPad *apad = GST_AGGREGATOR_PAD_CAST (tpad);
     GstBuffer *buffer;
+    GstClockTime ts;
 
     buffer = gst_aggregator_pad_peek_buffer (apad);
-    if (!buffer)
-      continue;
-    if (best_ts == GST_CLOCK_TIME_NONE) {
-      best = tpad;
-      best_ts = GST_BUFFER_DTS_OR_PTS (buffer);
-    } else if (GST_BUFFER_DTS_OR_PTS (buffer) != GST_CLOCK_TIME_NONE) {
-      GstClockTime t = GST_BUFFER_DTS_OR_PTS (buffer);
-      if (t < best_ts) {
-        best = tpad;
-        best_ts = t;
+    if (!buffer) {
+      if (!timeout && !GST_PAD_IS_EOS (apad)) {
+        best = NULL;
+        best_ts = GST_CLOCK_TIME_NONE;
+        break;
       }
+      continue;
+    }
+
+    ts = GST_BUFFER_DTS_OR_PTS (buffer);
+    if (!GST_CLOCK_TIME_IS_VALID (ts)) {
+      GST_WARNING_OBJECT (apad, "Buffer has no timestamp: %" GST_PTR_FORMAT,
+          buffer);
+      best = tpad;
+      best_ts = ts;
+      gst_buffer_unref (buffer);
+      break;
+    }
+
+    if (!GST_CLOCK_TIME_IS_VALID (best_ts) || ts < best_ts) {
+      best = tpad;
+      best_ts = ts;
     }
     gst_buffer_unref (buffer);
   }
 
-  if (best)
+  if (best) {
     gst_object_ref (best);
+    if (best_time)
+      *best_time = best_ts;
+  }
 
   GST_OBJECT_UNLOCK (aggregator);
 
@@ -2518,7 +2737,7 @@ gst_base_ts_mux_aggregate (GstAggregator * agg, gboolean timeout)
 {
   GstBaseTsMux *mux = GST_BASE_TS_MUX (agg);
   GstFlowReturn ret = GST_FLOW_OK;
-  GstBaseTsMuxPad *best = gst_base_ts_mux_find_best_pad (agg);
+  GstBaseTsMuxPad *best = gst_base_ts_mux_find_best_pad (agg, NULL, timeout);
   GstCaps *caps;
 
   /* set caps on the srcpad if no caps were set yet */
@@ -2592,6 +2811,21 @@ gst_base_ts_mux_stop (GstAggregator * agg)
   return TRUE;
 }
 
+static GstClockTime
+gst_base_ts_mux_get_next_time (GstAggregator * agg)
+{
+  GstBaseTsMuxPad *best = NULL;
+  GstClockTime next_time = GST_CLOCK_TIME_NONE;
+
+  best = gst_base_ts_mux_find_best_pad (agg, &next_time, TRUE);
+  // Buffer without timestamps are muxed immediately
+  if (best && next_time == GST_CLOCK_TIME_NONE)
+    next_time = 0;
+  gst_clear_object (&best);
+
+  return next_time;
+}
+
 /* GObject implementation */
 
 static void
@@ -2631,6 +2865,8 @@ static void
 gst_base_ts_mux_constructed (GObject * object)
 {
   GstBaseTsMux *mux = GST_BASE_TS_MUX (object);
+
+  GST_CALL_PARENT (G_OBJECT_CLASS, constructed, (object));
 
   /* initial state */
   g_mutex_lock (&mux->lock);
@@ -2706,6 +2942,9 @@ gst_base_ts_mux_set_property (GObject * object, guint prop_id,
     case PROP_SCTE_35_NULL_INTERVAL:
       mux->scte35_null_interval = g_value_get_uint (value);
       break;
+    case PROP_ENABLE_CUSTOM_MAPPINGS:
+      mux->enable_custom_mappings = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -2745,6 +2984,9 @@ gst_base_ts_mux_get_property (GObject * object, guint prop_id,
       break;
     case PROP_SCTE_35_NULL_INTERVAL:
       g_value_set_uint (value, mux->scte35_null_interval);
+      break;
+    case PROP_ENABLE_CUSTOM_MAPPINGS:
+      g_value_set_boolean (value, mux->enable_custom_mappings);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -2836,7 +3078,7 @@ gst_base_ts_mux_class_init (GstBaseTsMuxClass * klass)
   gstagg_class->src_event = gst_base_ts_mux_src_event;
   gstagg_class->start = gst_base_ts_mux_start;
   gstagg_class->stop = gst_base_ts_mux_stop;
-  gstagg_class->get_next_time = gst_aggregator_simple_get_next_time;
+  gstagg_class->get_next_time = gst_base_ts_mux_get_next_time;
 
   klass->create_ts_mux = gst_base_ts_mux_default_create_ts_mux;
   klass->allocate_packet = gst_base_ts_mux_default_allocate_packet;
@@ -2895,9 +3137,23 @@ gst_base_ts_mux_class_init (GstBaseTsMuxClass * klass)
   g_object_class_install_property (G_OBJECT_CLASS (klass),
       PROP_SCTE_35_NULL_INTERVAL, g_param_spec_uint ("scte-35-null-interval",
           "SCTE-35 NULL packet interval",
-          "Set the interval (in ticks of the 90kHz clock) for writing SCTE-35 NULL (heartbeat) packets."
-          " (only valid if scte-35-pid is different from 0)", 1, G_MAXUINT,
+          "Set the interval (in ticks of the 90kHz clock) for writing SCTE-35 NULL (heartbeat) packets. 0=disable"
+          " (only valid if scte-35-pid is different from 0)", 0, G_MAXUINT,
           TSMUX_DEFAULT_SCTE_35_NULL_INTERVAL,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  /**
+   * GstBaseTsMux:enable-custom-mappings:
+   *
+   * Enable custom mappings for which there are no official specifications
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (G_OBJECT_CLASS (klass),
+      PROP_ENABLE_CUSTOM_MAPPINGS,
+      g_param_spec_boolean ("enable-custom-mappings", "Enable custom mappings",
+          "Enable custom mappings for which there are no official specifications",
+          DEFAULT_ENABLE_CUSTOM_MAPPINGS,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
   gst_element_class_add_static_pad_template_with_gtype (gstelement_class,
@@ -2921,6 +3177,7 @@ gst_base_ts_mux_init (GstBaseTsMux * mux)
   mux->bitrate = TSMUX_DEFAULT_BITRATE;
   mux->scte35_pid = DEFAULT_SCTE_35_PID;
   mux->scte35_null_interval = TSMUX_DEFAULT_SCTE_35_NULL_INTERVAL;
+  mux->enable_custom_mappings = DEFAULT_ENABLE_CUSTOM_MAPPINGS;
 
   mux->packet_size = GST_BASE_TS_MUX_NORMAL_PACKET_LENGTH;
   mux->automatic_alignment = 0;

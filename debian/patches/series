@@ -1,3 +1,6 @@
 02_opencv-data-path.patch
+default-soundfont.patch
 Skip-failing-tests.patch
-fix-ill-format-string.patch
+Skip-failing-tests-i386.patch
+Skip-failing-tests-big-endian.patch
+Skip-failing-tests-riscv64.patch

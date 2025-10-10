@@ -18,14 +18,6 @@
  */
 
 /**
- * element-nvcudah265enc:
- *
- * NVIDIA CUDA mode H.265 encoder
- *
- * Since: 1.22
- */
-
-/**
  * element-nvd3d11h265enc:
  *
  * NVIDIA Direct3D11 mode H.265 encoder
@@ -56,6 +48,32 @@
 GST_DEBUG_CATEGORY_STATIC (gst_nv_h265_encoder_debug);
 #define GST_CAT_DEFAULT gst_nv_h265_encoder_debug
 
+#define DOC_SINK_CAPS_COMM \
+    "format = (string) { NV12, P010_10LE, Y444, Y444_16LE, GBR, GBR_16LE, VUYA, RGBA, RGBx, BGRA, BGRx, RGB10A2_LE }, " \
+    "width = (int) [ 144, 8192 ], height = (int) [ 48, 8192 ], " \
+    "interlace-mode = (string) progressive"
+
+#define DOC_SINK_CAPS \
+    "video/x-raw(memory:CUDAMemory), " DOC_SINK_CAPS_COMM "; " \
+    "video/x-raw(memory:D3D12Memory), " DOC_SINK_CAPS_COMM "; " \
+    "video/x-raw(memory:GLMemory), " DOC_SINK_CAPS_COMM "; " \
+    "video/x-raw, " DOC_SINK_CAPS_COMM
+
+#define DOC_SINK_CAPS_D3D11 \
+    "video/x-raw(memory:D3D11Memory), " DOC_SINK_CAPS_COMM "; " \
+    "video/x-raw, " DOC_SINK_CAPS_COMM
+
+#define DOC_SINK_CAPS_AUTOGPU \
+    "video/x-raw(memory:CUDAMemory), " DOC_SINK_CAPS_COMM "; " \
+    "video/x-raw(memory:D3D11Memory), " DOC_SINK_CAPS_COMM "; " \
+    "video/x-raw(memory:GLMemory), " DOC_SINK_CAPS_COMM "; " \
+    "video/x-raw, " DOC_SINK_CAPS_COMM
+
+#define DOC_SRC_CAPS \
+    "video/x-h265, width = (int) [ 144, 8192 ], height = (int) [ 48, 8192 ], " \
+    "profile = (string) { main, main-10, main-444, main-444-10 }, " \
+    "stream-format = (string) { byte-stream, hvc1, hev1 }, alignment = (string) au"
+
 static GTypeClass *parent_class = NULL;
 
 enum
@@ -77,9 +95,10 @@ enum
   /* rate-control params */
   PROP_RATE_CONTROL,
 
-  PROP_QP_I,
-  PROP_QP_P,
-  PROP_QP_B,
+  PROP_QP_CONST,
+  PROP_QP_CONST_I,
+  PROP_QP_CONST_P,
+  PROP_QP_CONST_B,
 
   PROP_BITRATE,
   PROP_MAX_BITRATE,
@@ -90,18 +109,20 @@ enum
   PROP_B_ADAPT,
   PROP_SPATIAL_AQ,
   PROP_TEMPORAL_AQ,
-  PROP_ZERO_REORDER_DELAY,
+  PROP_ZEROLATENCY,
   PROP_NON_REF_P,
   PROP_STRICT_GOP,
   PROP_AQ_STRENGTH,
 
-  PROP_MIN_QP_I,
-  PROP_MIN_QP_P,
-  PROP_MIN_QP_B,
+  PROP_QP_MIN,
+  PROP_QP_MIN_I,
+  PROP_QP_MIN_P,
+  PROP_QP_MIN_B,
 
-  PROP_MAX_QP_I,
-  PROP_MAX_QP_P,
-  PROP_MAX_QP_B,
+  PROP_QP_MAX,
+  PROP_QP_MAX_I,
+  PROP_QP_MAX_P,
+  PROP_QP_MAX_B,
 
   PROP_CONST_QUALITY,
 
@@ -110,13 +131,13 @@ enum
   PROP_REPEAT_SEQUENCE_HEADER,
 };
 
-#define DEFAULT_PRESET            GST_NV_ENCODER_PRESET_P4
+#define DEFAULT_PRESET            GST_NV_ENCODER_PRESET_DEFAULT
 #define DEFAULT_TUNE              GST_NV_ENCODER_TUNE_DEFAULT
 #define DEFAULT_MULTI_PASS        GST_NV_ENCODER_MULTI_PASS_DEFAULT
 #define DEFAULT_WEIGHTED_PRED     FALSE
-#define DEFAULT_GOP_SIZE          30
+#define DEFAULT_GOP_SIZE          75
 #define DEFAULT_B_FRAMES          0
-#define DEFAULT_RATE_CONTROL      GST_NV_ENCODER_RC_MODE_VBR
+#define DEFAULT_RATE_CONTROL      GST_NV_ENCODER_RC_MODE_DEFAULT
 #define DEFAULT_QP                -1
 #define DEFAULT_BITRATE           0
 #define DEFAULT_MAX_BITRATE       0
@@ -126,7 +147,7 @@ enum
 #define DEFAULT_B_ADAPT           FALSE
 #define DEFAULT_SPATIAL_AQ        FALSE
 #define DEFAULT_TEMPORAL_AQ       FALSE
-#define DEFAULT_ZERO_REORDER_DELAY FALSE
+#define DEFAULT_ZEROLATENCY       FALSE
 #define DEFAULT_NON_REF_P         FALSE
 #define DEFAULT_STRICT_GOP        FALSE
 #define DEFAULT_AQ_STRENGTH       FALSE
@@ -170,9 +191,10 @@ typedef struct _GstNvH265Encoder
   guint bframes;
 
   GstNvEncoderRCMode rc_mode;
-  gint qp_i;
-  gint qp_p;
-  gint qp_b;
+  gint qp_const;
+  gint qp_const_i;
+  gint qp_const_p;
+  gint qp_const_b;
   guint bitrate;
   guint max_bitrate;
   guint vbv_buffer_size;
@@ -185,12 +207,14 @@ typedef struct _GstNvH265Encoder
   gboolean non_ref_p;
   gboolean strict_gop;
   guint aq_strength;
-  gint min_qp_i;
-  gint min_qp_p;
-  gint min_qp_b;
-  gint max_qp_i;
-  gint max_qp_p;
-  gint max_qp_b;
+  gint qp_min;
+  gint qp_min_i;
+  gint qp_min_p;
+  gint qp_min_b;
+  gint qp_max;
+  gint qp_max_i;
+  gint qp_max_p;
+  gint qp_max_b;
   gdouble const_quality;
 
   gboolean aud;
@@ -364,24 +388,63 @@ gst_nv_h265_encoder_class_init (GstNvH265EncoderClass * klass, gpointer data)
           "Number of frames between intra frames (-1 = infinite)",
           -1, G_MAXINT, DEFAULT_GOP_SIZE, param_flags));
   if (dev_caps->max_bframes > 0) {
+    /**
+     * GstNvD3D11H265Enc:bframes:
+     *
+     * Since: 1.26
+     */
     g_object_class_install_property (object_class, PROP_B_FRAMES,
-        g_param_spec_uint ("b-frames", "B-Frames",
+        g_param_spec_uint ("bframes", "B Frames",
             "Number of B-frames between I and P", 0, dev_caps->max_bframes,
             DEFAULT_B_FRAMES, conditional_param_flags));
   }
+
+  /**
+   * GstNvD3D11H265Enc:rc-mode:
+   *
+   * Since: 1.26
+   */
   g_object_class_install_property (object_class, PROP_RATE_CONTROL,
-      g_param_spec_enum ("rate-control", "Rate Control", "Rate Control Method",
+      g_param_spec_enum ("rc-mode", "RC Mode", "Rate Control Mode",
           GST_TYPE_NV_ENCODER_RC_MODE, DEFAULT_RATE_CONTROL, param_flags));
-  g_object_class_install_property (object_class, PROP_QP_I,
-      g_param_spec_int ("qp-i", "QP I",
+
+  /**
+   * GstNvD3D11H265Enc:qp-const:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_CONST,
+      g_param_spec_int ("qp-const", "QP Const",
+          "DEPRECATED, use qp-const-{i,p,b} properties instead",
+          -1, 51, DEFAULT_QP, param_flags));
+
+  /**
+   * GstNvD3D11H265Enc:qp-const-i:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_CONST_I,
+      g_param_spec_int ("qp-const-i", "QP Const I",
           "Constant QP value for I frame (-1 = default)", -1, 51,
           DEFAULT_QP, param_flags));
-  g_object_class_install_property (object_class, PROP_QP_P,
-      g_param_spec_int ("qp-p", "QP P",
+
+  /**
+   * GstNvD3D11H265Enc:qp-const-p:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_CONST_P,
+      g_param_spec_int ("qp-const-p", "QP Cost P",
           "Constant QP value for P frame (-1 = default)", -1, 51,
           DEFAULT_QP, param_flags));
-  g_object_class_install_property (object_class, PROP_QP_B,
-      g_param_spec_int ("qp-b", "QP B",
+
+  /**
+   * GstNvD3D11H265Enc:qp-const-b:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_CONST_B,
+      g_param_spec_int ("qp-const-b", "QP Const B",
           "Constant QP value for B frame (-1 = default)", -1, 51,
           DEFAULT_QP, param_flags));
   g_object_class_install_property (object_class, PROP_BITRATE,
@@ -424,10 +487,16 @@ gst_nv_h265_encoder_class_init (GstNvH265EncoderClass * klass, gpointer data)
             "Temporal Adaptive Quantization", DEFAULT_TEMPORAL_AQ,
             conditional_param_flags));
   }
-  g_object_class_install_property (object_class, PROP_ZERO_REORDER_DELAY,
-      g_param_spec_boolean ("zero-reorder-delay", "Zero Reorder Delay",
-          "Zero latency operation (i.e., num_reorder_frames = 0)",
-          DEFAULT_ZERO_REORDER_DELAY, param_flags));
+
+  /**
+   * GstNvD3D11H265Enc:zerolatency:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_ZEROLATENCY,
+      g_param_spec_boolean ("zerolatency", "Zerolatency",
+          "Zero latency operation (no reordering delay)",
+          DEFAULT_ZEROLATENCY, param_flags));
   g_object_class_install_property (object_class, PROP_NON_REF_P,
       g_param_spec_boolean ("nonref-p", "Nonref P",
           "Automatic insertion of non-reference P-frames", DEFAULT_NON_REF_P,
@@ -441,28 +510,84 @@ gst_nv_h265_encoder_class_init (GstNvH265EncoderClass * klass, gpointer data)
           "Adaptive Quantization Strength when spatial-aq is enabled"
           " from 1 (low) to 15 (aggressive), (0 = autoselect)",
           0, 15, DEFAULT_AQ_STRENGTH, param_flags));
-  g_object_class_install_property (object_class, PROP_MIN_QP_I,
-      g_param_spec_int ("min-qp-i", "Min QP I",
-          "Minimum QP value for I frame, (-1 = disabled)", -1, 51,
+
+  /**
+   * GstNvD3D11H265Enc:qp-min:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_MIN,
+      g_param_spec_int ("qp-min", "QP Min",
+          "DEPRECATED, Use qp-min-{i,p,b} properties instead", -1, 51,
           DEFAULT_QP, param_flags));
-  g_object_class_install_property (object_class, PROP_MIN_QP_P,
-      g_param_spec_int ("min-qp-p", "Min QP P",
+
+  /**
+   * GstNvD3D11H265Enc:qp-min-i:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_MIN_I,
+      g_param_spec_int ("qp-min-i", "QP Min I",
+          "Minimum QP value for I frame, (-1 = automatic)", -1, 51,
+          DEFAULT_QP, param_flags));
+
+  /**
+   * GstNvD3D11H265Enc:qp-min-p:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_MIN_P,
+      g_param_spec_int ("qp-min-p", "QP Min P",
           "Minimum QP value for P frame, (-1 = automatic)", -1, 51,
           DEFAULT_QP, param_flags));
-  g_object_class_install_property (object_class, PROP_MIN_QP_B,
-      g_param_spec_int ("min-qp-b", "Min QP B",
+
+  /**
+   * GstNvD3D11H265Enc:qp-min-b:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_MIN_B,
+      g_param_spec_int ("qp-min-b", "QP Min B",
           "Minimum QP value for B frame, (-1 = automatic)", -1, 51,
           DEFAULT_QP, param_flags));
-  g_object_class_install_property (object_class, PROP_MAX_QP_I,
-      g_param_spec_int ("max-qp-i", "Max QP I",
-          "Maximum QP value for I frame, (-1 = disabled)", -1, 51,
+
+  /**
+   * GstNvD3D11H265Enc:qp-max:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_MAX,
+      g_param_spec_int ("qp-max", "QP Max",
+          "DEPRECATED, Use qp-max-{i,p,b} properties instead", -1, 51,
           DEFAULT_QP, param_flags));
-  g_object_class_install_property (object_class, PROP_MAX_QP_P,
-      g_param_spec_int ("max-qp-p", "Max QP P",
+
+  /**
+   * GstNvD3D11H265Enc:qp-max-i:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_MAX_I,
+      g_param_spec_int ("qp-max-i", "QP Max I",
+          "Maximum QP value for I frame, (-1 = automatic)", -1, 51,
+          DEFAULT_QP, param_flags));
+
+  /**
+   * GstNvD3D11H265Enc:qp-max-p:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_MAX_P,
+      g_param_spec_int ("qp-max-p", "QP Max P",
           "Maximum QP value for P frame, (-1 = automatic)", -1, 51,
           DEFAULT_QP, param_flags));
-  g_object_class_install_property (object_class, PROP_MAX_QP_B,
-      g_param_spec_int ("max-qp-b", "Max QP B",
+
+  /**
+   * GstNvD3D11H265Enc:qp-max-b:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (object_class, PROP_QP_MAX_B,
+      g_param_spec_int ("qp-max-b", "Max QP B",
           "Maximum QP value for B frame, (-1 = automatic)", -1, 51,
           DEFAULT_QP, param_flags));
   g_object_class_install_property (object_class, PROP_CONST_QUALITY,
@@ -478,6 +603,9 @@ gst_nv_h265_encoder_class_init (GstNvH265EncoderClass * klass, gpointer data)
           "ignored if negotiated stream-format is \"hvc1\"",
           DEFAULT_REPEAT_SEQUENCE_HEADER, param_flags));
 
+  GstPadTemplate *pad_templ = gst_pad_template_new ("sink",
+      GST_PAD_SINK, GST_PAD_ALWAYS, cdata->sink_caps);
+  GstCaps *doc_caps = nullptr;
   switch (cdata->device_mode) {
     case GST_NV_ENCODER_DEVICE_CUDA:
       gst_element_class_set_static_metadata (element_class,
@@ -485,6 +613,7 @@ gst_nv_h265_encoder_class_init (GstNvH265EncoderClass * klass, gpointer data)
           "Codec/Encoder/Video/Hardware",
           "Encode H.265 video streams using NVCODEC API CUDA Mode",
           "Seungha Yang <seungha@centricular.com>");
+      doc_caps = gst_caps_from_string (DOC_SINK_CAPS);
       break;
     case GST_NV_ENCODER_DEVICE_D3D11:
       gst_element_class_set_static_metadata (element_class,
@@ -492,6 +621,7 @@ gst_nv_h265_encoder_class_init (GstNvH265EncoderClass * klass, gpointer data)
           "Codec/Encoder/Video/Hardware",
           "Encode H.265 video streams using NVCODEC API Direct3D11 Mode",
           "Seungha Yang <seungha@centricular.com>");
+      doc_caps = gst_caps_from_string (DOC_SINK_CAPS_D3D11);
       break;
     case GST_NV_ENCODER_DEVICE_AUTO_SELECT:
       gst_element_class_set_static_metadata (element_class,
@@ -499,18 +629,23 @@ gst_nv_h265_encoder_class_init (GstNvH265EncoderClass * klass, gpointer data)
           "Codec/Encoder/Video/Hardware",
           "Encode H.265 video streams using NVCODEC API auto GPU select Mode",
           "Seungha Yang <seungha@centricular.com>");
+      doc_caps = gst_caps_from_string (DOC_SINK_CAPS_AUTOGPU);
       break;
     default:
       g_assert_not_reached ();
       break;
   }
 
-  gst_element_class_add_pad_template (element_class,
-      gst_pad_template_new ("sink", GST_PAD_SINK, GST_PAD_ALWAYS,
-          cdata->sink_caps));
-  gst_element_class_add_pad_template (element_class,
-      gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
-          cdata->src_caps));
+  gst_pad_template_set_documentation_caps (pad_templ, doc_caps);
+  gst_caps_unref (doc_caps);
+  gst_element_class_add_pad_template (element_class, pad_templ);
+
+  pad_templ = gst_pad_template_new ("src",
+      GST_PAD_SRC, GST_PAD_ALWAYS, cdata->src_caps);
+  doc_caps = gst_caps_from_string (DOC_SRC_CAPS);
+  gst_pad_template_set_documentation_caps (pad_templ, doc_caps);
+  gst_caps_unref (doc_caps);
+  gst_element_class_add_pad_template (element_class, pad_templ);
 
   videoenc_class->getcaps = GST_DEBUG_FUNCPTR (gst_nv_h265_encoder_getcaps);
   videoenc_class->stop = GST_DEBUG_FUNCPTR (gst_nv_h265_encoder_stop);
@@ -558,9 +693,10 @@ gst_nv_h265_encoder_init (GstNvH265Encoder * self)
   self->gop_size = DEFAULT_GOP_SIZE;
   self->bframes = DEFAULT_B_FRAMES;
   self->rc_mode = DEFAULT_RATE_CONTROL;
-  self->qp_i = DEFAULT_QP;
-  self->qp_p = DEFAULT_QP;
-  self->qp_b = DEFAULT_QP;
+  self->qp_const = DEFAULT_QP;
+  self->qp_const_i = DEFAULT_QP;
+  self->qp_const_p = DEFAULT_QP;
+  self->qp_const_b = DEFAULT_QP;
   self->bitrate = DEFAULT_BITRATE;
   self->max_bitrate = DEFAULT_MAX_BITRATE;
   self->vbv_buffer_size = DEFAULT_VBV_BUFFER_SIZE;
@@ -569,16 +705,18 @@ gst_nv_h265_encoder_init (GstNvH265Encoder * self)
   self->b_adapt = DEFAULT_B_ADAPT;
   self->spatial_aq = DEFAULT_SPATIAL_AQ;
   self->temporal_aq = DEFAULT_TEMPORAL_AQ;
-  self->zero_reorder_delay = DEFAULT_ZERO_REORDER_DELAY;
+  self->zero_reorder_delay = DEFAULT_ZEROLATENCY;
   self->non_ref_p = DEFAULT_NON_REF_P;
   self->strict_gop = DEFAULT_STRICT_GOP;
   self->aq_strength = DEFAULT_AQ_STRENGTH;
-  self->min_qp_i = DEFAULT_QP;
-  self->min_qp_p = DEFAULT_QP;
-  self->min_qp_b = DEFAULT_QP;
-  self->max_qp_i = DEFAULT_QP;
-  self->max_qp_p = DEFAULT_QP;
-  self->max_qp_b = DEFAULT_QP;
+  self->qp_min = DEFAULT_QP;
+  self->qp_min_i = DEFAULT_QP;
+  self->qp_min_p = DEFAULT_QP;
+  self->qp_min_b = DEFAULT_QP;
+  self->qp_max = DEFAULT_QP;
+  self->qp_max_i = DEFAULT_QP;
+  self->qp_max_p = DEFAULT_QP;
+  self->qp_max_b = DEFAULT_QP;
   self->const_quality = DEFAULT_CONST_QUALITY;
   self->aud = DEFAULT_AUD;
   self->repeat_sequence_header = DEFAULT_REPEAT_SEQUENCE_HEADER;
@@ -785,14 +923,17 @@ gst_nv_h265_encoder_set_property (GObject * object, guint prop_id,
       }
       break;
     }
-    case PROP_QP_I:
-      update_int (self, &self->qp_i, value, UPDATE_RC_PARAM);
+    case PROP_QP_CONST:
+      update_int (self, &self->qp_const, value, UPDATE_RC_PARAM);
       break;
-    case PROP_QP_P:
-      update_int (self, &self->qp_p, value, UPDATE_RC_PARAM);
+    case PROP_QP_CONST_I:
+      update_int (self, &self->qp_const_i, value, UPDATE_RC_PARAM);
       break;
-    case PROP_QP_B:
-      update_int (self, &self->qp_b, value, UPDATE_RC_PARAM);
+    case PROP_QP_CONST_P:
+      update_int (self, &self->qp_const_p, value, UPDATE_RC_PARAM);
+      break;
+    case PROP_QP_CONST_B:
+      update_int (self, &self->qp_const_b, value, UPDATE_RC_PARAM);
       break;
     case PROP_BITRATE:
       update_uint (self, &self->bitrate, value, UPDATE_BITRATE);
@@ -819,7 +960,7 @@ gst_nv_h265_encoder_set_property (GObject * object, guint prop_id,
     case PROP_TEMPORAL_AQ:
       update_boolean (self, &self->temporal_aq, value, UPDATE_RC_PARAM);
       break;
-    case PROP_ZERO_REORDER_DELAY:
+    case PROP_ZEROLATENCY:
       update_boolean (self, &self->zero_reorder_delay, value, UPDATE_RC_PARAM);
       break;
     case PROP_NON_REF_P:
@@ -831,23 +972,29 @@ gst_nv_h265_encoder_set_property (GObject * object, guint prop_id,
     case PROP_AQ_STRENGTH:
       update_uint (self, &self->aq_strength, value, UPDATE_RC_PARAM);
       break;
-    case PROP_MIN_QP_I:
-      update_int (self, &self->min_qp_i, value, UPDATE_RC_PARAM);
+    case PROP_QP_MIN:
+      update_int (self, &self->qp_min, value, UPDATE_RC_PARAM);
       break;
-    case PROP_MIN_QP_P:
-      update_int (self, &self->min_qp_p, value, UPDATE_RC_PARAM);
+    case PROP_QP_MIN_I:
+      update_int (self, &self->qp_min_i, value, UPDATE_RC_PARAM);
       break;
-    case PROP_MIN_QP_B:
-      update_int (self, &self->min_qp_b, value, UPDATE_RC_PARAM);
+    case PROP_QP_MIN_P:
+      update_int (self, &self->qp_min_p, value, UPDATE_RC_PARAM);
       break;
-    case PROP_MAX_QP_I:
-      update_int (self, &self->max_qp_i, value, UPDATE_RC_PARAM);
+    case PROP_QP_MIN_B:
+      update_int (self, &self->qp_min_b, value, UPDATE_RC_PARAM);
       break;
-    case PROP_MAX_QP_P:
-      update_int (self, &self->max_qp_p, value, UPDATE_RC_PARAM);
+    case PROP_QP_MAX:
+      update_int (self, &self->qp_max, value, UPDATE_RC_PARAM);
       break;
-    case PROP_MAX_QP_B:
-      update_int (self, &self->max_qp_b, value, UPDATE_RC_PARAM);
+    case PROP_QP_MAX_I:
+      update_int (self, &self->qp_max_i, value, UPDATE_RC_PARAM);
+      break;
+    case PROP_QP_MAX_P:
+      update_int (self, &self->qp_max_p, value, UPDATE_RC_PARAM);
+      break;
+    case PROP_QP_MAX_B:
+      update_int (self, &self->qp_max_b, value, UPDATE_RC_PARAM);
       break;
     case PROP_CONST_QUALITY:
       update_double (self, &self->const_quality, value, UPDATE_RC_PARAM);
@@ -901,14 +1048,17 @@ gst_nv_h265_encoder_get_property (GObject * object, guint prop_id,
     case PROP_RATE_CONTROL:
       g_value_set_enum (value, self->rc_mode);
       break;
-    case PROP_QP_I:
-      g_value_set_int (value, self->qp_i);
+    case PROP_QP_CONST:
+      g_value_set_int (value, self->qp_const);
       break;
-    case PROP_QP_P:
-      g_value_set_int (value, self->qp_p);
+    case PROP_QP_CONST_I:
+      g_value_set_int (value, self->qp_const_i);
       break;
-    case PROP_QP_B:
-      g_value_set_int (value, self->qp_b);
+    case PROP_QP_CONST_P:
+      g_value_set_int (value, self->qp_const_p);
+      break;
+    case PROP_QP_CONST_B:
+      g_value_set_int (value, self->qp_const_b);
       break;
     case PROP_BITRATE:
       g_value_set_uint (value, self->bitrate);
@@ -934,7 +1084,7 @@ gst_nv_h265_encoder_get_property (GObject * object, guint prop_id,
     case PROP_TEMPORAL_AQ:
       g_value_set_boolean (value, self->temporal_aq);
       break;
-    case PROP_ZERO_REORDER_DELAY:
+    case PROP_ZEROLATENCY:
       g_value_set_boolean (value, self->zero_reorder_delay);
       break;
     case PROP_NON_REF_P:
@@ -946,23 +1096,29 @@ gst_nv_h265_encoder_get_property (GObject * object, guint prop_id,
     case PROP_AQ_STRENGTH:
       g_value_set_uint (value, self->aq_strength);
       break;
-    case PROP_MIN_QP_I:
-      g_value_set_int (value, self->min_qp_i);
+    case PROP_QP_MIN:
+      g_value_set_int (value, self->qp_min);
       break;
-    case PROP_MIN_QP_P:
-      g_value_set_int (value, self->min_qp_p);
+    case PROP_QP_MIN_I:
+      g_value_set_int (value, self->qp_min_i);
       break;
-    case PROP_MIN_QP_B:
-      g_value_set_int (value, self->min_qp_b);
+    case PROP_QP_MIN_P:
+      g_value_set_int (value, self->qp_min_p);
       break;
-    case PROP_MAX_QP_I:
-      g_value_set_int (value, self->max_qp_i);
+    case PROP_QP_MIN_B:
+      g_value_set_int (value, self->qp_min_b);
       break;
-    case PROP_MAX_QP_P:
-      g_value_set_int (value, self->max_qp_p);
+    case PROP_QP_MAX:
+      g_value_set_int (value, self->qp_max);
       break;
-    case PROP_MAX_QP_B:
-      g_value_set_int (value, self->max_qp_b);
+    case PROP_QP_MAX_I:
+      g_value_set_int (value, self->qp_max_i);
+      break;
+    case PROP_QP_MAX_P:
+      g_value_set_int (value, self->qp_max_p);
+      break;
+    case PROP_QP_MAX_B:
+      g_value_set_int (value, self->qp_max_b);
       break;
     case PROP_CONST_QUALITY:
       g_value_set_double (value, self->const_quality);
@@ -1062,8 +1218,14 @@ gst_nv_h265_encoder_getcaps (GstVideoEncoder * encoder, GstCaps * filter)
   for (const auto &iter: downstream_profiles) {
     if (iter == "main") {
       allowed_formats.insert("NV12");
+      allowed_formats.insert("VUYA");
+      allowed_formats.insert("RGBA");
+      allowed_formats.insert("RGBx");
+      allowed_formats.insert("BGRA");
+      allowed_formats.insert("BGRx");
     } else if (iter == "main-10") {
       allowed_formats.insert("P010_10LE");
+      allowed_formats.insert("RGB10A2_LE");
     } else if (iter == "main-444") {
       allowed_formats.insert("Y444");
       allowed_formats.insert("GBR");
@@ -1155,6 +1317,11 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
   /* XXX: we may need to relax condition a little */
   switch (GST_VIDEO_INFO_FORMAT (info)) {
     case GST_VIDEO_FORMAT_NV12:
+    case GST_VIDEO_FORMAT_VUYA:
+    case GST_VIDEO_FORMAT_RGBA:
+    case GST_VIDEO_FORMAT_RGBx:
+    case GST_VIDEO_FORMAT_BGRA:
+    case GST_VIDEO_FORMAT_BGRx:
       if (downstream_profiles.find ("main") == downstream_profiles.end ()) {
         GST_ERROR_OBJECT (self, "Downstream does not support main profile");
         return FALSE;
@@ -1163,6 +1330,7 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
       }
       break;
     case GST_VIDEO_FORMAT_P010_10LE:
+    case GST_VIDEO_FORMAT_RGB10A2_LE:
       if (downstream_profiles.find ("main-10") == downstream_profiles.end ()) {
         GST_ERROR_OBJECT (self, "Downstream does not support main profile");
         return FALSE;
@@ -1277,8 +1445,22 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
     init_params->darHeight = dar_d;
   }
 
-  gst_nv_encoder_preset_to_native (self->preset, self->tune,
-      &init_params->presetGUID, &init_params->tuningInfo);
+  GstNvEncoderPresetOptions in_opt = { };
+  GstNvEncoderPresetOptionsNative out_opt = { };
+  in_opt.preset = self->preset;
+  in_opt.tune = self->tune;
+  in_opt.rc_mode = self->rc_mode;
+  in_opt.multi_pass = self->multipass;
+  GstNvEncoderPresetResolution resolution = GST_NV_ENCODER_PRESET_720;
+  auto frame_size = info->width * info->height;
+  if (frame_size >= 3840 * 2160)
+    resolution = GST_NV_ENCODER_PRESET_2160;
+  else if (frame_size >= 1920 * 1080)
+    resolution = GST_NV_ENCODER_PRESET_1080;
+
+  gst_nv_encoder_preset_to_native (resolution, &in_opt, &out_opt);
+  init_params->presetGUID = out_opt.preset;
+  init_params->tuningInfo = out_opt.tune;
 
   preset_config.version = gst_nvenc_get_preset_config_version ();
   preset_config.presetCfg.version = gst_nvenc_get_config_version ();
@@ -1312,6 +1494,9 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
 
   rc_params = &config->rcParams;
 
+  rc_params->rateControlMode = out_opt.rc_mode;
+  rc_params->multiPass = out_opt.multi_pass;
+
   if (self->bitrate)
     rc_params->averageBitRate = self->bitrate * 1024;
   if (self->max_bitrate)
@@ -1319,46 +1504,59 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
   if (self->vbv_buffer_size)
     rc_params->vbvBufferSize = self->vbv_buffer_size * 1024;
 
-  if (self->min_qp_i >= 0) {
+  if (self->qp_min >= 0) {
     rc_params->enableMinQP = TRUE;
-    rc_params->minQP.qpIntra = self->min_qp_i;
-    if (self->min_qp_p >= 0) {
-      rc_params->minQP.qpInterP = self->min_qp_p;
+    rc_params->minQP.qpIntra = self->qp_min;
+    rc_params->minQP.qpInterP = self->qp_min;
+    rc_params->minQP.qpInterB = self->qp_min;
+  } else if (self->qp_min_i >= 0) {
+    rc_params->enableMinQP = TRUE;
+    rc_params->minQP.qpIntra = self->qp_min_i;
+    if (self->qp_min_p >= 0) {
+      rc_params->minQP.qpInterP = self->qp_min_p;
     } else {
       rc_params->minQP.qpInterP = rc_params->minQP.qpIntra;
     }
-    if (self->min_qp_b >= 0) {
-      rc_params->minQP.qpInterB = self->min_qp_b;
+    if (self->qp_min_b >= 0) {
+      rc_params->minQP.qpInterB = self->qp_min_b;
     } else {
       rc_params->minQP.qpInterB = rc_params->minQP.qpInterP;
     }
   }
 
-  if (self->max_qp_i >= 0) {
+  if (self->qp_max >= 0) {
     rc_params->enableMaxQP = TRUE;
-    rc_params->maxQP.qpIntra = self->max_qp_i;
-    if (self->max_qp_p >= 0) {
-      rc_params->maxQP.qpInterP = self->max_qp_p;
+    rc_params->maxQP.qpIntra = self->qp_min;
+    rc_params->maxQP.qpInterP = self->qp_min;
+    rc_params->maxQP.qpInterB = self->qp_min;
+  } else if (self->qp_max_i >= 0) {
+    rc_params->enableMaxQP = TRUE;
+    rc_params->maxQP.qpIntra = self->qp_max_i;
+    if (self->qp_max_p >= 0) {
+      rc_params->maxQP.qpInterP = self->qp_max_p;
     } else {
       rc_params->maxQP.qpInterP = rc_params->maxQP.qpIntra;
     }
-    if (self->max_qp_b >= 0) {
-      rc_params->maxQP.qpInterB = self->max_qp_b;
+    if (self->qp_max_b >= 0) {
+      rc_params->maxQP.qpInterB = self->qp_max_b;
     } else {
       rc_params->maxQP.qpInterB = rc_params->maxQP.qpInterP;
     }
   }
 
-  gst_nv_encoder_rc_mode_to_native (self->rc_mode, self->multipass,
-      &rc_params->rateControlMode, &rc_params->multiPass);
-
   if (rc_params->rateControlMode == NV_ENC_PARAMS_RC_CONSTQP) {
-    if (self->qp_i >= 0)
-      rc_params->constQP.qpIntra = self->qp_i;
-    if (self->qp_p >= 0)
-      rc_params->constQP.qpInterP = self->qp_p;
-    if (self->qp_b >= 0)
-      rc_params->constQP.qpInterB = self->qp_b;
+    if (self->qp_const >= 0) {
+      rc_params->constQP.qpIntra = self->qp_const;
+      rc_params->constQP.qpInterP = self->qp_const;
+      rc_params->constQP.qpInterB = self->qp_const;
+    } else {
+      if (self->qp_const_i >= 0)
+        rc_params->constQP.qpIntra = self->qp_const_i;
+      if (self->qp_const_p >= 0)
+        rc_params->constQP.qpInterP = self->qp_const_p;
+      if (self->qp_const_b >= 0)
+        rc_params->constQP.qpInterB = self->qp_const_b;
+    }
   }
 
   if (self->spatial_aq) {
@@ -1410,10 +1608,26 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
     hevc_config->repeatSPSPPS = 0;
   }
 
+  GstVideoColorimetry cinfo;
+  switch (GST_VIDEO_INFO_FORMAT (info)) {
+    case GST_VIDEO_FORMAT_NV12:
+    case GST_VIDEO_FORMAT_P010_10LE:
+    case GST_VIDEO_FORMAT_Y444:
+    case GST_VIDEO_FORMAT_GBR:
+    case GST_VIDEO_FORMAT_Y444_16LE:
+    case GST_VIDEO_FORMAT_GBR_16LE:
+      cinfo = info->colorimetry;
+      break;
+    default:
+      /* Other formats will be converted 4:2:0 YUV by runtime */
+      gst_video_colorimetry_from_string (&cinfo, GST_VIDEO_COLORIMETRY_BT709);
+      break;
+  }
+
   vui->videoSignalTypePresentFlag = 1;
   /* Unspecified */
-  vui->videoFormat = 5;
-  if (info->colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255) {
+  vui->videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+  if (cinfo.range == GST_VIDEO_COLOR_RANGE_0_255) {
     vui->videoFullRangeFlag = 1;
   } else {
     vui->videoFullRangeFlag = 0;
@@ -1424,19 +1638,19 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
     case GST_VIDEO_FORMAT_GBR:
     case GST_VIDEO_FORMAT_GBR_16LE:
       /* color matrix must be "Identity" */
-      vui->colourMatrix =
+      vui->colourMatrix = (NV_ENC_VUI_MATRIX_COEFFS)
           gst_video_color_matrix_to_iso (GST_VIDEO_COLOR_MATRIX_RGB);
       break;
     default:
-      vui->colourMatrix =
-          gst_video_color_matrix_to_iso (info->colorimetry.matrix);
+      vui->colourMatrix = (NV_ENC_VUI_MATRIX_COEFFS)
+          gst_video_color_matrix_to_iso (cinfo.matrix);
       break;
   }
 
-  vui->colourPrimaries =
-      gst_video_color_primaries_to_iso (info->colorimetry.primaries);
-  vui->transferCharacteristics =
-      gst_video_transfer_function_to_iso (info->colorimetry.transfer);
+  vui->colourPrimaries = (NV_ENC_VUI_COLOR_PRIMARIES)
+      gst_video_color_primaries_to_iso (cinfo.primaries);
+  vui->transferCharacteristics = (NV_ENC_VUI_TRANSFER_CHARACTERISTIC)
+      gst_video_transfer_function_to_iso (cinfo.transfer);
 
   g_mutex_unlock (&self->prop_lock);
 
@@ -1733,6 +1947,23 @@ gst_nv_h265_encoder_set_output_state (GstNvEncoder * encoder,
 
   output_state = gst_video_encoder_set_output_state (GST_VIDEO_ENCODER (self),
       caps, state);
+
+  switch (GST_VIDEO_INFO_FORMAT (&state->info)) {
+    case GST_VIDEO_FORMAT_NV12:
+    case GST_VIDEO_FORMAT_P010_10LE:
+    case GST_VIDEO_FORMAT_Y444:
+    case GST_VIDEO_FORMAT_GBR:
+    case GST_VIDEO_FORMAT_Y444_16LE:
+    case GST_VIDEO_FORMAT_GBR_16LE:
+      /* Native formats */
+      break;
+    default:
+      /* Format converted by runtime */
+      gst_video_colorimetry_from_string (&output_state->info.colorimetry,
+          GST_VIDEO_COLORIMETRY_BT709);
+      output_state->info.chroma_site = GST_VIDEO_CHROMA_SITE_H_COSITED;
+      break;
+  }
 
   GST_INFO_OBJECT (self, "Output caps: %" GST_PTR_FORMAT, output_state->caps);
   gst_video_codec_state_unref (output_state);
@@ -2043,6 +2274,21 @@ gst_nv_h265_encoder_create_class_data (GstObject * device, gpointer session,
           formats.insert ("GBR_16LE");
         }
         break;
+      case NV_ENC_BUFFER_FORMAT_AYUV:
+        formats.insert ("VUYA");
+        break;
+      case NV_ENC_BUFFER_FORMAT_ABGR:
+        formats.insert ("RGBA");
+        formats.insert ("RGBx");
+        break;
+      case NV_ENC_BUFFER_FORMAT_ARGB:
+        formats.insert ("BGRA");
+        formats.insert ("BGRx");
+        break;
+      case NV_ENC_BUFFER_FORMAT_ABGR10:
+        if (dev_caps.supports_10bit_encode)
+          formats.insert ("RGB10A2_LE");
+        break;
       default:
         break;
     }
@@ -2073,6 +2319,12 @@ gst_nv_h265_encoder_create_class_data (GstObject * device, gpointer session,
     APPEND_STRING (format_str, formats, "Y444_16LE");
     APPEND_STRING (format_str, formats, "GBR");
     APPEND_STRING (format_str, formats, "GBR_16LE");
+    APPEND_STRING (format_str, formats, "VUYA");
+    APPEND_STRING (format_str, formats, "RGBA");
+    APPEND_STRING (format_str, formats, "RGBx");
+    APPEND_STRING (format_str, formats, "BGRA");
+    APPEND_STRING (format_str, formats, "BGRx");
+    APPEND_STRING (format_str, formats, "RGB10A2_LE");
     format_str += " }";
   }
 
@@ -2119,7 +2371,7 @@ gst_nv_h265_encoder_create_class_data (GstObject * device, gpointer session,
       + ", interlace-mode = (string) progressive";
 
   src_caps_str = "video/x-h265, " + resolution_str + ", " + profile_str +
-      ", stream-format = (string) { hvc1, hev1, byte-stream }" +
+      ", stream-format = (string) { byte-stream, hvc1, hev1 }" +
       ", alignment = (string) au";
 
   system_caps = gst_caps_from_string (sink_caps_str.c_str ());
@@ -2127,17 +2379,34 @@ gst_nv_h265_encoder_create_class_data (GstObject * device, gpointer session,
 #ifdef G_OS_WIN32
   if (device_mode == GST_NV_ENCODER_DEVICE_D3D11) {
     gst_caps_set_features (sink_caps, 0,
-        gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY, nullptr));
+        gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY,
+            nullptr));
   }
 #endif
 
   if (device_mode == GST_NV_ENCODER_DEVICE_CUDA) {
     gst_caps_set_features (sink_caps, 0,
-        gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY, nullptr));
+        gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY,
+            nullptr));
+#ifdef HAVE_GST_D3D12
+    if (gst_nvcodec_is_windows_10_or_greater ()) {
+      gboolean have_interop = FALSE;
+      g_object_get (device,
+          "external-resource-interop", &have_interop, nullptr);
+      if (have_interop) {
+        auto d3d12_caps = gst_caps_copy (system_caps);
+        gst_caps_set_features_simple (d3d12_caps,
+            gst_caps_features_new_static_str
+            (GST_CAPS_FEATURE_MEMORY_D3D12_MEMORY, nullptr));
+        gst_caps_append (sink_caps, d3d12_caps);
+      }
+    }
+#endif
 #ifdef HAVE_CUDA_GST_GL
     GstCaps *gl_caps = gst_caps_copy (system_caps);
     gst_caps_set_features (gl_caps, 0,
-        gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_GL_MEMORY, nullptr));
+        gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_GL_MEMORY,
+            nullptr));
     gst_caps_append (sink_caps, gl_caps);
 #endif
   }
@@ -2158,8 +2427,12 @@ gst_nv_h265_encoder_create_class_data (GstObject * device, gpointer session,
     cdata->profiles = g_list_append (cdata->profiles, g_strdup (iter.c_str()));
   /* *INDENT-ON* */
 
+#ifdef G_OS_WIN32
   if (device_mode == GST_NV_ENCODER_DEVICE_D3D11)
     g_object_get (device, "adapter-luid", &cdata->adapter_luid, nullptr);
+  else
+    g_object_get (device, "dxgi-adapter-luid", &cdata->adapter_luid, nullptr);
+#endif
 
   if (device_mode == GST_NV_ENCODER_DEVICE_CUDA)
     g_object_get (device, "cuda-device-id", &cdata->cuda_device_id, nullptr);
@@ -2221,16 +2494,16 @@ gst_nv_h265_encoder_register_cuda (GstPlugin * plugin, GstCudaContext * context,
     (GInstanceInitFunc) gst_nv_h265_encoder_init,
   };
 
-  type_name = g_strdup ("GstNvCudaH265Enc");
-  feature_name = g_strdup ("nvcudah265enc");
+  type_name = g_strdup ("GstNvH265Enc");
+  feature_name = g_strdup ("nvh265enc");
 
   gint index = 0;
   while (g_type_from_name (type_name)) {
     index++;
     g_free (type_name);
     g_free (feature_name);
-    type_name = g_strdup_printf ("GstNvCudaH265Device%dEnc", index);
-    feature_name = g_strdup_printf ("nvcudah265device%denc", index);
+    type_name = g_strdup_printf ("GstNvH265Device%dEnc", index);
+    feature_name = g_strdup_printf ("nvh265device%denc", index);
   }
 
   type = g_type_register_static (GST_TYPE_NV_ENCODER, type_name,
@@ -2411,6 +2684,12 @@ gst_nv_h265_encoder_register_auto_select (GstPlugin * plugin,
     APPEND_STRING (format_str, formats, "Y444_16LE");
     APPEND_STRING (format_str, formats, "GBR");
     APPEND_STRING (format_str, formats, "GBR_16LE");
+    APPEND_STRING (format_str, formats, "VUYA");
+    APPEND_STRING (format_str, formats, "RGBA");
+    APPEND_STRING (format_str, formats, "RGBx");
+    APPEND_STRING (format_str, formats, "BGRA");
+    APPEND_STRING (format_str, formats, "BGRx");
+    APPEND_STRING (format_str, formats, "RGB10A2_LE");
     format_str += " }";
   }
 
@@ -2439,7 +2718,7 @@ gst_nv_h265_encoder_register_auto_select (GstPlugin * plugin,
       + ", interlace-mode = (string) progressive";
 
   src_caps_str = "video/x-h265, " + resolution_str + ", " + profile_str +
-      ", stream-format = (string) { hvc1, hev1, byte-stream }" +
+      ", stream-format = (string) { byte-stream, hvc1, hev1 }" +
       ", alignment = (string) au";
 
   system_caps = gst_caps_from_string (sink_caps_str.c_str ());
@@ -2448,14 +2727,16 @@ gst_nv_h265_encoder_register_auto_select (GstPlugin * plugin,
   if (cuda_device_id_size > 0) {
     GstCaps *cuda_caps = gst_caps_copy (system_caps);
     gst_caps_set_features (cuda_caps, 0,
-        gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY, nullptr));
+        gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_CUDA_MEMORY,
+            nullptr));
     gst_caps_append (sink_caps, cuda_caps);
   }
 #ifdef G_OS_WIN32
   if (adapter_luid_size > 0) {
     GstCaps *d3d11_caps = gst_caps_copy (system_caps);
     gst_caps_set_features (d3d11_caps, 0,
-        gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY, nullptr));
+        gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY,
+            nullptr));
     gst_caps_append (sink_caps, d3d11_caps);
   }
 #endif
@@ -2463,7 +2744,8 @@ gst_nv_h265_encoder_register_auto_select (GstPlugin * plugin,
 #ifdef HAVE_CUDA_GST_GL
   GstCaps *gl_caps = gst_caps_copy (system_caps);
   gst_caps_set_features (gl_caps, 0,
-      gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_GL_MEMORY, nullptr));
+      gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_GL_MEMORY,
+          nullptr));
   gst_caps_append (sink_caps, gl_caps);
 #endif
 

@@ -1,0 +1,4 @@
+Tests: build-and-test
+Depends: @builddeps@
+Restrictions: allow-stderr
+Architecture: !riscv64

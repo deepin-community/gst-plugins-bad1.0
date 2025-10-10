@@ -500,7 +500,7 @@ gst_va_h264_dec_new_picture (GstH264Decoder * decoder,
 error:
   {
     GST_WARNING_OBJECT (self,
-        "Failed to allocated output buffer, return %s",
+        "Failed to allocate output buffer, returning %s",
         gst_flow_get_name (ret));
     return ret;
   }
@@ -786,6 +786,11 @@ _complete_sink_caps (GstCaps * sinkcaps)
         g_value_get_string (gst_value_list_get_value (profiles, i));
 
     _append_str (&val, profile);
+
+    /* Similar to baseline and constrained-baseline, extended is the same as
+     * main if we ignore ASO/FMO features. */
+    if (g_strcmp0 (profile, "main") == 0)
+      _append_str (&val, "extended");
 
     if (g_strcmp0 (profile, "high") == 0) {
       for (j = 0; j < G_N_ELEMENTS (high_synthetic); j++)

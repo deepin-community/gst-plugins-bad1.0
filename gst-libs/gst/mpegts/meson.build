@@ -6,8 +6,6 @@ mpegts_sources = files(
   'gst-dvb-section.c',
   'gst-atsc-section.c',
   'gst-scte-section.c',
-  'gst-mpegtspesmetadatameta.c',
-  'gst-metadata-descriptor.c'
 )
 
 mpegts_headers = files(
@@ -20,12 +18,19 @@ mpegts_headers = files(
   'gst-atsc-descriptor.h',
   'gst-dvb-descriptor.h',
   'gst-isdb-descriptor.h',
-  'gst-mpegtspesmetadatameta.h',
-  'gst-metadata-descriptor.h',
   'mpegts-prelude.h',
   'mpegts.h',
 )
 install_headers(mpegts_headers, subdir : 'gstreamer-1.0/gst/mpegts')
+
+doc_sources = []
+foreach s: mpegts_sources + mpegts_headers
+  doc_sources += s.full_path()
+endforeach
+
+libs_sources += {
+  'mpegts': pathsep.join(doc_sources)
+}
 
 mpegts_enums = gnome.mkenums_simple('gstmpegts-enumtypes',
   sources : mpegts_headers,
@@ -47,7 +52,7 @@ gstmpegts = library('gstmpegts-' + api_version,
   soversion : soversion,
   darwin_versions : osxversion,
   install : true,
-  dependencies : [gst_dep],
+  dependencies : [gst_dep, gstbase_dep],
 )
 
 library_def = {'lib': gstmpegts}

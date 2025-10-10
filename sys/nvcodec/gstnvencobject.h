@@ -138,6 +138,7 @@ enum GstNvEncCodec
 {
   GST_NV_ENC_CODEC_H264,
   GST_NV_ENC_CODEC_H265,
+  GST_NV_ENC_CODEC_AV1,
 };
 
 class GstNvEncObject : public std::enable_shared_from_this <GstNvEncObject>
@@ -186,6 +187,12 @@ public:
   NVENCSTATUS   AcquireResource (GstMemory * mem,
                                  GstNvEncResource ** resource);
 
+  NVENCSTATUS   AcquireResourceWithSize (GstMemory * mem,
+                                         guint width,
+                                         guint height,
+                                         guint stride,
+                                         GstNvEncResource ** resource);
+
   GstFlowReturn AcquireTask (GstNvEncTask ** task,
                              bool force);
 
@@ -207,6 +214,9 @@ private:
   void releaseTaskUnlocked (GstNvEncTask * task);
 
   NVENCSTATUS acquireResourceCuda (GstMemory * mem,
+                                   guint width,
+                                   guint height,
+                                   guint stride,
                                    GstNvEncResource ** resource);
 
 #ifdef G_OS_WIN32

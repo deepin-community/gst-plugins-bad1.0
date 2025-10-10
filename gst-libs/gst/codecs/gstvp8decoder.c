@@ -45,7 +45,7 @@ struct _GstVp8DecoderPrivate
   gboolean wait_keyframe;
   guint preferred_output_delay;
   /* for delayed output */
-  GstQueueArray *output_queue;
+  GstVecDeque *output_queue;
   gboolean is_live;
 
   gboolean input_state_changed;
@@ -115,10 +115,13 @@ gst_vp8_decoder_start (GstVideoDecoder * decoder)
 
   gst_vp8_parser_init (&priv->parser);
   priv->wait_keyframe = TRUE;
+  priv->had_sequence = FALSE;
+  priv->width = 0;
+  priv->height = 0;
 
   priv->output_queue =
-      gst_queue_array_new_for_struct (sizeof (GstVp8DecoderOutputFrame), 1);
-  gst_queue_array_set_clear_func (priv->output_queue,
+      gst_vec_deque_new_for_struct (sizeof (GstVp8DecoderOutputFrame), 1);
+  gst_vec_deque_set_clear_func (priv->output_queue,
       (GDestroyNotify) gst_vp8_decoder_clear_output_frame);
 
   return TRUE;
@@ -134,7 +137,7 @@ gst_vp8_decoder_reset (GstVp8Decoder * self)
   gst_clear_vp8_picture (&self->alt_ref_picture);
 
   priv->wait_keyframe = TRUE;
-  gst_queue_array_clear (priv->output_queue);
+  gst_vec_deque_clear (priv->output_queue);
 }
 
 static gboolean
@@ -149,7 +152,7 @@ gst_vp8_decoder_stop (GstVideoDecoder * decoder)
   }
 
   gst_vp8_decoder_reset (self);
-  gst_queue_array_free (priv->output_queue);
+  gst_vec_deque_free (priv->output_queue);
 
   return TRUE;
 }
@@ -216,9 +219,6 @@ gst_vp8_decoder_set_format (GstVideoDecoder * decoder,
     gst_video_codec_state_unref (self->input_state);
 
   self->input_state = gst_video_codec_state_ref (state);
-
-  priv->width = GST_VIDEO_INFO_WIDTH (&state->info);
-  priv->height = GST_VIDEO_INFO_HEIGHT (&state->info);
 
   query = gst_query_new_latency ();
   if (gst_pad_peer_query (GST_VIDEO_DECODER_SINK_PAD (self), query))
@@ -480,7 +480,7 @@ gst_vp8_decoder_handle_frame (GstVideoDecoder * decoder,
     output_frame.frame = frame;
     output_frame.picture = picture;
     output_frame.self = self;
-    gst_queue_array_push_tail_struct (priv->output_queue, &output_frame);
+    gst_vec_deque_push_tail_struct (priv->output_queue, &output_frame);
   }
 
   gst_vp8_decoder_drain_output_queue (self, priv->preferred_output_delay,
@@ -530,9 +530,9 @@ gst_vp8_decoder_drain_output_queue (GstVp8Decoder * self, guint num,
 
   g_assert (klass->output_picture);
 
-  while (gst_queue_array_get_length (priv->output_queue) > num) {
+  while (gst_vec_deque_get_length (priv->output_queue) > num) {
     GstVp8DecoderOutputFrame *output_frame = (GstVp8DecoderOutputFrame *)
-        gst_queue_array_pop_head_struct (priv->output_queue);
+        gst_vec_deque_pop_head_struct (priv->output_queue);
     /* Output queued frames whatever the return value is, in order to empty
      * the queue */
     GstFlowReturn flow_ret = klass->output_picture (self,

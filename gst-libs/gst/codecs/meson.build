@@ -3,6 +3,8 @@ codecs_sources = files(
   'gsth264picture.c',
   'gsth265decoder.c',
   'gsth265picture.c',
+  'gsth266decoder.c',
+  'gsth266picture.c',
   'gstvp9decoder.c',
   'gstvp9picture.c',
   'gstvp8decoder.c',
@@ -20,6 +22,8 @@ codecs_headers = files(
   'gsth264picture.h',
   'gsth265decoder.h',
   'gsth265picture.h',
+  'gsth266decoder.h',
+  'gsth266picture.h',
   'gstvp9decoder.h',
   'gstvp9picture.h',
   'gstvp8decoder.h',
@@ -37,6 +41,15 @@ cp_args = [
   '-DBUILDING_GST_CODECS',
   '-DG_LOG_DOMAIN="GStreamer-Codecs"'
 ]
+
+doc_sources = []
+foreach s: codecs_sources + codecs_headers
+  doc_sources += s.full_path()
+endforeach
+
+libs_sources += {
+  'codecs': pathsep.join(doc_sources)
+}
 
 gstcodecs = library('gstcodecs-' + api_version,
   codecs_sources,
@@ -68,6 +81,7 @@ if build_gir
       '--c-include=gst/codecs/gstvp9decoder.h',
       '--c-include=gst/codecs/gstvp8decoder.h',
       '--c-include=gst/codecs/gstmpeg2decoder.h',
+      '--c-include=gst/codecs/gsth266decoder.h',
       ],
     'dependencies' : [gstvideo_dep, gstcodecparsers_dep]
   }

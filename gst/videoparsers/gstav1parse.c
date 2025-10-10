@@ -58,8 +58,8 @@
  * ## Example launch line to generate annex B format AV1 stream:
  * ```
  * gst-launch-1.0 filesrc location=sample.av1 ! ivfparse ! av1parse !  \
- *   video/x-av1,alignment=\(string\)tu,stream-format=\(string\)annexb ! \
- *   filesink location=matroskamux ! filesink location=trans.mkv
+ *   video/x-av1,alignment=\(string\)tu,stream-format=\(string\)obu-stream ! \
+ *   matroskamux ! filesink location=trans.mkv
  * ```
  *
  * Since: 1.20
@@ -73,6 +73,7 @@
 #include <gst/base/gstbitwriter.h>
 #include <gst/codecparsers/gstav1parser.h>
 #include <gst/video/video.h>
+#include <gst/pbutils/pbutils.h>
 #include "gstvideoparserselements.h"
 #include "gstav1parse.h"
 
@@ -85,7 +86,7 @@ GST_DEBUG_CATEGORY (av1_parse_debug);
 
 /* We combine the stream format and the alignment
    together. When stream format is annexb, the
-   alignment must be TU. */
+   alignment must be TU or byte. */
 typedef enum
 {
   GST_AV1_PARSE_ALIGN_ERROR = -1,
@@ -95,17 +96,24 @@ typedef enum
   GST_AV1_PARSE_ALIGN_FRAME,
   GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT,
   GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B,
+  GST_AV1_PARSE_ALIGN_ANNEX_B,
 } GstAV1ParseAligment;
 
 struct _GstAV1Parse
 {
   GstBaseParse parent;
 
+  gboolean first_frame;
+
   gint width;
   gint height;
   gint subsampling_x;
   gint subsampling_y;
   gboolean mono_chrome;
+  guint8 seq_level_idx;
+  guint8 seq_tier;
+  guint8 max_seq_level_idx;
+  guint8 max_seq_tier;
   guint8 bit_depth;
   gchar *colorimetry;
   GstAV1Profile profile;
@@ -132,6 +140,7 @@ struct _GstAV1Parse
   gboolean header;
   gboolean keyframe;
   gboolean show_frame;
+  gboolean seen_non_padding;
 
   GstClockTime buffer_pts;
   GstClockTime buffer_dts;
@@ -311,6 +320,10 @@ gst_av1_parse_reset (GstAV1Parse * self)
   self->subsampling_y = -1;
   self->mono_chrome = FALSE;
   self->profile = GST_AV1_PROFILE_UNDEFINED;
+  self->seq_level_idx = GST_AV1_SEQ_LEVEL_MAX;
+  self->seq_tier = 0;
+  self->max_seq_level_idx = GST_AV1_SEQ_LEVEL_MAX;
+  self->max_seq_tier = 0;
   self->bit_depth = 0;
   self->align = GST_AV1_PARSE_ALIGN_NONE;
   self->in_align = GST_AV1_PARSE_ALIGN_NONE;
@@ -321,6 +334,8 @@ gst_av1_parse_reset (GstAV1Parse * self)
   self->show_frame = FALSE;
   self->last_parsed_offset = 0;
   self->highest_spatial_id = 0;
+  self->first_frame = TRUE;
+  self->seen_non_padding = FALSE;
   gst_av1_parse_reset_obu_data_state (self);
   g_clear_pointer (&self->colorimetry, g_free);
   g_clear_pointer (&self->parser, gst_av1_parser_free);
@@ -424,6 +439,80 @@ gst_av1_parse_profile_to_string (GstAV1Profile profile)
   return NULL;
 }
 
+static const gchar *
+gst_av1_parse_seq_level_idx_to_string (GstAV1SeqLevels seq_level_idx)
+{
+  switch (seq_level_idx) {
+    case GST_AV1_SEQ_LEVEL_2_0:
+      return "2.0";
+    case GST_AV1_SEQ_LEVEL_2_1:
+      return "2.1";
+    case GST_AV1_SEQ_LEVEL_2_2:
+      return "2.2";
+    case GST_AV1_SEQ_LEVEL_2_3:
+      return "2.3";
+    case GST_AV1_SEQ_LEVEL_3_0:
+      return "3.0";
+    case GST_AV1_SEQ_LEVEL_3_1:
+      return "3.1";
+    case GST_AV1_SEQ_LEVEL_3_2:
+      return "3.2";
+    case GST_AV1_SEQ_LEVEL_3_3:
+      return "3.3";
+    case GST_AV1_SEQ_LEVEL_4_0:
+      return "4.0";
+    case GST_AV1_SEQ_LEVEL_4_1:
+      return "4.1";
+    case GST_AV1_SEQ_LEVEL_4_2:
+      return "4.2";
+    case GST_AV1_SEQ_LEVEL_4_3:
+      return "4.3";
+    case GST_AV1_SEQ_LEVEL_5_0:
+      return "5.0";
+    case GST_AV1_SEQ_LEVEL_5_1:
+      return "5.1";
+    case GST_AV1_SEQ_LEVEL_5_2:
+      return "5.2";
+    case GST_AV1_SEQ_LEVEL_5_3:
+      return "5.3";
+    case GST_AV1_SEQ_LEVEL_6_0:
+      return "6.0";
+    case GST_AV1_SEQ_LEVEL_6_1:
+      return "6.1";
+    case GST_AV1_SEQ_LEVEL_6_2:
+      return "6.2";
+    case GST_AV1_SEQ_LEVEL_6_3:
+      return "6.3";
+    case GST_AV1_SEQ_LEVEL_7_0:
+      return "7.0";
+    case GST_AV1_SEQ_LEVEL_7_1:
+      return "7.1";
+    case GST_AV1_SEQ_LEVEL_7_2:
+      return "7.2";
+    case GST_AV1_SEQ_LEVEL_7_3:
+      return "7.3";
+    case GST_AV1_SEQ_LEVEL_MAX:
+    case GST_AV1_SEQ_LEVELS:
+      /* not valid */
+      return NULL;
+  }
+
+  return NULL;
+}
+
+static const gchar *
+gst_av1_parse_tier_to_string (guint8 seq_tier)
+{
+  switch (seq_tier) {
+    case 0:
+      return "main";
+    case 1:
+      return "high";
+  }
+
+  return NULL;
+}
+
 static GstAV1Profile
 gst_av1_parse_profile_from_string (const gchar * profile)
 {
@@ -450,6 +539,7 @@ gst_av1_parse_alignment_to_steam_format_string (GstAV1ParseAligment align)
     case GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT:
     case GST_AV1_PARSE_ALIGN_FRAME:
       return "obu-stream";
+    case GST_AV1_PARSE_ALIGN_ANNEX_B:
     case GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B:
       return "annexb";
     default:
@@ -465,6 +555,7 @@ gst_av1_parse_alignment_to_string (GstAV1ParseAligment align)
 {
   switch (align) {
     case GST_AV1_PARSE_ALIGN_BYTE:
+    case GST_AV1_PARSE_ALIGN_ANNEX_B:
       return "byte";
     case GST_AV1_PARSE_ALIGN_OBU:
       return "obu";
@@ -490,11 +581,12 @@ gst_av1_parse_alignment_from_string (const gchar * align,
 
   if (stream_format) {
     if (g_strcmp0 (stream_format, "annexb") == 0) {
-      if (align && g_strcmp0 (align, "tu") != 0) {
-        /* annex b stream must align to TU. */
-        return GST_AV1_PARSE_ALIGN_ERROR;
-      } else {
+      if (align && g_strcmp0 (align, "tu") == 0) {
         return GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B;
+      } else if (align && g_strcmp0 (align, "none") == 0) {
+        return GST_AV1_PARSE_ALIGN_ANNEX_B;
+      } else {
+        return GST_AV1_PARSE_ALIGN_ERROR;
       }
     } else if (g_strcmp0 (stream_format, "obu-stream") != 0) {
       /* unrecognized */
@@ -555,6 +647,10 @@ gst_av1_parse_caps_has_alignment (GstCaps * caps, GstAV1ParseAligment alignment)
       break;
     case GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B:
       cmp_align_str = "tu";
+      cmp_stream_str = "annexb";
+      break;
+    case GST_AV1_PARSE_ALIGN_ANNEX_B:
+      cmp_align_str = "none";
       cmp_stream_str = "annexb";
       break;
     default:
@@ -647,6 +743,8 @@ gst_av1_parse_update_src_caps (GstAV1Parse * self, GstCaps * caps)
   gint width, height;
   gint par_n = 0, par_d = 0;
   const gchar *profile = NULL;
+  const gchar *level = NULL;
+  const gchar *tier = NULL;
 
   if (G_UNLIKELY (!gst_pad_has_current_caps (GST_BASE_PARSE_SRC_PAD (self))))
     self->update_caps = TRUE;
@@ -737,6 +835,33 @@ gst_av1_parse_update_src_caps (GstAV1Parse * self, GstCaps * caps)
   profile = gst_av1_parse_profile_to_string (self->profile);
   if (profile)
     gst_caps_set_simple (final_caps, "profile", G_TYPE_STRING, profile, NULL);
+
+  level = gst_av1_parse_seq_level_idx_to_string (self->seq_level_idx);
+  if (level)
+    gst_caps_set_simple (final_caps, "level", G_TYPE_STRING, level, NULL);
+
+  tier = gst_av1_parse_tier_to_string (self->seq_tier);
+  if (tier)
+    gst_caps_set_simple (final_caps, "tier", G_TYPE_STRING, tier, NULL);
+
+  if ((self->max_seq_tier != self->seq_tier)
+      || (self->max_seq_level_idx != self->seq_level_idx)) {
+
+    tier = gst_av1_parse_tier_to_string (self->max_seq_tier);
+    if (tier) {
+      gst_caps_set_simple (final_caps, "max-tier", G_TYPE_STRING, tier, NULL);
+    } else {
+      GST_WARNING_OBJECT (self, "Invalid max seq tier %d", self->max_seq_tier);
+    }
+
+    level = gst_av1_parse_seq_level_idx_to_string (self->max_seq_level_idx);
+    if (level) {
+      gst_caps_set_simple (final_caps, "max-level", G_TYPE_STRING, level, NULL);
+    } else {
+      GST_WARNING_OBJECT (self, "Invalid max level idx %d",
+          self->max_seq_level_idx);
+    }
+  }
 
   src_caps = gst_pad_get_current_caps (GST_BASE_PARSE_SRC_PAD (self));
 
@@ -919,10 +1044,12 @@ gst_av1_parse_set_sink_caps (GstBaseParse * parse, GstCaps * caps)
 
   self->in_align = align;
 
-  if (self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT)
+  if (self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT
+      || self->in_align == GST_AV1_PARSE_ALIGN_ANNEX_B)
     self->detect_annex_b = TRUE;
 
-  if (self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B) {
+  if (self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B
+      || self->in_align == GST_AV1_PARSE_ALIGN_ANNEX_B) {
     gst_av1_parser_reset (self->parser, TRUE);
   } else {
     gst_av1_parser_reset (self->parser, FALSE);
@@ -1006,29 +1133,37 @@ gst_av1_parse_push_data (GstAV1Parse * self, GstBaseParseFrame * frame,
       GST_BUFFER_FLAG_SET (buf, GST_BUFFER_FLAG_DELTA_UNIT);
     }
 
-    if (frame_finished) {
-      GST_BUFFER_FLAG_SET (buf, GST_BUFFER_FLAG_MARKER);
-    } else {
-      GST_BUFFER_FLAG_UNSET (buf, GST_BUFFER_FLAG_MARKER);
-    }
-
-    if (self->align == GST_AV1_PARSE_ALIGN_FRAME) {
+    if (self->align == GST_AV1_PARSE_ALIGN_FRAME
+        || self->align == GST_AV1_PARSE_ALIGN_OBU) {
       if (!self->show_frame) {
         GST_BUFFER_FLAG_SET (buf, GST_BUFFER_FLAG_DECODE_ONLY);
       } else {
         GST_BUFFER_FLAG_UNSET (buf, GST_BUFFER_FLAG_DECODE_ONLY);
+        if (frame_finished) {
+          GST_BUFFER_FLAG_SET (buf, GST_BUFFER_FLAG_MARKER);
+        } else {
+          GST_BUFFER_FLAG_UNSET (buf, GST_BUFFER_FLAG_MARKER);
+        }
       }
     } else {
+      /* Aligning to TUs which must contain a display frame. */
       GST_BUFFER_FLAG_UNSET (buf, GST_BUFFER_FLAG_DECODE_ONLY);
+      if (frame_finished) {
+        GST_BUFFER_FLAG_SET (buf, GST_BUFFER_FLAG_MARKER);
+      } else {
+        GST_BUFFER_FLAG_UNSET (buf, GST_BUFFER_FLAG_MARKER);
+      }
     }
 
     gst_buffer_replace (&frame->out_buffer, buf);
     gst_buffer_unref (buf);
 
     gst_av1_parse_update_src_caps (self, NULL);
-    GST_LOG_OBJECT (self, "comsumed %d, output one buffer with size %"
+    GST_LOG_OBJECT (self, "consumed %d, output one buffer with size %"
         G_GSSIZE_FORMAT, finish_sz, sz);
     ret = gst_base_parse_finish_frame (GST_BASE_PARSE (self), frame, finish_sz);
+
+    self->seen_non_padding = FALSE;
   }
 
   return ret;
@@ -1298,6 +1433,22 @@ gst_av1_parse_handle_sequence_obu (GstAV1Parse * self, GstAV1OBU * obu)
     self->update_caps = TRUE;
   }
 
+  if (seq_header.operating_points_cnt_minus_1 + 1) {
+    /* Search for the actual max level and tier */
+    self->seq_level_idx = self->max_seq_level_idx =
+        seq_header.operating_points[0].seq_level_idx;
+    self->seq_tier = self->max_seq_tier =
+        seq_header.operating_points[0].seq_tier;
+
+    for (i = 1; i < seq_header.operating_points_cnt_minus_1 + 1; i++) {
+      if (self->max_seq_level_idx <
+          seq_header.operating_points[i].seq_level_idx) {
+        self->max_seq_level_idx = seq_header.operating_points[i].seq_level_idx;
+        self->max_seq_tier = seq_header.operating_points[i].seq_tier;
+      }
+    }
+  }
+
   if (self->bit_depth != seq_header.bit_depth) {
     self->bit_depth = seq_header.bit_depth;
     self->update_caps = TRUE;
@@ -1369,9 +1520,10 @@ new_tu:
   if (ret) {
     if (self->within_one_frame)
       GST_WARNING_OBJECT (self,
-          "Start a new temporal unit with incompleted frame.");
+          "Start a new temporal unit with incomplete frame.");
 
     gst_av1_parse_reset_obu_data_state (self);
+    gst_av1_parse_reset_tu_timestamp (self);
   }
 
   return ret;
@@ -1456,15 +1608,25 @@ gst_av1_parse_handle_one_obu (GstAV1Parse * self, GstAV1OBU * obu,
   if (obu->obu_type == GST_AV1_OBU_TEMPORAL_DELIMITER) {
     gst_av1_parse_reset_obu_data_state (self);
 
+    /* Let the leading padding OBUs be the part of the new TD. */
+    if (!self->seen_non_padding)
+      goto out;
+
     if (check_new_tu) {
       *check_new_tu = TRUE;
       res = GST_AV1_PARSER_OK;
-      goto out;
     }
+
+    /* Start a new TD should also complete the current frame. */
+    *frame_complete = TRUE;
+
+    goto out;
   }
 
-  if (obu->obu_type == GST_AV1_OBU_SEQUENCE_HEADER)
+  if (obu->obu_type == GST_AV1_OBU_SEQUENCE_HEADER) {
     self->header = TRUE;
+    goto out;
+  }
 
   if (obu->obu_type == GST_AV1_OBU_FRAME_HEADER
       || obu->obu_type == GST_AV1_OBU_FRAME
@@ -1477,11 +1639,13 @@ gst_av1_parse_handle_one_obu (GstAV1Parse * self, GstAV1OBU * obu,
     self->show_frame = fh->show_frame || fh->show_existing_frame;
     if (self->show_frame) {
       /* Check whether a new temporal starts, and return early. */
-      if (check_new_tu && obu->obu_type != GST_AV1_OBU_REDUNDANT_FRAME_HEADER
+      if (obu->obu_type != GST_AV1_OBU_REDUNDANT_FRAME_HEADER
           && gst_av1_parse_frame_start_new_temporal_unit (self, obu)) {
-        *check_new_tu = TRUE;
-        res = GST_AV1_PARSER_OK;
-        goto out;
+        if (check_new_tu) {
+          *check_new_tu = TRUE;
+          res = GST_AV1_PARSER_OK;
+          goto out;
+        }
       }
 
       self->last_shown_frame_temporal_id = obu->header.obu_temporal_id;
@@ -1532,6 +1696,9 @@ out:
       res = GST_AV1_PARSER_OK;
     }
   }
+
+  if (obu->obu_type != GST_AV1_OBU_PADDING)
+    self->seen_non_padding = TRUE;
 
   return res;
 }
@@ -1621,6 +1788,7 @@ gst_av1_parse_handle_obu_to_obu (GstBaseParse * parse,
 
   GST_LOG_OBJECT (self, "Output one buffer with size %d", consumed);
   ret = gst_base_parse_finish_frame (parse, frame, consumed);
+  self->seen_non_padding = FALSE;
   *skipsize = 0;
 
 out:
@@ -1679,29 +1847,6 @@ again:
     if (res != GST_AV1_PARSER_OK)
       break;
 
-    if (obu.obu_type == GST_AV1_OBU_TEMPORAL_DELIMITER
-        && consumed_before_push > 0) {
-      GST_DEBUG_OBJECT (self, "Encounter TD inside one %s aligned"
-          " buffer, should not happen normally.",
-          gst_av1_parse_alignment_to_string (self->in_align));
-
-      if (self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B)
-        gst_av1_parser_reset_annex_b (self->parser);
-
-      /* Not include this TD obu, it should belong to the next TU or frame,
-         we push all the data we already got. */
-      gst_av1_parse_create_subframe (frame, &subframe, buffer);
-      ret = gst_av1_parse_push_data (self, &subframe,
-          consumed_before_push, TRUE);
-      if (ret != GST_FLOW_OK)
-        goto out;
-
-      /* Begin to find the next. */
-      frame_complete = FALSE;
-      consumed_before_push = 0;
-      continue;
-    }
-
     gst_av1_parse_cache_one_obu (self, buffer, &obu,
         map_info.data + offset, consumed, frame_complete);
 
@@ -1759,8 +1904,8 @@ again:
 
   /* If the total buffer exhausted but frame is not complete, we just
      push the left data and consider it as a frame. */
-  if (consumed_before_push > 0 && !frame_complete
-      && self->align == GST_AV1_PARSE_ALIGN_FRAME) {
+  if (consumed_before_push > 0 && !frame_complete && self->seen_non_padding &&
+      self->align == GST_AV1_PARSE_ALIGN_FRAME) {
     g_assert (offset >= map_info.size);
     /* Warning and still consider the frame is complete */
     GST_WARNING_OBJECT (self, "Exhaust the buffer but still incomplete frame,"
@@ -1768,7 +1913,8 @@ again:
         gst_av1_parse_alignment_to_string (self->in_align));
   }
 
-  ret = gst_av1_parse_push_data (self, frame, consumed_before_push, TRUE);
+  if (self->seen_non_padding)
+    ret = gst_av1_parse_push_data (self, frame, consumed_before_push, TRUE);
 
 out:
   gst_buffer_unmap (buffer, &map_info);
@@ -1810,15 +1956,14 @@ again:
       break;
 
     check_new_tu = FALSE;
-    if (self->align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT
-        || self->align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B) {
-      res = gst_av1_parse_handle_one_obu (self, &obu, &frame_complete,
-          &check_new_tu);
-    } else {
-      res = gst_av1_parse_handle_one_obu (self, &obu, &frame_complete, NULL);
-    }
+    res = gst_av1_parse_handle_one_obu (self, &obu, &frame_complete,
+        &check_new_tu);
     if (res != GST_AV1_PARSER_OK)
       break;
+
+    /* Take the DTS from the first OBU of the TU */
+    if (!GST_CLOCK_TIME_IS_VALID (self->buffer_dts) || check_new_tu)
+      self->buffer_dts = GST_BUFFER_DTS (buffer);
 
     if (check_new_tu && (gst_adapter_available (self->cache_out) ||
             gst_adapter_available (self->frame_cache))) {
@@ -1849,13 +1994,16 @@ again:
   if (complete || GST_BASE_PARSE_DRAINING (parse)) {
     *skipsize = 0;
 
+    /* Save the oldest valid PTS as the TU PTS */
+    if (GST_CLOCK_TIME_IS_VALID (GST_BUFFER_PTS (buffer)))
+      self->buffer_pts = GST_BUFFER_PTS (buffer);
+
     /* push the left anyway if no error */
     if (res == GST_AV1_PARSER_OK)
       ret = gst_av1_parse_push_data (self, frame,
           self->last_parsed_offset, TRUE);
 
     self->last_parsed_offset = 0;
-
     goto out;
   }
 
@@ -2007,6 +2155,7 @@ again:
 
 out:
   gst_av1_parse_reset_obu_data_state (self);
+  self->seen_non_padding = FALSE;
   gst_buffer_unmap (buffer, &map_info);
   gst_buffer_unref (buffer);
   return ret;
@@ -2023,8 +2172,10 @@ gst_av1_parse_handle_frame (GstBaseParse * parse,
   if (GST_BUFFER_FLAG_IS_SET (frame->buffer, GST_BUFFER_FLAG_DISCONT)) {
     self->discont = TRUE;
 
-    if (frame->flags & GST_BASE_PARSE_FRAME_FLAG_NEW_FRAME)
+    if (frame->flags & GST_BASE_PARSE_FRAME_FLAG_NEW_FRAME) {
       gst_av1_parse_reset_obu_data_state (self);
+      gst_av1_parse_reset_tu_timestamp (self);
+    }
   } else {
     self->discont = FALSE;
   }
@@ -2037,6 +2188,7 @@ gst_av1_parse_handle_frame (GstBaseParse * parse,
     GST_LOG_OBJECT (self, "parsing new frame");
     gst_adapter_clear (self->cache_out);
     gst_adapter_clear (self->frame_cache);
+    self->seen_non_padding = FALSE;
     self->last_parsed_offset = 0;
     self->header = FALSE;
     self->keyframe = FALSE;
@@ -2053,6 +2205,8 @@ gst_av1_parse_handle_frame (GstBaseParse * parse,
     upstream_caps =
         gst_pad_peer_query_caps (GST_BASE_PARSE_SINK_PAD (self), NULL);
     if (upstream_caps) {
+      gboolean detect_annex_b = FALSE;
+
       if (!gst_caps_is_empty (upstream_caps)
           && !gst_caps_is_any (upstream_caps)) {
         GstAV1ParseAligment align;
@@ -2075,8 +2229,11 @@ gst_av1_parse_handle_frame (GstBaseParse * parse,
 
       gst_caps_unref (upstream_caps);
 
-      gst_av1_parser_reset (self->parser,
-          self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B);
+      if (self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B
+          || self->in_align == GST_AV1_PARSE_ALIGN_ANNEX_B)
+        detect_annex_b = TRUE;
+
+      gst_av1_parser_reset (self->parser, detect_annex_b);
     }
 
     if (self->in_align != GST_AV1_PARSE_ALIGN_NONE) {
@@ -2089,7 +2246,8 @@ gst_av1_parse_handle_frame (GstBaseParse * parse,
     }
   }
 
-  if (self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT
+  if ((self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT
+          || self->in_align == GST_AV1_PARSE_ALIGN_ANNEX_B)
       && self->detect_annex_b) {
     /* Only happend at the first time of handle_frame, try to
        recognize the annex b stream format. */
@@ -2140,29 +2298,49 @@ gst_av1_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
   if (!frame->buffer)
     return GST_FLOW_OK;
 
-  if (self->align == GST_AV1_PARSE_ALIGN_FRAME) {
-    /* When the input align to TU, it may may contain more than one frames
-       inside its buffer. When splitting a TU into frames, the base parse
-       class only assign the PTS to the first frame and leave the others'
-       PTS invalid. But in fact, all decode only frames should have invalid
-       PTS while showable frames should have correct PTS setting. */
-    if (self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT
-        || self->in_align == GST_AV1_PARSE_ALIGN_TEMPORAL_UNIT_ANNEX_B) {
-      if (GST_BUFFER_FLAG_IS_SET (frame->buffer, GST_BUFFER_FLAG_DECODE_ONLY)) {
-        GST_BUFFER_PTS (frame->buffer) = GST_CLOCK_TIME_NONE;
-        GST_BUFFER_DURATION (frame->buffer) = GST_CLOCK_TIME_NONE;
-      } else {
-        GST_BUFFER_PTS (frame->buffer) = self->buffer_pts;
-        GST_BUFFER_DURATION (frame->buffer) = self->buffer_duration;
-      }
+  if (self->first_frame) {
+    GstTagList *taglist;
+    GstCaps *caps;
 
-      GST_BUFFER_DTS (frame->buffer) = self->buffer_dts;
-    } else {
-      if (GST_BUFFER_FLAG_IS_SET (frame->buffer, GST_BUFFER_FLAG_DECODE_ONLY)) {
-        GST_BUFFER_PTS (frame->buffer) = GST_CLOCK_TIME_NONE;
-        GST_BUFFER_DURATION (frame->buffer) = GST_CLOCK_TIME_NONE;
+    /* codec tag */
+    caps = gst_pad_get_current_caps (GST_BASE_PARSE_SRC_PAD (parse));
+    if (caps == NULL) {
+      if (GST_PAD_IS_FLUSHING (GST_BASE_PARSE_SRC_PAD (self))) {
+        GST_INFO_OBJECT (self, "Src pad is flushing");
+        return GST_FLOW_FLUSHING;
+      } else {
+        GST_INFO_OBJECT (self, "Src pad is not negotiated!");
+        return GST_FLOW_NOT_NEGOTIATED;
       }
     }
+
+    taglist = gst_tag_list_new_empty ();
+    gst_pb_utils_add_codec_description_to_tag_list (taglist,
+        GST_TAG_VIDEO_CODEC, caps);
+    gst_caps_unref (caps);
+
+    gst_base_parse_merge_tags (parse, taglist, GST_TAG_MERGE_REPLACE);
+    gst_tag_list_unref (taglist);
+
+    /* also signals the end of first-frame processing */
+    self->first_frame = FALSE;
+  }
+
+  if (self->align == GST_AV1_PARSE_ALIGN_FRAME) {
+    /* Input buffers may contain more than one frames inside its buffer.
+       When splitting a TU into frames, the base parse class only assign the
+       PTS to the first frame and leave the others PTS invalid. But in fact,
+       all decode only frames should have invalid PTS while showable frames
+       should have correct PTS setting. */
+    if (GST_BUFFER_FLAG_IS_SET (frame->buffer, GST_BUFFER_FLAG_DECODE_ONLY)) {
+      GST_BUFFER_PTS (frame->buffer) = GST_CLOCK_TIME_NONE;
+      GST_BUFFER_DURATION (frame->buffer) = GST_CLOCK_TIME_NONE;
+    } else {
+      GST_BUFFER_PTS (frame->buffer) = self->buffer_pts;
+      GST_BUFFER_DURATION (frame->buffer) = self->buffer_duration;
+    }
+
+    GST_BUFFER_DTS (frame->buffer) = self->buffer_dts;
   } else if (self->align == GST_AV1_PARSE_ALIGN_OBU) {
     /* When we split a big frame or TU into OBUs, all OBUs should have the
        same PTS and DTS of the input buffer, and should not have duration. */
