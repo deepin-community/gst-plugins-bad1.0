@@ -73,6 +73,7 @@ GstWPEContextThread::GstWPEContextThread()
 {
     g_mutex_init(&threading.mutex);
     g_cond_init(&threading.cond);
+    threading.ready = FALSE;
 
     {
         GMutexHolder lock(threading.mutex);
@@ -710,6 +711,37 @@ void GstWPEThreadedView::resize(int width, int height)
     });
 }
 
+void GstWPEThreadedView::clearBuffers()
+{
+  bool dispatchFrameComplete = false;
+  {
+    GMutexHolder lock(images_mutex);
+
+    if (shm.pending) {
+      auto meta = gst_buffer_get_video_meta(shm.pending);
+      if (static_cast<int>(meta->width) != wpe.width || static_cast<int>(meta->height) != wpe.height) {
+        gst_clear_buffer(&shm.pending);
+        dispatchFrameComplete = true;
+      }
+    }
+
+    if (shm.committed) {
+      auto meta = gst_buffer_get_video_meta(shm.committed);
+      if (static_cast<int>(meta->width) != wpe.width || static_cast<int>(meta->height) != wpe.height) {
+        gst_clear_buffer(&shm.committed);
+        dispatchFrameComplete = true;
+      }
+    }
+  }
+
+  if (dispatchFrameComplete) {
+    frameComplete();
+    // Wait until the next SHM buffer has been received.
+    threading.ready = false;
+    waitLoadCompletion();
+  }
+}
+
 void GstWPEThreadedView::frameComplete()
 {
     GST_TRACE("frame complete");
@@ -783,37 +815,44 @@ void GstWPEThreadedView::setDrawBackground(gboolean drawsBackground)
     webkit_web_view_set_background_color(webkit.view, &color);
 }
 
-void GstWPEThreadedView::releaseImage(gpointer imagePointer)
+void GstWPEThreadedView::releaseImage(struct wpe_fdo_egl_exported_image * image)
 {
     s_view->dispatch([&]() {
-        GST_TRACE("Dispatch release exported image %p", imagePointer);
-        wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(wpe.exportable,
-                                                                            static_cast<struct wpe_fdo_egl_exported_image*>(imagePointer));
+        GST_TRACE("Dispatch release exported image %p", image);
+        wpe_view_backend_exportable_fdo_egl_dispatch_release_exported_image(wpe.exportable, image);
     });
 }
 
 struct ImageContext {
     GstWPEThreadedView* view;
-    gpointer image;
+    struct wpe_fdo_egl_exported_image *image;
 };
 
-void GstWPEThreadedView::handleExportedImage(gpointer image)
+void GstWPEThreadedView::s_releaseImage(GstEGLImage *image, gpointer data) {
+  ImageContext *context = static_cast<ImageContext *>(data);
+  context->view->releaseImage(context->image);
+  g_free(context);
+}
+
+void GstWPEThreadedView::handleExportedImage(struct wpe_fdo_egl_exported_image * image)
 {
-    ImageContext* imageContext = g_new (ImageContext, 1);
-    imageContext->view = this;
-    imageContext->image = static_cast<gpointer>(image);
-    EGLImageKHR eglImage = wpe_fdo_egl_exported_image_get_egl_image(static_cast<struct wpe_fdo_egl_exported_image*>(image));
+  ImageContext *imageContext = g_new(ImageContext, 1);
+  imageContext->view = this;
+  imageContext->image = image;
+  EGLImageKHR eglImage = wpe_fdo_egl_exported_image_get_egl_image(image);
 
-    auto* gstImage = gst_egl_image_new_wrapped(gst.context, eglImage, GST_GL_RGBA, imageContext, s_releaseImage);
-    {
-      GMutexHolder lock(images_mutex);
+  auto *gstImage = gst_egl_image_new_wrapped(gst.context, eglImage, GST_GL_RGBA, imageContext,
+      s_releaseImage);
+  {
+    GMutexHolder lock(images_mutex);
 
-      GST_TRACE("EGLImage %p wrapped in GstEGLImage %" GST_PTR_FORMAT, eglImage, gstImage);
-      gst_clear_mini_object ((GstMiniObject **) &egl.pending);
-      egl.pending = gstImage;
+    GST_TRACE("EGLImage %p wrapped in GstEGLImage %" GST_PTR_FORMAT, eglImage,
+              gstImage);
+    gst_clear_mini_object((GstMiniObject **)&egl.pending);
+    egl.pending = gstImage;
 
-      notifyLoadFinished();
-    }
+    notifyLoadFinished();
+  }
 }
 
 struct SHMBufferContext {
@@ -825,9 +864,8 @@ void GstWPEThreadedView::releaseSHMBuffer(gpointer data)
 {
     SHMBufferContext* context = static_cast<SHMBufferContext*>(data);
     s_view->dispatch([&]() {
-        auto* buffer = static_cast<struct wpe_fdo_shm_exported_buffer*>(context->buffer);
-        GST_TRACE("Dispatch release exported buffer %p", buffer);
-        wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(wpe.exportable, buffer);
+        GST_TRACE("Dispatch release exported buffer %p", context->buffer);
+        wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(wpe.exportable, context->buffer);
     });
 }
 
@@ -878,7 +916,7 @@ struct wpe_view_backend_exportable_fdo_egl_client GstWPEThreadedView::s_exportab
     nullptr,
     [](void* data, struct wpe_fdo_egl_exported_image* image) {
         auto& view = *static_cast<GstWPEThreadedView*>(data);
-        view.handleExportedImage(static_cast<gpointer>(image));
+        view.handleExportedImage(image);
     },
     nullptr,
     // padding
@@ -896,13 +934,6 @@ struct wpe_view_backend_exportable_fdo_client GstWPEThreadedView::s_exportableCl
     nullptr,
     nullptr,
 };
-
-void GstWPEThreadedView::s_releaseImage(GstEGLImage* image, gpointer data)
-{
-    ImageContext* context = static_cast<ImageContext*>(data);
-    context->view->releaseImage(context->image);
-    g_free (context);
-}
 
 struct wpe_view_backend* GstWPEThreadedView::backend() const
 {

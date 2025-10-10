@@ -68,7 +68,8 @@ create_buffer_pool (const char *format, VkImageUsageFlags usage,
   caps = gst_caps_new_simple ("video/x-raw", "format", G_TYPE_STRING, format,
       "width", G_TYPE_INT, 1024, "height", G_TYPE_INT, 780, NULL);
   gst_caps_set_features_simple (caps,
-      gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE, NULL));
+      gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE,
+          NULL));
 
   pool = gst_vulkan_image_buffer_pool_new (device);
 
@@ -77,9 +78,11 @@ create_buffer_pool (const char *format, VkImageUsageFlags usage,
   gst_buffer_pool_config_set_params (config, caps, 1024, 1, 0);
   gst_caps_unref (caps);
 
-  gst_vulkan_image_buffer_pool_config_set_allocation_params (config,
-      usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, initial_layout,
-      initial_access);
+  if (usage != 0) {
+    gst_vulkan_image_buffer_pool_config_set_allocation_params (config,
+        usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, initial_layout,
+        initial_access);
+  }
 
   if (dec_caps)
     gst_vulkan_image_buffer_pool_config_set_decode_caps (config, dec_caps);

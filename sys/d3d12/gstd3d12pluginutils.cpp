@@ -22,6 +22,8 @@
 #endif
 
 #include "gstd3d12pluginutils.h"
+#include <directx/d3dx12.h>
+#include <vector>
 
 #define _XM_NO_INTRINSICS_
 #include <DirectXMath.h>
@@ -29,6 +31,24 @@
 /* *INDENT-OFF* */
 using namespace DirectX;
 /* *INDENT-ON* */
+
+/* Enable this once we use debug print in this file */
+#if 0
+#ifndef GST_DISABLE_GST_DEBUG
+#define GST_CAT_DEFAULT ensure_debug_category()
+static GstDebugCategory *
+ensure_debug_category (void)
+{
+  static GstDebugCategory *cat = nullptr;
+
+  GST_D3D12_CALL_ONCE_BEGIN {
+    cat = _gst_debug_category_new ("d3d12pluginutils", 0, "d3d12pluginutils");
+  } GST_D3D12_CALL_ONCE_END;
+
+  return cat;
+}
+#endif /* GST_DISABLE_GST_DEBUG */
+#endif
 
 GType
 gst_d3d12_sampling_method_get_type (void)
@@ -60,7 +80,7 @@ struct SamplingMethodMap
 
 static const SamplingMethodMap sampling_method_map[] = {
   {GST_D3D12_SAMPLING_METHOD_NEAREST, D3D12_FILTER_MIN_MAG_MIP_POINT},
-  {GST_D3D12_SAMPLING_METHOD_BILINEAR, D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT},
+  {GST_D3D12_SAMPLING_METHOD_BILINEAR, D3D12_FILTER_MIN_MAG_MIP_LINEAR},
   {GST_D3D12_SAMPLING_METHOD_LINEAR_MINIFICATION,
       D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT},
   {GST_D3D12_SAMPLING_METHOD_ANISOTROPIC, D3D12_FILTER_ANISOTROPIC},
@@ -96,20 +116,6 @@ gst_d3d12_msaa_mode_get_type (void)
   return type;
 }
 
-void
-gst_d3d12_buffer_after_write (GstBuffer * buffer, guint64 fence_value)
-{
-  for (guint i = 0; i < gst_buffer_n_memory (buffer); i++) {
-    auto mem = gst_buffer_peek_memory (buffer, i);
-    g_return_if_fail (gst_is_d3d12_memory (mem));
-
-    auto dmem = GST_D3D12_MEMORY_CAST (mem);
-    dmem->fence_value = fence_value;
-    GST_MINI_OBJECT_FLAG_SET (dmem, GST_D3D12_MEMORY_TRANSFER_NEED_DOWNLOAD);
-    GST_MINI_OBJECT_FLAG_UNSET (dmem, GST_D3D12_MEMORY_TRANSFER_NEED_UPLOAD);
-  }
-}
-
 gboolean
 gst_d3d12_need_transform (gfloat rotation_x, gfloat rotation_y,
     gfloat rotation_z, gfloat scale_x, gfloat scale_y)
@@ -125,4 +131,60 @@ gst_d3d12_need_transform (gfloat rotation_x, gfloat rotation_y,
   }
 
   return FALSE;
+}
+
+gboolean
+gst_d3d12_is_windows_10_or_greater (void)
+{
+  static gboolean ret = FALSE;
+  GST_D3D12_CALL_ONCE_BEGIN {
+    ret = g_win32_check_windows_version (10, 0, 0, G_WIN32_OS_ANY);
+  } GST_D3D12_CALL_ONCE_END;
+
+  return ret;
+}
+
+void
+gst_d3d12_calculate_sample_desc_for_msaa (GstD3D12Device * device,
+    DXGI_FORMAT format, GstD3D12MSAAMode msaa_mode, DXGI_SAMPLE_DESC * desc)
+{
+  desc->Count = 1;
+  desc->Quality = 0;
+
+  auto device_handle = gst_d3d12_device_get_device_handle (device);
+
+  UINT sample_count = 1;
+  switch (msaa_mode) {
+    case GST_D3D12_MSAA_2X:
+      sample_count = 2;
+      break;
+    case GST_D3D12_MSAA_4X:
+      sample_count = 4;
+      break;
+    case GST_D3D12_MSAA_8X:
+      sample_count = 8;
+      break;
+    default:
+      break;
+  }
+
+  D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS feature_data = { };
+  feature_data.Format = format;
+  feature_data.SampleCount = sample_count;
+
+  while (feature_data.SampleCount > 1) {
+    auto hr =
+        device_handle->CheckFeatureSupport
+        (D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,
+        &feature_data, sizeof (feature_data));
+    if (SUCCEEDED (hr) && feature_data.NumQualityLevels > 0)
+      break;
+
+    feature_data.SampleCount /= 2;
+  }
+
+  if (feature_data.SampleCount > 1 && feature_data.NumQualityLevels > 0) {
+    desc->Count = feature_data.SampleCount;
+    desc->Quality = feature_data.NumQualityLevels - 1;
+  }
 }

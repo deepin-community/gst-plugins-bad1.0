@@ -31,6 +31,9 @@ typedef gpointer CUmodule;
 typedef gpointer CUfunction;
 typedef gpointer CUmipmappedArray;
 typedef gpointer CUevent;
+typedef gpointer CUmemoryPool;
+typedef gpointer CUexternalMemory;
+typedef gpointer CUexternalSemaphore;
 
 typedef guint64  CUtexObject;
 typedef guintptr CUdeviceptr;
@@ -62,6 +65,7 @@ typedef enum
   CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED = 103,
   CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_WIN32_HANDLE_SUPPORTED = 104,
   CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_WIN32_KMT_HANDLE_SUPPORTED = 105,
+  CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED = 115,
 } CUdevice_attribute;
 
 typedef enum
@@ -127,6 +131,20 @@ typedef enum
   CU_EVENT_INTERPROCESS = 0x4,
 } CUevent_flags;
 
+typedef enum
+{
+  CU_LIMIT_STACK_SIZE = 0x0,
+  CU_LIMIT_PRINTF_FIFO_SIZE = 0x1,
+  CU_LIMIT_MALLOC_HEAP_SIZE = 0x2,
+  CU_LIMIT_DEV_RUNTIME_SYNC_DEPTH = 0x3,
+  CU_LIMIT_DEV_RUNTIME_PENDING_LAUNCH_COUNT = 0x4,
+  CU_LIMIT_MAX_L2_FETCH_GRANULARITY = 0x5,
+  CU_LIMIT_PERSISTING_L2_CACHE_SIZE = 0x6,
+  CU_LIMIT_SHMEM_SIZE = 0x7,
+  CU_LIMIT_CIG_ENABLED = 0x8,
+  CU_LIMIT_CIG_SHMEM_FALLBACK_ENABLED = 0x9,
+} CUlimit;
+
 typedef struct
 {
   gsize srcXInBytes;
@@ -189,7 +207,7 @@ typedef struct
       gsize pitchInBytes;
     } pitch2D;
     struct {
-        gint reserved[32];
+      gint reserved[32];
     } reserved;
   } res;
 
@@ -292,6 +310,162 @@ typedef struct
   CUmemAccess_flags flags;
 } CUmemAccessDesc;
 
+typedef struct
+{
+  CUmemAllocationType allocType;
+  CUmemAllocationHandleType handleTypes;
+  CUmemLocation location;
+  void *win32SecurityAttributes;
+  size_t maxSize;
+  unsigned char reserved[56];
+} CUmemPoolProps;
+
+typedef enum
+{
+  CU_MEMPOOL_ATTR_REUSE_FOLLOW_EVENT_DEPENDENCIES = 1,
+  CU_MEMPOOL_ATTR_REUSE_ALLOW_OPPORTUNISTIC,
+  CU_MEMPOOL_ATTR_REUSE_ALLOW_INTERNAL_DEPENDENCIES,
+  CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+  CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT,
+  CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
+  CU_MEMPOOL_ATTR_USED_MEM_CURRENT,
+  CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+} CUmemPool_attribute;
+
+typedef struct
+{
+  unsigned long long offset;
+  unsigned long long size;
+  unsigned int flags;
+  unsigned int reserved[16];
+} CUDA_EXTERNAL_MEMORY_BUFFER_DESC;
+
+typedef enum
+{
+  CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD = 1,
+  CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32 = 2,
+  CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT = 3,
+  CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_HEAP = 4,
+  CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE = 5,
+  CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_RESOURCE = 6,
+  CU_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_RESOURCE_KMT = 7,
+  CU_EXTERNAL_MEMORY_HANDLE_TYPE_NVSCIBUF = 8
+} CUexternalMemoryHandleType;
+
+/**
+ * CUDA_EXTERNAL_MEMORY_HANDLE_DESC: (skip) (attributes doc.skip=true)
+ */
+typedef struct
+{
+  CUexternalMemoryHandleType type;
+  union {
+    int fd;
+    struct {
+      void *handle;
+      const void *name;
+    } win32;
+    const void *nvSciBufObject;
+  } handle;
+  unsigned long long size;
+  unsigned int flags;
+  unsigned int reserved[16];
+} CUDA_EXTERNAL_MEMORY_HANDLE_DESC;
+
+typedef enum
+{
+  CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD = 1,
+  CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32 = 2,
+  CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_KMT = 3,
+  CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE = 4,
+  CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_FENCE = 5,
+  CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_NVSCISYNC = 6,
+  CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_KEYED_MUTEX = 7,
+  CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_KEYED_MUTEX_KMT = 8,
+  CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_FD = 9,
+  CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_WIN32 = 10
+} CUexternalSemaphoreHandleType;
+
+/**
+ * CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC: (skip) (attributes doc.skip=true)
+ */
+typedef struct
+{
+  CUexternalSemaphoreHandleType type;
+  union {
+    int fd;
+    struct {
+      void *handle;
+      const void *name;
+    } win32;
+    const void* nvSciSyncObj;
+  } handle;
+  unsigned int flags;
+  unsigned int reserved[16];
+} CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC;
+
+/**
+ * CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS: (skip) (attributes doc.skip=true)
+ */
+typedef struct
+{
+  struct {
+    struct {
+      unsigned long long value;
+    } fence;
+    union {
+      void *fence;
+      unsigned long long reserved;
+    } nvSciSync;
+    struct {
+      unsigned long long key;
+    } keyedMutex;
+    unsigned int reserved[12];
+  } params;
+  unsigned int flags;
+  unsigned int reserved[16];
+} CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS;
+
+/**
+ * CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS: (skip) (attributes doc.skip=true)
+ */
+typedef struct
+{
+  struct {
+    struct {
+      unsigned long long value;
+    } fence;
+    union {
+      void *fence;
+      unsigned long long reserved;
+    } nvSciSync;
+    struct {
+      unsigned long long key;
+      unsigned int timeoutMs;
+    } keyedMutex;
+    unsigned int reserved[10];
+  } params;
+  unsigned int flags;
+  unsigned int reserved[16];
+} CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS;
+
+typedef struct
+{
+  size_t Width;
+  size_t Height;
+  size_t Depth;
+  CUarray_format Format;
+  unsigned int NumChannels;
+  unsigned int Flags;
+} CUDA_ARRAY3D_DESCRIPTOR;
+
+typedef struct
+{
+  unsigned long long offset;
+  CUDA_ARRAY3D_DESCRIPTOR arrayDesc;
+  unsigned int numLevels;
+  unsigned int reserved[16];
+} CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC;
+
 #define CUDA_VERSION 10000
 
 #ifdef _WIN32
@@ -314,7 +488,16 @@ typedef struct
 #define cuMemAllocHost  cuMemAllocHost_v2
 #define cuMemcpy2D cuMemcpy2D_v2
 #define cuMemcpy2DAsync cuMemcpy2DAsync_v2
+#define cuMemcpyDtoD cuMemcpyDtoD_v2
+#define cuMemcpyDtoDAsync cuMemcpyDtoDAsync_v2
+#define cuMemcpyDtoH cuMemcpyDtoH_v2
+#define cuMemcpyDtoHAsync cuMemcpyDtoHAsync_v2
+#define cuMemcpyHtoD cuMemcpyHtoD_v2
+#define cuMemcpyHtoDAsync cuMemcpyHtoDAsync_v2
 #define cuMemFree cuMemFree_v2
+#define cuMemsetD2D8 cuMemsetD2D8_v2
+#define cuMemsetD2D16 cuMemsetD2D16_v2
+#define cuMemsetD2D32 cuMemsetD2D32_v2
 
 #define cuEventDestroy cuEventDestroy_v2
 

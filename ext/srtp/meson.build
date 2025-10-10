@@ -6,6 +6,23 @@ srtp_sources = [
   'gstsrtpenc.c',
 ]
 
+srtp_headers = [
+  'gstsrtp.h',
+  'gstsrtpenums.h',
+  'gstsrtpenc.h',
+  'gstsrtpdec.h',
+  'gstsrtpelements.h',
+]
+
+doc_sources = []
+foreach s: srtp_sources + srtp_headers
+  doc_sources += meson.current_source_dir() / s
+endforeach
+
+plugin_sources += {
+  'srtp': pathsep.join(doc_sources)
+}
+
 srtp_cargs = []
 srtp_option = get_option('srtp').enable_if(get_option('webrtc').enabled(), error_message: 'webrtc option is enabled')
 if srtp_option.disabled()
@@ -13,18 +30,7 @@ if srtp_option.disabled()
   subdir_done()
 endif
 
-srtp_dep = dependency('libsrtp2', version : '>= 2.1.0', required : false, allow_fallback: true)
-if srtp_dep.found()
-  srtp_cargs += ['-DHAVE_SRTP2']
-else
-  srtp_dep = dependency('libsrtp', version: '>= 1.6.0', required : false)
-  if not srtp_dep.found() and cc.has_header_symbol('srtp/srtp.h', 'crypto_policy_set_aes_gcm_128_16_auth')
-    srtp_dep = cc.find_library('srtp', required : false)
-  endif
-endif
-if not srtp_dep.found() and srtp_option.enabled()
-  error('srtp plugin enabled but libsrtp not found')
-endif
+srtp_dep = dependency('libsrtp2', version : '>= 2.1.0', required : srtp_option, allow_fallback: true)
 
 if srtp_dep.found()
   gstsrtp_enums = gnome.mkenums_simple('gstsrtp-enumtypes',

@@ -57,6 +57,9 @@ struct wl_callback * gst_wl_display_sync(GstWlDisplay * self, const struct wl_ca
 	gpointer data);
 
 GST_WL_API
+void gst_wl_display_object_destroy (GstWlDisplay * self, gpointer *object, GDestroyNotify destroy_func);
+
+GST_WL_API
 void gst_wl_display_callback_destroy(GstWlDisplay * self, struct wl_callback ** callback);
 
 GST_WL_API
@@ -102,6 +105,12 @@ GArray *gst_wl_display_get_dmabuf_formats (GstWlDisplay * self);
 
 GST_WL_API
 GArray *gst_wl_display_get_dmabuf_modifiers (GstWlDisplay * self);
+
+GST_WL_API
+void gst_wl_display_fill_shm_format_list (GstWlDisplay *self, GValue *format_list);
+
+GST_WL_API
+void gst_wl_display_fill_dmabuf_format_list (GstWlDisplay *self, GValue *format_list);
 
 GST_WL_API
 struct zwp_linux_dmabuf_v1 *gst_wl_display_get_dmabuf_v1 (GstWlDisplay * self);

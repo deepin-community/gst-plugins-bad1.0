@@ -23,25 +23,42 @@
 
 #include "gstd3d12screencapturedevice.h"
 #include "gstd3d12screencapture.h"
+#include "gstd3d12pluginutils.h"
 #include <gst/video/video.h>
 #include <wrl.h>
 #include <string.h>
 #include <string>
 #include <locale>
 #include <codecvt>
+#include <set>
+#include <vector>
 
 /* *INDENT-OFF* */
 using namespace Microsoft::WRL;
 /* *INDENT-ON* */
 
-GST_DEBUG_CATEGORY_EXTERN (gst_d3d12_screen_capture_debug);
-#define GST_CAT_DEFAULT gst_d3d12_screen_capture_debug
+#ifndef GST_DISABLE_GST_DEBUG
+#define GST_CAT_DEFAULT ensure_debug_category()
+static GstDebugCategory *
+ensure_debug_category (void)
+{
+  static GstDebugCategory *cat = nullptr;
+
+  GST_D3D12_CALL_ONCE_BEGIN {
+    cat = _gst_debug_category_new ("d3d12screencapture",
+        0, "d3d12screencapture");
+  } GST_D3D12_CALL_ONCE_END;
+
+  return cat;
+}
+#endif
 
 static GstStaticCaps template_caps =
     GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE_WITH_FEATURES
     (GST_CAPS_FEATURE_MEMORY_D3D12_MEMORY,
-        "BGRA") ", pixel-aspect-ratio = 1/1, colorimetry = (string) sRGB; "
-    GST_VIDEO_CAPS_MAKE ("BGRA") ", pixel-aspect-ratio = 1/1, "
+        "{ BGRA, RGBA64_LE }")
+    ", pixel-aspect-ratio = 1/1, colorimetry = (string) sRGB; "
+    GST_VIDEO_CAPS_MAKE ("{ BGRA, RGBA64_LE }") ", pixel-aspect-ratio = 1/1, "
     "colorimetry = (string) sRGB");
 
 enum
@@ -55,8 +72,11 @@ struct _GstD3D12ScreenCaptureDevice
   GstDevice parent;
 
   HMONITOR monitor_handle;
+
+  gchar *device_path;
 };
 
+static void gst_d3d12_screen_capture_device_finalize (GObject * object);
 static void gst_d3d12_screen_capture_device_get_property (GObject * object,
     guint prop_id, GValue * value, GParamSpec * pspec);
 static void gst_d3d12_screen_capture_device_set_property (GObject * object,
@@ -64,6 +84,7 @@ static void gst_d3d12_screen_capture_device_set_property (GObject * object,
 static GstElement *gst_d3d12_screen_capture_device_create_element (GstDevice *
     device, const gchar * name);
 
+#define gst_d3d12_screen_capture_device_parent_class device_parent_class
 G_DEFINE_TYPE (GstD3D12ScreenCaptureDevice,
     gst_d3d12_screen_capture_device, GST_TYPE_DEVICE);
 
@@ -74,6 +95,7 @@ gst_d3d12_screen_capture_device_class_init (GstD3D12ScreenCaptureDeviceClass *
   auto object_class = G_OBJECT_CLASS (klass);
   auto dev_class = GST_DEVICE_CLASS (klass);
 
+  object_class->finalize = gst_d3d12_screen_capture_device_finalize;
   object_class->get_property = gst_d3d12_screen_capture_device_get_property;
   object_class->set_property = gst_d3d12_screen_capture_device_set_property;
 
@@ -89,6 +111,16 @@ gst_d3d12_screen_capture_device_class_init (GstD3D12ScreenCaptureDeviceClass *
 static void
 gst_d3d12_screen_capture_device_init (GstD3D12ScreenCaptureDevice * self)
 {
+}
+
+static void
+gst_d3d12_screen_capture_device_finalize (GObject * object)
+{
+  auto self = GST_D3D12_SCREEN_CAPTURE_DEVICE (object);
+
+  g_free (self->device_path);
+
+  G_OBJECT_CLASS (device_parent_class)->finalize (object);
 }
 
 static void
@@ -135,6 +167,70 @@ gst_d3d12_screen_capture_device_create_element (GstDevice * device,
   return elem;
 }
 
+static void gst_d3d12_screen_capture_device_provider_update (gpointer provider);
+static gpointer
+gst_d3d12_screen_capture_device_provider_monitor_thread (gpointer user_data);
+
+/* *INDENT-OFF* */
+class MonitorNotificationManager
+{
+public:
+  MonitorNotificationManager (const MonitorNotificationManager &) = delete;
+  MonitorNotificationManager& operator= (const MonitorNotificationManager &) = delete;
+  static MonitorNotificationManager * Inst()
+  {
+    static MonitorNotificationManager *inst = nullptr;
+    GST_D3D12_CALL_ONCE_BEGIN {
+      inst = new MonitorNotificationManager ();
+    } GST_D3D12_CALL_ONCE_END;
+
+    return inst;
+  }
+
+  void
+  Register (GstD3D12ScreenCaptureDeviceProvider* client)
+  {
+    std::lock_guard<std::mutex> lk(lock_);
+    clients_.insert(client);
+  }
+
+  void
+  Unregister (GstD3D12ScreenCaptureDeviceProvider* client)
+  {
+    std::lock_guard<std::mutex> lk(lock_);
+    clients_.erase(client);
+  }
+
+  void OnDisplayChange ()
+  {
+    std::vector<gpointer> clients;
+    {
+      std::lock_guard<std::mutex> lk (lock_);
+      for (auto it : clients_)
+        clients.push_back (gst_object_ref (it));
+    }
+
+    for (auto it : clients) {
+      gst_d3d12_screen_capture_device_provider_update (it);
+      gst_object_unref (it);
+    }
+  }
+
+private:
+  MonitorNotificationManager()
+  {
+    thread_ = g_thread_new ("GstD3D12ScreenCaptureMonitor",
+        (GThreadFunc) gst_d3d12_screen_capture_device_provider_monitor_thread,
+        nullptr);
+  }
+
+private:
+  std::mutex lock_;
+  std::set<GstD3D12ScreenCaptureDeviceProvider *> clients_;
+  GThread *thread_;
+};
+/* *INDENT-ON* */
+
 struct _GstD3D12ScreenCaptureDeviceProvider
 {
   GstDeviceProvider parent;
@@ -143,17 +239,29 @@ struct _GstD3D12ScreenCaptureDeviceProvider
 G_DEFINE_TYPE (GstD3D12ScreenCaptureDeviceProvider,
     gst_d3d12_screen_capture_device_provider, GST_TYPE_DEVICE_PROVIDER);
 
+static void gst_d3d12_screen_capture_device_provider_dispose (GObject * object);
 static GList *gst_d3d12_screen_capture_device_provider_probe (GstDeviceProvider
     * provider);
+static gboolean
+gst_d3d12_screen_capture_device_provider_start (GstDeviceProvider * provider);
+static void
+gst_d3d12_screen_capture_device_provider_stop (GstDeviceProvider * provider);
 
 static void
     gst_d3d12_screen_capture_device_provider_class_init
     (GstD3D12ScreenCaptureDeviceProviderClass * klass)
 {
+  auto object_class = G_OBJECT_CLASS (klass);
   auto provider_class = GST_DEVICE_PROVIDER_CLASS (klass);
+
+  object_class->dispose = gst_d3d12_screen_capture_device_provider_dispose;
 
   provider_class->probe =
       GST_DEBUG_FUNCPTR (gst_d3d12_screen_capture_device_provider_probe);
+  provider_class->start =
+      GST_DEBUG_FUNCPTR (gst_d3d12_screen_capture_device_provider_start);
+  provider_class->stop =
+      GST_DEBUG_FUNCPTR (gst_d3d12_screen_capture_device_provider_stop);
 
   gst_device_provider_class_set_static_metadata (provider_class,
       "Direct3D12 Screen Capture Device Provider",
@@ -165,6 +273,17 @@ static void
     gst_d3d12_screen_capture_device_provider_init
     (GstD3D12ScreenCaptureDeviceProvider * self)
 {
+}
+
+static void
+gst_d3d12_screen_capture_device_provider_dispose (GObject * object)
+{
+  auto self = GST_D3D12_SCREEN_CAPTURE_DEVICE_PROVIDER (object);
+
+  MonitorNotificationManager::Inst ()->Unregister (self);
+
+  G_OBJECT_CLASS
+      (gst_d3d12_screen_capture_device_provider_parent_class)->dispose (object);
 }
 
 static gboolean
@@ -378,6 +497,9 @@ create_device (const DXGI_ADAPTER_DESC * adapter_desc,
       "Source/Monitor", "properties", props, "monitor-handle",
       (guint64) output_desc->Monitor, nullptr);
 
+  auto screen_dev = GST_D3D12_SCREEN_CAPTURE_DEVICE (device);
+  screen_dev->device_path = g_strdup (device_path.c_str ());
+
   gst_caps_unref (caps);
 
   return device;
@@ -452,4 +574,194 @@ gst_d3d12_screen_capture_device_provider_probe (GstDeviceProvider * provider)
   }
 
   return devices;
+}
+
+static gboolean
+gst_d3d12_screen_capture_device_is_in_list (GList * list, GstDevice * device)
+{
+  GList *iter;
+  GstStructure *s;
+  gboolean found = FALSE;
+
+  s = gst_device_get_properties (device);
+  g_assert (s);
+
+  for (iter = list; iter; iter = g_list_next (iter)) {
+    GstStructure *other_s;
+
+    other_s = gst_device_get_properties (GST_DEVICE (iter->data));
+    g_assert (other_s);
+
+    found = gst_structure_is_equal (s, other_s);
+
+    gst_structure_free (other_s);
+    if (found)
+      break;
+  }
+
+  gst_structure_free (s);
+
+  return found;
+}
+
+static void
+gst_d3d12_screen_capture_device_provider_update (gpointer self)
+{
+  auto provider = GST_DEVICE_PROVIDER_CAST (self);
+  GList *prev_devices = nullptr;
+  GList *new_devices = nullptr;
+  GList *to_add = nullptr;
+  GList *to_remove = nullptr;
+  GList *iter, *walk;
+
+  GST_DEBUG_OBJECT (self, "Device updated");
+
+  GST_OBJECT_LOCK (provider);
+  prev_devices = g_list_copy_deep (provider->devices,
+      (GCopyFunc) gst_object_ref, nullptr);
+  GST_OBJECT_UNLOCK (provider);
+
+  new_devices = gst_d3d12_screen_capture_device_provider_probe (provider);
+
+  /* Ownership of GstDevice for gst_device_provider_device_add()
+   * and gst_device_provider_device_remove() is a bit complicated.
+   * Remove floating reference here for things to be clear */
+  for (iter = new_devices; iter; iter = g_list_next (iter))
+    gst_object_ref_sink (iter->data);
+
+  /* Check newly added devices */
+  for (iter = new_devices; iter; iter = g_list_next (iter)) {
+    if (!gst_d3d12_screen_capture_device_is_in_list (prev_devices,
+            GST_DEVICE (iter->data))) {
+      to_add = g_list_prepend (to_add, gst_object_ref (iter->data));
+    }
+  }
+
+  /* Check removed device */
+  for (iter = prev_devices; iter; iter = g_list_next (iter)) {
+    if (!gst_d3d12_screen_capture_device_is_in_list (new_devices,
+            GST_DEVICE (iter->data))) {
+      to_remove = g_list_prepend (to_remove, gst_object_ref (iter->data));
+    }
+  }
+
+  iter = to_remove;
+  while (iter) {
+    auto prev_dev = GST_D3D12_SCREEN_CAPTURE_DEVICE (iter->data);
+
+    if (!prev_dev->device_path) {
+      iter = g_list_next (iter);
+      continue;
+    }
+
+    walk = to_add;
+    bool found = false;
+    while (walk) {
+      auto new_dev = GST_D3D12_SCREEN_CAPTURE_DEVICE (walk->data);
+
+      if (!new_dev->device_path ||
+          g_strcmp0 (prev_dev->device_path, new_dev->device_path)) {
+        walk = g_list_next (walk);
+        continue;
+      }
+
+      gst_device_provider_device_changed (provider, GST_DEVICE (new_dev),
+          GST_DEVICE (prev_dev));
+      gst_object_unref (new_dev);
+      to_add = g_list_delete_link (to_add, walk);
+      found = true;
+      break;
+    }
+
+    if (found) {
+      gst_object_unref (prev_dev);
+      auto next = iter->next;
+      to_remove = g_list_delete_link (to_remove, iter);
+      iter = next;
+    } else {
+      iter = g_list_next (iter);
+    }
+  }
+
+  for (iter = to_remove; iter; iter = g_list_next (iter))
+    gst_device_provider_device_remove (provider, GST_DEVICE (iter->data));
+
+  for (iter = to_add; iter; iter = g_list_next (iter))
+    gst_device_provider_device_add (provider, GST_DEVICE (iter->data));
+
+  if (prev_devices)
+    g_list_free_full (prev_devices, (GDestroyNotify) gst_object_unref);
+
+  if (to_add)
+    g_list_free_full (to_add, (GDestroyNotify) gst_object_unref);
+
+  if (to_remove)
+    g_list_free_full (to_remove, (GDestroyNotify) gst_object_unref);
+}
+
+static gboolean
+gst_d3d12_screen_capture_device_provider_start (GstDeviceProvider * provider)
+{
+  auto self = GST_D3D12_SCREEN_CAPTURE_DEVICE_PROVIDER (provider);
+
+  auto devices = gst_d3d12_screen_capture_device_provider_probe (provider);
+  if (devices) {
+    GList *iter;
+    for (iter = devices; iter; iter = g_list_next (iter))
+      gst_device_provider_device_add (provider, GST_DEVICE (iter->data));
+
+    g_list_free (devices);
+  }
+
+  MonitorNotificationManager::Inst ()->Register (self);
+
+  return TRUE;
+}
+
+static void
+gst_d3d12_screen_capture_device_provider_stop (GstDeviceProvider * provider)
+{
+  auto self = GST_D3D12_SCREEN_CAPTURE_DEVICE_PROVIDER (provider);
+
+  MonitorNotificationManager::Inst ()->Unregister (self);
+}
+
+static LRESULT CALLBACK
+gst_d3d12_screen_capture_device_provider_wnd_proc (HWND hwnd,
+    UINT msg, WPARAM wparam, LPARAM lparam)
+{
+  if (msg == WM_DISPLAYCHANGE) {
+    MonitorNotificationManager::Inst ()->OnDisplayChange ();
+    return 0;
+  }
+
+  return DefWindowProcW (hwnd, msg, wparam, lparam);
+}
+
+static gpointer
+gst_d3d12_screen_capture_device_provider_monitor_thread (gpointer user_data)
+{
+  static const wchar_t HWND_CLASS_NAME[] =
+      L"GstD3D12ScreenCaptureDeviceProvider";
+
+  GST_D3D12_CALL_ONCE_BEGIN {
+    WNDCLASSW wc = { };
+    wc.lpfnWndProc = gst_d3d12_screen_capture_device_provider_wnd_proc;
+    wc.hInstance = GetModuleHandle (nullptr);
+    wc.lpszClassName = HWND_CLASS_NAME;
+    RegisterClassW (&wc);
+  } GST_D3D12_CALL_ONCE_END;
+
+  auto hwnd = CreateWindowExW (0, HWND_CLASS_NAME, L"", 0,
+      0, 0, 0, 0, nullptr, nullptr, GetModuleHandle (nullptr), nullptr);
+
+  MSG msg;
+  while (GetMessage (&msg, nullptr, 0, 0)) {
+    TranslateMessage (&msg);
+    DispatchMessage (&msg);
+  }
+
+  CloseWindow (hwnd);
+
+  return nullptr;
 }

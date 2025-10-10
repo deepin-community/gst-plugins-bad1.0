@@ -28,23 +28,41 @@
 
 G_BEGIN_DECLS
 
-#define GST_VTENC_CAST(obj) \
-  ((GstVTEnc *) (obj))
+#define GST_TYPE_VTENC            (gst_vtenc_get_type())
+#define GST_VTENC(obj)            (G_TYPE_CHECK_INSTANCE_CAST((obj), GST_TYPE_VTENC, GstVTEnc))
+#define GST_VTENC_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST((klass), GST_TYPE_VTENC, GstVTEncClass))
+#define GST_IS_VTENC(obj)         (G_TYPE_CHECK_INSTANCE_TYPE((obj), GST_TYPE_VTENC))
+#define GST_IS_VTENC_CLASS(obj)   (G_TYPE_CHECK_CLASS_TYPE((klass), GST_TYPE_VTENC))
+#define GST_VTENC_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS((obj), GST_TYPE_VTENC, GstVTEncClass))
+#define GST_VTENC_CAST(obj)       ((GstVTEnc *)obj)
+typedef struct _GstVTEnc GstVTEnc;
+typedef struct _GstVTEncClass GstVTEncClass;
+
 #define GST_VTENC_CLASS_GET_CODEC_DETAILS(klass) \
   ((const GstVTEncoderDetails *) g_type_get_qdata (G_OBJECT_CLASS_TYPE (klass), \
       GST_VTENC_CODEC_DETAILS_QDATA))
 
-typedef struct _GstVTEncoderDetails GstVTEncoderDetails;
+/**
+ * GstVtencRateControl:
+ * @GST_VTENC_RATE_CONTROL_ABR: average (variable) bitrate
+ * @GST_VTENC_RATE_CONTROL_CBR: constant bitrate
+ *
+ * Since: 1.26
+ */
+typedef enum
+{
+  GST_VTENC_RATE_CONTROL_ABR,
+  GST_VTENC_RATE_CONTROL_CBR,
+} GstVtencRateControl;
 
-typedef struct _GstVTEncClassParams GstVTEncClassParams;
-typedef struct _GstVTEncClass GstVTEncClass;
-typedef struct _GstVTEnc GstVTEnc;
+typedef struct _GstVTEncoderDetails GstVTEncoderDetails;
 
 struct _GstVTEncoderDetails
 {
-  const gchar * name;
-  const gchar * element_name;
-  const gchar * mimetype;
+  const char * name;
+  const char * element_name;
+  const char * mimetype;
+  const char * authors;
   CMVideoCodecType format_id;
   gboolean require_hardware;
 };
@@ -64,13 +82,17 @@ struct _GstVTEnc
   CFStringRef profile_level;
   GstH264Profile h264_profile;
   guint bitrate;
+  guint max_bitrate;
+  float bitrate_window;
   gboolean allow_frame_reordering;
   gboolean realtime;
   gdouble quality;
   gint max_keyframe_interval;
   GstClockTime max_keyframe_interval_duration;
+  gint max_frame_delay;
   gint latency_frames;
   gboolean preserve_alpha;
+  GstVtencRateControl rate_control;
 
   gboolean dump_properties;
   gboolean dump_attributes;
@@ -82,17 +104,32 @@ struct _GstVTEnc
   CFDictionaryRef keyframe_props;
   GstClockTime dts_offset;
 
-  GstQueueArray * output_queue;
+  GstVecDeque * output_queue;
   /* Protects output_queue, is_flushing and pause_task */
   GMutex queue_mutex;
   GCond queue_cond;
-  
+
+  /* Temporary workaround for HEVCWithAlpha encoder not throttling input */
+  GMutex encoding_mutex;
+  GCond encoding_cond;
+
   /* downstream_ret is protected by the STREAM_LOCK */
   GstFlowReturn downstream_ret;
   gboolean negotiate_downstream;
   gboolean is_flushing;
   gboolean pause_task;
+
+  /* If we get an EncoderMalfunctionErr or similar, we restart the session
+   * before the next encode call */
+  gboolean require_restart;
+
+  /* Certain properties (e.g. bitrate) can be changed on the fly.
+   * We can't do it straight from the setter as that would often deadlock,
+   * so we instead reconfigure on next encode call. */
+  gboolean require_reconfigure;
 };
+
+GType gst_vtenc_get_type (void);
 
 void gst_vtenc_register_elements (GstPlugin * plugin);
 

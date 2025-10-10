@@ -174,6 +174,17 @@ static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS (WPE_VIDEO_SRC_CAPS));
 
+#define GST_ELEMENT_PROGRESS(el, type, code, text)                             \
+  G_STMT_START {                                                               \
+    gchar *__txt = _gst_element_error_printf text;                             \
+    gst_element_post_message (                                                 \
+        GST_ELEMENT_CAST (el),                                                 \
+        gst_message_new_progress (GST_OBJECT_CAST (el),                        \
+                                  GST_PROGRESS_TYPE_##type, code, __txt));     \
+    g_free (__txt);                                                            \
+  }                                                                            \
+  G_STMT_END
+
 static GstFlowReturn
 gst_wpe_video_src_create (GstBaseSrc * bsrc, guint64 offset, guint length,
     GstBuffer ** buf)
@@ -270,7 +281,6 @@ gst_wpe_video_src_fill_memory (GstGLBaseSrc * bsrc, GstGLMemory * memory)
   gl->BindTexture (GL_TEXTURE_2D, tex_id);
   gl->EGLImageTargetTexture2D (GL_TEXTURE_2D,
       gst_egl_image_get_image (locked_image));
-  gl->Flush ();
   WPE_UNLOCK (src);
   return TRUE;
 }
@@ -284,6 +294,7 @@ gst_wpe_video_src_start (GstWpeVideoSrc * src)
   gboolean created_view = FALSE;
   GBytes *bytes;
 
+  GST_ELEMENT_PROGRESS (src, START, "open", ("Starting up"));
   GST_INFO_OBJECT (src, "Starting up");
   WPE_LOCK (src);
 
@@ -298,18 +309,28 @@ gst_wpe_video_src_start (GstWpeVideoSrc * src)
   auto & thread = GstWPEContextThread::singleton ();
 
   if (!src->view) {
-    src->view = thread.createWPEView (src, context, display,
+    GST_ELEMENT_PROGRESS (src, CONTINUE, "open", ("Creating WPE WebView"));
+    src->view =
+        thread.createWPEView (src, context, display,
         GST_VIDEO_INFO_WIDTH (&base_src->out_info),
         GST_VIDEO_INFO_HEIGHT (&base_src->out_info));
     created_view = TRUE;
     GST_DEBUG_OBJECT (src, "created view %p", src->view);
+    GST_ELEMENT_PROGRESS (src, CONTINUE, "open", ("WPE WebView is ready"));
   }
 
   if (!src->view) {
     WPE_UNLOCK (src);
+    GST_ELEMENT_PROGRESS (src, ERROR, "open",
+        ("WPEBackend-FDO EGL display initialisation failed"));
     GST_ELEMENT_ERROR (src, RESOURCE, FAILED,
         ("WPEBackend-FDO EGL display initialisation failed"), (NULL));
     return FALSE;
+  }
+
+  if (!created_view) {
+    GST_INFO_OBJECT (src, "Re-starting after re-negotiation, clearing cached SHM buffers");
+    src->view->clearBuffers ();
   }
 
   GST_OBJECT_LOCK (src);
@@ -318,6 +339,7 @@ gst_wpe_video_src_start (GstWpeVideoSrc * src)
   GST_OBJECT_UNLOCK (src);
 
   if (bytes != NULL) {
+    GST_ELEMENT_PROGRESS (src, CONTINUE, "open", ("Loading HTML data"));
     src->view->loadData (bytes);
     g_bytes_unref (bytes);
   }
@@ -326,6 +348,7 @@ gst_wpe_video_src_start (GstWpeVideoSrc * src)
     src->n_frames = 0;
   }
   WPE_UNLOCK (src);
+  GST_ELEMENT_PROGRESS (src, COMPLETE, "open", ("Ready to produce buffers"));
   return TRUE;
 }
 
@@ -797,6 +820,42 @@ gst_wpe_video_src_event (GstBaseSrc * base_src, GstEvent * event)
   return ret;
 }
 
+static gboolean
+gst_wpe_video_src_query (GstBaseSrc * base_src, GstQuery * query)
+{
+  GstWpeVideoSrc *src = GST_WPE_VIDEO_SRC (base_src);
+  GstGLBaseSrc *gl_src = GST_GL_BASE_SRC (base_src);
+  gboolean ret = FALSE;
+
+  switch (GST_QUERY_TYPE (query)) {
+    case GST_QUERY_LATENCY:{
+      GST_OBJECT_LOCK (src);
+      if (gl_src->out_info.fps_n > 0) {
+        GstClockTime latency;
+
+        latency = gst_util_uint64_scale (GST_SECOND, gl_src->out_info.fps_d,
+            gl_src->out_info.fps_n);
+        GST_OBJECT_UNLOCK (src);
+        gst_query_set_latency (query,
+            gst_base_src_is_live (GST_BASE_SRC_CAST (src)), latency,
+            GST_CLOCK_TIME_NONE);
+        GST_DEBUG_OBJECT (src, "Reporting latency of %" GST_TIME_FORMAT,
+            GST_TIME_ARGS (latency));
+        ret = TRUE;
+      } else {
+        GST_OBJECT_UNLOCK (src);
+      }
+
+      break;
+    }
+    default:
+      ret = GST_CALL_PARENT_WITH_DEFAULT (GST_BASE_SRC_CLASS, query,
+          (base_src, query), FALSE);
+      break;
+  }
+  return ret;
+}
+
 static void
 gst_wpe_video_src_init (GstWpeVideoSrc * src)
 {
@@ -859,6 +918,7 @@ gst_wpe_video_src_class_init (GstWpeVideoSrcClass * klass)
       GST_DEBUG_FUNCPTR (gst_wpe_video_src_decide_allocation);
   base_src_class->stop = GST_DEBUG_FUNCPTR (gst_wpe_video_src_stop);
   base_src_class->event = GST_DEBUG_FUNCPTR (gst_wpe_video_src_event);
+  base_src_class->query = GST_DEBUG_FUNCPTR (gst_wpe_video_src_query);
 
   gl_base_src_class->supported_gl_api =
       static_cast < GstGLAPI >
@@ -897,7 +957,7 @@ gst_wpe_video_src_class_init (GstWpeVideoSrcClass * klass)
       G_TYPE_NONE, 1, G_TYPE_BYTES);
 
   /**
-   * GstWpeSrc::run-javascript:
+   * GstWpeVideoSrc::run-javascript:
    * @src: the object which received the signal
    * @script: the script to run
    *

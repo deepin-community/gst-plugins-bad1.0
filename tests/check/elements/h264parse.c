@@ -351,6 +351,13 @@ verify_h264parse_compatible_caps (guint profile_idc, guint constraint_set_flags,
   gst_buffer_fill (buf, 0, frame_sps, frame_sps_len);
   g_free (frame_sps);
   fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+
+  /* push pps buffer */
+  buf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY, h264_pps,
+      sizeof (h264_pps), 0, sizeof (h264_pps), NULL, NULL);
+  fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+
+  /* send eos */
   fail_unless (gst_harness_push_event (h, gst_event_new_eos ()));
 
   /* check that the caps have been negociated correctly */
@@ -1488,6 +1495,16 @@ GST_START_TEST (test_parse_sei_userdefinedunregistered)
     0x1f, 0x00, 0x05, 0xff, 0x21, 0x7e, 0xff, 0x29,
     0xb5, 0xff, 0xdc, 0x13
   };
+  // Same SEI as above but without data
+  const guint8 no_data_sei[] = {
+    0x00, 0x00, 0x00, 0x20, 0x06, 0x05, 0x10, 0x4d,
+    0x49, 0x53, 0x50, 0x6d, 0x69, 0x63, 0x72, 0x6f,
+    0x73, 0x65, 0x63, 0x74, 0x69, 0x6d, 0x65,
+    /* IDR frame (doesn't match caps) */
+    0x00, 0x00, 0x00, 0x14, 0x65, 0x88, 0x84, 0x00,
+    0x10, 0xff, 0xfe, 0xf6, 0xf0, 0xfe, 0x05, 0x36,
+    0x56, 0x04, 0x50, 0x96, 0x7b, 0x3f, 0x53, 0xe1
+  };
 
   h = gst_harness_new ("h264parse");
 
@@ -1511,7 +1528,67 @@ GST_START_TEST (test_parse_sei_userdefinedunregistered)
 
   gst_buffer_unref (buf);
 
+  // Now try parsing an unregistered SEI without data
+  buf = gst_buffer_new_and_alloc (misb_sei_size);
+  gst_buffer_fill (buf, 0, no_data_sei, sizeof (no_data_sei));
+  fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+
+  buf = gst_harness_pull (h);
+  meta = gst_buffer_get_video_sei_user_data_unregistered_meta (buf);
+  fail_unless (meta != NULL);
+
+  fail_unless (memcmp (meta->uuid, H264_MISP_MICROSECTIME, 16) == 0);
+  fail_unless (meta->data == NULL);
+  fail_unless (meta->size == 0);
+
+  gst_buffer_unref (buf);
+
   gst_harness_teardown (h);
+}
+
+GST_END_TEST;
+
+GST_START_TEST (test_parse_to_avc3_without_sps)
+{
+  GstHarness *h;
+  GstBuffer *buf;
+  GstCaps *caps;
+
+  h = gst_harness_new ("h264parse");
+
+  gst_harness_set_caps_str (h,
+      "video/x-h264, stream-format=(string)byte-stream",
+      "video/x-h264, stream-format=(string)avc3, parsed=(boolean)true,"
+      " alignment=(string)au");
+
+  /* Send AUD */
+  buf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY,
+      h264_aud, sizeof (h264_aud), 0, sizeof (h264_aud), NULL, NULL);
+  fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+
+  /* Send an IDR */
+  buf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY,
+      h264_idrframe, sizeof (h264_idrframe), 0, sizeof (h264_idrframe), NULL,
+      NULL);
+  fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+
+  /* Send AUD to trigger the AU completion and pushing */
+  buf = gst_buffer_new_wrapped_full (GST_MEMORY_FLAG_READONLY,
+      h264_aud, sizeof (h264_aud), 0, sizeof (h264_aud), NULL, NULL);
+  fail_unless_equals_int (gst_harness_push (h, buf), GST_FLOW_OK);
+
+  /* send EOS */
+  gst_harness_push_event (h, gst_event_new_eos ());
+
+  /* Ensure that caps negotiation failed as an SPS is needed to generate the
+   * codec_data
+   */
+  fail_if (caps = gst_pad_get_current_caps (h->sinkpad), "caps: %s",
+      gst_caps_to_string (caps));
+
+  /* Ensure no buffer was pushed without caps */
+  fail_unless_equals_int (gst_harness_buffers_received (h), 0)
+      gst_harness_teardown (h);
 }
 
 GST_END_TEST;
@@ -1629,6 +1706,7 @@ main (int argc, char **argv)
     tcase_add_test (tc_chain, test_parse_skip_to_4bytes_sc);
     tcase_add_test (tc_chain, test_parse_aud_insert);
     tcase_add_test (tc_chain, test_parse_sei_userdefinedunregistered);
+    tcase_add_test (tc_chain, test_parse_to_avc3_without_sps);
     nf += gst_check_run_suite (s, "h264parse", __FILE__);
   }
 

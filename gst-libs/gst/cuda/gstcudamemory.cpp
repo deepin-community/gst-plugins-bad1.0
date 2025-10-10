@@ -28,6 +28,7 @@
 #include <string.h>
 #include <map>
 #include <memory>
+#include <mutex>
 
 #ifdef G_OS_WIN32
 #include <windows.h>
@@ -39,6 +40,13 @@ GST_DEBUG_CATEGORY_STATIC (cuda_allocator_debug);
 #define GST_CAT_DEFAULT cuda_allocator_debug
 
 static GstAllocator *_gst_cuda_allocator = nullptr;
+
+/* *INDENT-OFF* */
+static std::recursive_mutex _callback_lock;
+/* *INDENT-ON* */
+static GstCudaMemoryAllocatorNeedPoolCallback _need_pool_callback = nullptr;
+static gpointer _alloc_callback_user_data = nullptr;
+static GDestroyNotify _alloc_callback_notify = nullptr;
 
 GType
 gst_cuda_memory_alloc_method_get_type (void)
@@ -115,8 +123,8 @@ struct _GstCudaMemoryPrivate
   CUtexObject texture[GST_VIDEO_MAX_PLANES][2];
 
   gboolean saw_io = FALSE;
-
   gboolean from_fixed_pool = FALSE;
+  gboolean stream_ordred_alloc = FALSE;
 
   std::map < gint64, std::unique_ptr < GstCudaMemoryTokenData >> token_map;
 
@@ -267,6 +275,7 @@ gst_cuda_allocator_update_info (const GstVideoInfo * reference,
     case GST_VIDEO_FORMAT_RGB10A2_LE:
     case GST_VIDEO_FORMAT_YUY2:
     case GST_VIDEO_FORMAT_UYVY:
+    case GST_VIDEO_FORMAT_VUYA:
       ret.stride[0] = pitch;
       ret.offset[0] = 0;
       break;
@@ -279,10 +288,20 @@ gst_cuda_allocator_update_info (const GstVideoInfo * reference,
   return TRUE;
 }
 
+static size_t
+do_align (size_t value, size_t align)
+{
+  if (align == 0)
+    return value;
+
+  return ((value + align - 1) / align) * align;
+}
+
 static GstMemory *
 gst_cuda_allocator_alloc_internal (GstCudaAllocator * self,
     GstCudaContext * context, GstCudaStream * stream, const GstVideoInfo * info,
-    guint width_in_bytes, guint alloc_height)
+    guint width_in_bytes, guint alloc_height, gboolean stream_ordered,
+    GstCudaMemoryPool * pool)
 {
   GstCudaMemoryPrivate *priv;
   GstCudaMemory *mem;
@@ -290,12 +309,32 @@ gst_cuda_allocator_alloc_internal (GstCudaAllocator * self,
   gboolean ret = FALSE;
   gsize pitch;
   GstVideoInfo alloc_info;
+  gint texture_align = gst_cuda_context_get_texture_alignment (context);
+  auto stream_handle = gst_cuda_stream_get_handle (stream);
 
   if (!gst_cuda_context_push (context))
     return nullptr;
 
-  ret = gst_cuda_result (CuMemAllocPitch (&data, &pitch, width_in_bytes,
-          alloc_height, 16));
+  if (stream_ordered) {
+    g_assert (stream_handle);
+
+    pitch = do_align (width_in_bytes, texture_align);
+    if (pool) {
+      ret = gst_cuda_result (CuMemAllocFromPoolAsync (&data,
+              pitch * alloc_height, gst_cuda_memory_pool_get_handle (pool),
+              stream_handle));
+    } else {
+      ret = gst_cuda_result (CuMemAllocAsync (&data, pitch * alloc_height,
+              stream_handle));
+    }
+
+    if (ret)
+      ret = gst_cuda_result (CuStreamSynchronize (stream_handle));
+  } else {
+    ret = gst_cuda_result (CuMemAllocPitch (&data, &pitch, width_in_bytes,
+            alloc_height, 16));
+  }
+
   gst_cuda_context_pop (nullptr);
 
   if (!ret) {
@@ -306,7 +345,12 @@ gst_cuda_allocator_alloc_internal (GstCudaAllocator * self,
   if (!gst_cuda_allocator_update_info (info, pitch, alloc_height, &alloc_info)) {
     GST_ERROR_OBJECT (self, "Couldn't calculate aligned info");
     gst_cuda_context_push (context);
-    CuMemFree (data);
+
+    if (stream_ordered)
+      CuMemFreeAsync (data, stream_handle);
+    else
+      CuMemFree (data);
+
     gst_cuda_context_pop (nullptr);
     return nullptr;
   }
@@ -320,7 +364,8 @@ gst_cuda_allocator_alloc_internal (GstCudaAllocator * self,
   priv->pitch = pitch;
   priv->width_in_bytes = width_in_bytes;
   priv->height = alloc_height;
-  priv->texture_align = gst_cuda_context_get_texture_alignment (context);
+  priv->texture_align = texture_align;
+  priv->stream_ordred_alloc = stream_ordered;
   if (stream)
     priv->stream = gst_cuda_stream_ref (stream);
 
@@ -369,7 +414,12 @@ gst_cuda_allocator_free (GstAllocator * allocator, GstMemory * memory)
 #endif
       }
     } else {
-      gst_cuda_result (CuMemFree (priv->data));
+      if (priv->stream_ordred_alloc) {
+        gst_cuda_result (CuMemFreeAsync (priv->data,
+                gst_cuda_stream_get_handle (priv->stream)));
+      } else {
+        gst_cuda_result (CuMemFree (priv->data));
+      }
     }
   }
 
@@ -569,7 +619,8 @@ cuda_mem_copy (GstMemory * mem, gssize offset, gssize size)
 
   if (!copy) {
     copy = gst_cuda_allocator_alloc_internal (self, context, stream,
-        &src_mem->info, src_mem->priv->width_in_bytes, src_mem->priv->height);
+        &src_mem->info, src_mem->priv->width_in_bytes, src_mem->priv->height,
+        FALSE, nullptr);
   }
 
   if (!copy) {
@@ -1112,7 +1163,7 @@ gst_cuda_allocator_alloc (GstCudaAllocator * allocator,
   alloc_height = gst_cuda_allocator_calculate_alloc_height (info);
 
   return gst_cuda_allocator_alloc_internal (allocator, context, stream,
-      info, info->stride[0], alloc_height);
+      info, info->stride[0], alloc_height, FALSE, nullptr);
 }
 
 /**
@@ -1234,13 +1285,17 @@ gst_cuda_memory_is_from_fixed_pool (GstMemory * mem)
   return cmem->priv->from_fixed_pool;
 }
 
-static size_t
-do_align (size_t value, size_t align)
+gboolean
+gst_cuda_memory_is_stream_ordered (GstMemory * mem)
 {
-  if (align == 0)
-    return value;
+  GstCudaMemory *cmem;
 
-  return ((value + align - 1) / align) * align;
+  if (!gst_is_cuda_memory (mem))
+    return FALSE;
+
+  cmem = GST_CUDA_MEMORY_CAST (mem);
+
+  return cmem->priv->stream_ordred_alloc;
 }
 
 /**
@@ -1400,6 +1455,9 @@ struct _GstCudaPoolAllocatorPrivate
   guint outstanding;
   guint cur_mems;
   gboolean flushing;
+  gboolean stream_ordered_alloc;
+
+  GstCudaMemoryPool *mem_pool;
 };
 
 static void gst_cuda_pool_allocator_finalize (GObject * object);
@@ -1462,6 +1520,7 @@ gst_cuda_pool_allocator_finalize (GObject * object)
   gst_atomic_queue_unref (priv->queue);
   gst_poll_free (priv->poll);
   g_rec_mutex_clear (&priv->lock);
+  gst_clear_cuda_memory_pool (&priv->mem_pool);
 
   gst_clear_cuda_stream (&self->stream);
   gst_clear_object (&self->context);
@@ -1475,6 +1534,14 @@ gst_cuda_pool_allocator_start (GstCudaPoolAllocator * self)
   GstCudaPoolAllocatorPrivate *priv = self->priv;
 
   priv->started = TRUE;
+
+  if (priv->stream_ordered_alloc && !priv->mem_pool) {
+    std::lock_guard < std::recursive_mutex > lk (_callback_lock);
+    if (_need_pool_callback) {
+      priv->mem_pool = _need_pool_callback (GST_CUDA_ALLOCATOR (self),
+          self->context, _alloc_callback_user_data);
+    }
+  }
 
   return TRUE;
 }
@@ -1699,10 +1766,17 @@ gst_cuda_pool_allocator_alloc (GstCudaPoolAllocator * self, GstMemory ** mem)
     new_mem = gst_cuda_allocator_virtual_alloc (nullptr,
         self->context, self->stream, &self->info, &priv->prop,
         priv->granularity_flags);
+  } else if (priv->stream_ordered_alloc && self->stream) {
+    auto allocator = (GstCudaAllocator *) _gst_cuda_allocator;
+    new_mem = gst_cuda_allocator_alloc_internal (allocator,
+        self->context, self->stream, &self->info, self->info.stride[0],
+        gst_cuda_allocator_calculate_alloc_height (&self->info), TRUE,
+        priv->mem_pool);
   } else {
     new_mem = gst_cuda_allocator_alloc (nullptr,
         self->context, self->stream, &self->info);
   }
+
   if (!new_mem) {
     GST_ERROR_OBJECT (self, "Failed to allocate new memory");
     g_atomic_int_add (&priv->cur_mems, -1);
@@ -1812,21 +1886,7 @@ GstCudaPoolAllocator *
 gst_cuda_pool_allocator_new (GstCudaContext * context, GstCudaStream * stream,
     const GstVideoInfo * info)
 {
-  GstCudaPoolAllocator *self;
-
-  g_return_val_if_fail (GST_IS_CUDA_CONTEXT (context), nullptr);
-  g_return_val_if_fail (!stream || GST_IS_CUDA_STREAM (stream), nullptr);
-
-  self = (GstCudaPoolAllocator *)
-      g_object_new (GST_TYPE_CUDA_POOL_ALLOCATOR, nullptr);
-  gst_object_ref_sink (self);
-
-  self->context = (GstCudaContext *) gst_object_ref (context);
-  if (stream)
-    self->stream = gst_cuda_stream_ref (stream);
-  self->info = *info;
-
-  return self;
+  return gst_cuda_pool_allocator_new_full (context, stream, info, nullptr);
 }
 
 /**
@@ -1873,6 +1933,52 @@ gst_cuda_pool_allocator_new_for_virtual_memory (GstCudaContext * context,
 }
 
 /**
+ * gst_cuda_pool_allocator_new_full:
+ * @context: a #GstCudaContext
+ * @stream: (allow-none): a #GstCudaStream
+ * @info: a #GstVideoInfo
+ * @config: (transfer full) (allow-none): a #GstStructure with configuration options
+ *
+ * Creates a new #GstCudaPoolAllocator instance with given @config
+ *
+ * Returns: (transfer full): a new #GstCudaPoolAllocator instance
+ *
+ * Since: 1.26
+ */
+GstCudaPoolAllocator *
+gst_cuda_pool_allocator_new_full (GstCudaContext * context,
+    GstCudaStream * stream, const GstVideoInfo * info, GstStructure * config)
+{
+  GstCudaPoolAllocator *self;
+
+  g_return_val_if_fail (GST_IS_CUDA_CONTEXT (context), nullptr);
+  g_return_val_if_fail (!stream || GST_IS_CUDA_STREAM (stream), nullptr);
+
+  self = (GstCudaPoolAllocator *)
+      g_object_new (GST_TYPE_CUDA_POOL_ALLOCATOR, nullptr);
+  gst_object_ref_sink (self);
+
+  self->context = (GstCudaContext *) gst_object_ref (context);
+  if (stream)
+    self->stream = gst_cuda_stream_ref (stream);
+  self->info = *info;
+
+  if (config) {
+    gboolean allow_stream_ordered = FALSE;
+    if (stream && gst_structure_get_boolean (config,
+            GST_CUDA_ALLOCATOR_OPT_STREAM_ORDERED, &allow_stream_ordered) &&
+        allow_stream_ordered) {
+      g_object_get (context,
+          "stream-ordered-alloc", &self->priv->stream_ordered_alloc, nullptr);
+    }
+
+    gst_structure_free (config);
+  }
+
+  return self;
+}
+
+/**
  * gst_cuda_pool_allocator_acquire_memory:
  * @allocator: a #GstCudaPoolAllocator
  * @memory: (out): a #GstMemory
@@ -1911,4 +2017,28 @@ gst_cuda_pool_allocator_acquire_memory (GstCudaPoolAllocator * allocator,
   }
 
   return result;
+}
+
+/**
+ * gst_cuda_register_allocator_need_pool_callback:
+ * @callback: the callbacks
+ * @user_data: an user_data argument for the callback
+ * @notify: a destory notify function
+ *
+ * Sets global need-pool callback function
+ *
+ * Since: 1.26
+ */
+void gst_cuda_register_allocator_need_pool_callback
+    (GstCudaMemoryAllocatorNeedPoolCallback callback, gpointer user_data,
+    GDestroyNotify notify)
+{
+  std::lock_guard < std::recursive_mutex > lk (_callback_lock);
+
+  if (_alloc_callback_notify)
+    _alloc_callback_notify (_alloc_callback_user_data);
+
+  _need_pool_callback = callback;
+  _alloc_callback_user_data = user_data;
+  _alloc_callback_notify = notify;
 }

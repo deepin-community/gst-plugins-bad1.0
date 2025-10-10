@@ -1,9 +1,22 @@
 voaac_sources = ['gstvoaac.c', 'gstvoaacenc.c']
 
+voaac_headers = [
+  'gstvoaacenc.h',
+]
+
+doc_sources = []
+foreach s: voaac_sources + voaac_headers
+  doc_sources += meson.current_source_dir() / s
+endforeach
+
+plugin_sources += {
+  'voaacenc': pathsep.join(doc_sources)
+}
+
 voaac_dep = dependency('vo-aacenc', required : get_option('voaacenc'))
 
 if voaac_dep.found()
-  gstbz2 = library('gstvoaacenc',
+  gstvoaacenc = library('gstvoaacenc',
     voaac_sources,
     c_args : gst_plugins_bad_args,
     link_args : noseh_link_args,
@@ -12,5 +25,5 @@ if voaac_dep.found()
     install : true,
     install_dir : plugins_install_dir,
   )
-  plugins += [gstbz2]
+  plugins += [gstvoaacenc]
 endif

@@ -23,6 +23,7 @@
 #endif
 
 #include "gstvkvideo-private.h"
+#include "gstvkphysicaldevice-private.h"
 #include "gstvkinstance.h"
 
 #include <vk_video/vulkan_video_codecs_common.h>
@@ -37,6 +38,14 @@ const VkExtensionProperties _vk_codec_extensions[] = {
     .extensionName = VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_EXTENSION_NAME,
     .specVersion = VK_STD_VULKAN_VIDEO_CODEC_H265_DECODE_SPEC_VERSION,
   },
+  [GST_VK_VIDEO_EXTENSION_ENCODE_H264] = {
+    .extensionName = VK_STD_VULKAN_VIDEO_CODEC_H264_ENCODE_EXTENSION_NAME,
+    .specVersion = VK_STD_VULKAN_VIDEO_CODEC_H264_ENCODE_SPEC_VERSION,
+  },
+  [GST_VK_VIDEO_EXTENSION_ENCODE_H265] = {
+    .extensionName = VK_STD_VULKAN_VIDEO_CODEC_H265_ENCODE_EXTENSION_NAME,
+    .specVersion = VK_STD_VULKAN_VIDEO_CODEC_H265_ENCODE_SPEC_VERSION,
+  }
 };
 
 const VkComponentMapping _vk_identity_component_map = {
@@ -105,6 +114,12 @@ gst_vulkan_video_session_create (GstVulkanVideoSession * session,
   g_return_val_if_fail (GST_IS_VULKAN_DEVICE (device), FALSE);
   g_return_val_if_fail (vk, FALSE);
   g_return_val_if_fail (session_create, FALSE);
+
+#if defined(VK_KHR_video_maintenance1)
+  if (gst_vulkan_video_has_maintenance1 (device)) {
+    session_create->flags |= VK_VIDEO_SESSION_CREATE_INLINE_QUERIES_BIT_KHR;
+  }
+#endif
 
   res = vk->CreateVideoSession (device->device, session_create, NULL,
       &vk_session);
@@ -232,4 +247,95 @@ gst_vulkan_video_codec_buffer_new (GstVulkanDevice * device,
   buf = gst_buffer_new ();
   gst_buffer_append_memory (buf, mem);
   return buf;
+}
+
+/**
+ * gst_vulkan_video_image_create_view:
+ * @buf: a #GstBuffer
+ * @layered_dpb: if DPB is layered
+ * @is_out: if @buf is for output or for DPB
+ * @sampler: (optional): sampler #GstVulkanHandle
+ *
+ * Creates a #GstVulkanImageView for @buf for decoding, with the internal Ycbcr
+ * sampler, if available.
+ *
+ * Returns: (transfer full) (nullable): the #GstVulkanImageView.
+ */
+GstVulkanImageView *
+gst_vulkan_video_image_create_view (GstBuffer * buf, gboolean layered_dpb,
+    gboolean is_out, GstVulkanHandle * sampler)
+{
+  VkSamplerYcbcrConversionInfo yuv_sampler_info;
+  VkImageViewCreateInfo view_create_info;
+  GstVulkanImageMemory *vkmem;
+  GstMemory *mem;
+  gpointer pnext;
+  guint n_mems;
+
+  g_return_val_if_fail (GST_IS_BUFFER (buf), NULL);
+
+  n_mems = gst_buffer_n_memory (buf);
+  if (n_mems != 1)
+    return NULL;
+
+  mem = gst_buffer_peek_memory (buf, 0);
+  if (!gst_is_vulkan_image_memory (mem))
+    return NULL;
+
+  pnext = NULL;
+  if (sampler
+      && sampler->type == GST_VULKAN_HANDLE_TYPE_SAMPLER_YCBCR_CONVERSION) {
+    yuv_sampler_info = (VkSamplerYcbcrConversionInfo) {
+      /* *INDENT-OFF* */
+      .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
+      .conversion = sampler->handle,
+      /* *INDENT-ON* */
+    };
+
+    pnext = &yuv_sampler_info;
+  }
+
+  vkmem = (GstVulkanImageMemory *) mem;
+
+  /* *INDENT-OFF* */
+  view_create_info = (VkImageViewCreateInfo) {
+    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+    .pNext = pnext,
+    .viewType = layered_dpb && !is_out ?
+        VK_IMAGE_VIEW_TYPE_2D_ARRAY: VK_IMAGE_VIEW_TYPE_2D,
+    .format = vkmem->create_info.format,
+    .image = vkmem->image,
+    .components = _vk_identity_component_map,
+    .subresourceRange = (VkImageSubresourceRange) {
+      .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+      .baseArrayLayer = 0,
+      .layerCount     = layered_dpb && !is_out ?
+          VK_REMAINING_ARRAY_LAYERS : 1,
+      .levelCount     = 1,
+    },
+  };
+  /* *INDENT-ON* */
+
+  return gst_vulkan_get_or_create_image_view_with_info (vkmem,
+      &view_create_info);
+}
+
+gboolean
+gst_vulkan_video_has_maintenance1 (GstVulkanDevice * device)
+{
+#if defined(VK_KHR_video_maintenance1)
+  const VkPhysicalDeviceFeatures2 *features;
+  const VkBaseOutStructure *iter;
+
+  features = gst_vulkan_physical_device_get_features (device->physical_device);
+  for (iter = (const VkBaseOutStructure *) features; iter; iter = iter->pNext) {
+    if (iter->sType ==
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_MAINTENANCE_1_FEATURES_KHR) {
+      const VkPhysicalDeviceVideoMaintenance1FeaturesKHR *video_maintenance1 =
+          (const VkPhysicalDeviceVideoMaintenance1FeaturesKHR *) iter;
+      return video_maintenance1->videoMaintenance1;
+    }
+  }
+#endif
+  return FALSE;
 }

@@ -1,15 +1,14 @@
 #!/usr/bin/make -f
 
 include /usr/share/dpkg/default.mk
+include /usr/share/dpkg/pkg-info.mk
 
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export DEB_LDFLAGS_MAINT_APPEND = -Wl,-O1 -Wl,-z,defs
 export HOME=$(CURDIR)/fake-home
 
-# debian package version
-version=$(shell dpkg-parsechangelog | grep ^Version: | cut -d ' ' -f 2)
 # upstream version
-gst_version=$(shell echo $(version) | cut -d '-' -f 1)
+gst_version=$(shell echo $(DEB_VERSION) | cut -d '-' -f 1)
 
 built_binaries := $(shell dh_listpackages)
 
@@ -33,14 +32,29 @@ conf_flags = -Dpackage-name=$(GST_PACKAGE_NAME) -Dpackage-origin=$(GST_PACKAGE_O
 conf_flags += -Dauto_features=enabled -Ddoc=disabled -Dgpl=enabled
 # Not available in Debian yet
 conf_flags += -Dfaac=disabled -Dgs=disabled -Diqa=disabled -Disac=disabled -Dmagicleap=disabled
-conf_flags += -Dmicrodns=disabled -Donnx=disabled -Dopensles=disabled -Dsvthevcenc=disabled -Dtinyalsa=disabled
+conf_flags += -Dmicrodns=disabled -Dopensles=disabled -Dsvthevcenc=disabled -Dtinyalsa=disabled
+conf_flags += -Dcuda-nvmm=disabled
+conf_flags += -Dnvcomp=disabled
+conf_flags += -Dnvdswrapper=disabled
+conf_flags += -Dlcevcdecoder=disabled -Dlcevcencoder=disabled
+conf_flags += -Dsvtjpegxs=disabled
+# Unmaintained library
+conf_flags += -Dmsdk=disabled
 # Only available on Windows
 conf_flags += -Damfcodec=disabled -Ddirectshow=disabled -Dwasapi=disabled -Dwasapi2=disabled
 # In non-free currently
 conf_flags += -Dfdkaac=disabled
+# DirectFB is orphaned since 2018 (see #1083040)
+conf_flags += -Ddirectfb=disabled
+# Debian is not android
+conf_flags += -Dandroidmedia=disabled
 
 ifeq (,$(filter $(DEB_HOST_ARCH),amd64 arm64 armel armhf i386 mips64el ppc64el riscv64 s390x alpha hppa hurd-i386 m68k powerpc ppc64 sparc64))
 conf_flags += -Dzxing=disabled
+endif
+
+ifeq (,$(filter $(DEB_HOST_ARCH),amd64 arm64 armhf riscv64))
+conf_flags += -Donnx=disabled
 endif
 
 ifeq ($(filter gstreamer1.0-opencv,$(built_binaries)),)
@@ -56,21 +70,24 @@ conf_flags += -Dldac=disabled
 endif
 
 ifneq ($(DEB_HOST_ARCH),amd64)
-conf_flags += -Dmsdk=disabled -Dqsv=disabled
+conf_flags += -Dqsv=disabled
 endif
 
 ifneq ($(DEB_HOST_ARCH_OS),linux)
 conf_flags += -Dbluez=disabled -Ddc1394=disabled -Dfbdev=disabled -Dsbc=disabled
 conf_flags += -Dva=disabled -Dv4l2codecs=disabled -Dwpe=disabled -Duvch264=disabled
 conf_flags += -Dvulkan=disabled -Dwayland=disabled -Ddvb=disabled
+conf_flags += -Dopenni2=disabled -Dsctp=disabled -Dwebrtc=disabled
 endif
 
 ifeq ($(DEB_HOST_ARCH_OS),hurd)
-conf_flags += -Dresindvd=disabled -Dnvcodec=disabled
+conf_flags += -Dresindvd=disabled -Dnvcodec=disabled -Dgl=disabled -Dudev=disabled
+conf_flags += -Duvcgadget=disabled -Davtp=disabled
+conf_flags += -Dwebrtcdsp=disabled
 endif
 
 # bookworm backport flags
-conf_flags += -Daja=disabled -Dqt6d3d11=disabled -Dwebrtcdsp=disabled
+conf_flags += -Daja=disabled -Dqt6d3d11=disabled
 
 %:
 	dh $@
@@ -81,9 +98,9 @@ override_dh_auto_configure:
 execute_before_dh_auto_clean:
 	rm -rf $(CURDIR)/fake-home
 
-# Only make the tests fail for key architectures
+# Only make the tests fail for release architectures plus a few more
 override_dh_auto_test:
-ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64))
+ifneq (,$(filter $(DEB_HOST_ARCH), amd64 arm64 armhf i386 ppc64el riscv64 s390x loong64 powerpc ppc64))
 	xvfb-run dh_auto_test
 else
 	xvfb-run dh_auto_test || true
@@ -113,8 +130,9 @@ ifeq ($(DEB_HOST_ARCH_OS),linux)
 	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstv4l2codecs.so
 	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstopenni2.so
 	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstsctp.so
+	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstwebrtc.so
+	dh_install -plibgstreamer-plugins-bad1.0-0 debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/libgstwebrtcnice-1.0.so.* usr/lib/$(DEB_HOST_MULTIARCH)
 ifeq ($(DEB_HOST_ARCH),amd64)
-	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstmsdk.so
 	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstqsv.so
 endif
 endif
@@ -122,10 +140,18 @@ endif
 ifneq ($(DEB_HOST_ARCH_OS),hurd)
 	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstresindvd.so
 	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstnvcodec.so
+	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstavtp.so
+	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstgtkwayland.so
+	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstuvcgadget.so
+	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstwebrtcdsp.so
 endif
 
 ifneq (,$(filter $(DEB_HOST_ARCH),amd64 arm64 armel armhf i386 mips64el ppc64el riscv64 s390x alpha hppa hurd-i386 m68k powerpc ppc64 sparc64))
 	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstzxing.so
+endif
+
+ifneq (,$(filter $(DEB_HOST_ARCH),amd64 arm64 armhf riscv64))
+	dh_install -pgstreamer1.0-plugins-bad debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0/libgstonnx.so
 endif
 
 ifeq ($(DEB_HOST_ARCH_ENDIAN),little)

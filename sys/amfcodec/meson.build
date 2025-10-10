@@ -7,6 +7,23 @@ amf_sources = [
   'plugin.cpp',
 ]
 
+amf_headers = [
+  'gstamfutils.h',
+  'gstamfencoder.h',
+  'gstamfh265enc.h',
+  'gstamfh264enc.h',
+  'gstamfav1enc.h',
+]
+
+doc_sources = []
+foreach s: amf_sources + amf_headers
+  doc_sources += meson.current_source_dir() / s
+endforeach
+
+plugin_sources += {
+  'amfcodec': pathsep.join(doc_sources)
+}
+
 amf_option = get_option('amfcodec')
 if amf_option.disabled()
   subdir_done()
@@ -66,6 +83,9 @@ if cxx.get_id() != 'msvc'
     '-Wno-format',
     '-Wno-format-nonliteral',
     '-Wno-format-security',
+    # ../sys/amfcodec/include/core/PropertyStorage.h:87:50: error: 'virtual void amf::AMFPropertyStorage::RemoveObserver(amf::AMFPropertyStorageObserver*)' was hidden [-Werror=overloaded-virtual=]
+    '-Wno-overloaded-virtual',
+    '-Wno-undef'
   ])
 endif
 

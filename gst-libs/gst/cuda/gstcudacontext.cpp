@@ -26,6 +26,7 @@
 #include "gstcudautils.h"
 #include "gstcudamemory.h"
 #include "gstcuda-private.h"
+#include "gstcudaloader-private.h"
 
 #ifdef G_OS_WIN32
 #include <gst/d3d11/gstd3d11.h>
@@ -53,6 +54,10 @@ enum
   PROP_DXGI_ADAPTER_LUID,
   PROP_VIRTUAL_MEMORY,
   PROP_OS_HANDLE,
+  PROP_STREAM_ORDERED_ALLOC,
+  PROP_PREFER_STREAM_ORDERED_ALLLOC,
+  PROP_EXT_INTEROP,
+  PROP_DEFAULT_GPU_STACK_SIZE,
 };
 
 struct _GstCudaContextPrivate
@@ -63,11 +68,17 @@ struct _GstCudaContextPrivate
   gint64 dxgi_adapter_luid;
   gboolean virtual_memory_supported;
   gboolean os_handle_supported;
+  gboolean stream_ordered_alloc_supported;
+  gboolean prefer_stream_ordered_alloc;
+  gboolean ext_interop_supported;
+  guint default_gpu_stack_size;
 
   gint tex_align;
 
   GHashTable *accessible_peer;
   gboolean owns_context;
+
+  GMutex lock;
 };
 
 #define gst_cuda_context_parent_class parent_class
@@ -139,6 +150,53 @@ gst_cuda_context_class_init (GstCudaContextClass * klass)
           "Whether OS specific handle is supported via virtual memory", FALSE,
           (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
 
+  /**
+   * GstCudaContext:stream-ordered-alloc:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (gobject_class, PROP_STREAM_ORDERED_ALLOC,
+      g_param_spec_boolean ("stream-ordered-alloc", "Stream Ordered Alloc",
+          "Device supports stream ordered allocation", FALSE,
+          (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
+
+  /**
+   * GstCudaContext:prefer-stream-ordered-alloc:
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (gobject_class,
+      PROP_PREFER_STREAM_ORDERED_ALLLOC,
+      g_param_spec_boolean ("prefer-stream-ordered-alloc",
+          "Prefer Stream Ordered Alloc", "Prefers stream ordered allocation",
+          FALSE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  /**
+   * GstCudaContext:external-resource-interop:
+   *
+   * External resource interop API support
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (gobject_class, PROP_EXT_INTEROP,
+      g_param_spec_boolean ("external-resource-interop",
+          "External Resource Interop",
+          "External resource interop API support", FALSE,
+          (GParamFlags) (G_PARAM_READABLE | G_PARAM_STATIC_STRINGS)));
+
+  /**
+   * GstCudaContext:default-gpu-stack-size:
+   *
+   * The default stack size for each GPU thread.
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (gobject_class, PROP_DEFAULT_GPU_STACK_SIZE,
+      g_param_spec_uint ("default-gpu-stack-size",
+          "Default GPU stack size",
+          "The initial stack size for GPU threads", 0, G_MAXUINT, 1024,
+          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
   gst_cuda_memory_init_once ();
 }
 
@@ -149,6 +207,7 @@ gst_cuda_context_init (GstCudaContext * context)
       gst_cuda_context_get_instance_private (context);
 
   priv->accessible_peer = g_hash_table_new (g_direct_hash, g_direct_equal);
+  g_mutex_init (&priv->lock);
 
   context->priv = priv;
 }
@@ -160,10 +219,37 @@ gst_cuda_context_set_property (GObject * object, guint prop_id,
   GstCudaContext *context = GST_CUDA_CONTEXT (object);
   GstCudaContextPrivate *priv = context->priv;
 
+
   switch (prop_id) {
     case PROP_DEVICE_ID:
       priv->device_id = g_value_get_uint (value);
       break;
+    case PROP_PREFER_STREAM_ORDERED_ALLLOC:
+      g_mutex_lock (&priv->lock);
+      priv->prefer_stream_ordered_alloc = g_value_get_boolean (value);
+      g_mutex_unlock (&priv->lock);
+      break;
+    case PROP_DEFAULT_GPU_STACK_SIZE:{
+      guint new_stack_limit = g_value_get_uint (value);
+
+      g_mutex_lock (&priv->lock);
+      if (new_stack_limit != priv->default_gpu_stack_size) {
+        size_t set_value = 0;
+        gst_cuda_context_push (context);
+        if (CuCtxSetLimit (CU_LIMIT_STACK_SIZE,
+                (size_t) new_stack_limit) == CUDA_SUCCESS) {
+          if (CuCtxGetLimit (&set_value, CU_LIMIT_STACK_SIZE) == CUDA_SUCCESS) {
+            priv->default_gpu_stack_size = (guint) set_value;
+            GST_INFO_OBJECT (context,
+                "set default stack size to %" G_GUINT64_FORMAT,
+                (guint64) set_value);
+          }
+        }
+        gst_cuda_context_pop (nullptr);
+      }
+      g_mutex_unlock (&priv->lock);
+      break;
+    }
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -189,6 +275,20 @@ gst_cuda_context_get_property (GObject * object, guint prop_id,
       break;
     case PROP_OS_HANDLE:
       g_value_set_boolean (value, priv->os_handle_supported);
+      break;
+    case PROP_STREAM_ORDERED_ALLOC:
+      g_value_set_boolean (value, priv->stream_ordered_alloc_supported);
+      break;
+    case PROP_PREFER_STREAM_ORDERED_ALLLOC:
+      g_mutex_lock (&priv->lock);
+      g_value_set_boolean (value, priv->prefer_stream_ordered_alloc);
+      g_mutex_unlock (&priv->lock);
+      break;
+    case PROP_EXT_INTEROP:
+      g_value_set_boolean (value, priv->ext_interop_supported);
+      break;
+    case PROP_DEFAULT_GPU_STACK_SIZE:
+      g_value_set_uint (value, priv->default_gpu_stack_size);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -403,6 +503,8 @@ gst_cuda_context_finalize (GObject * object)
     gst_cuda_result (CuCtxDestroy (priv->context));
   }
 
+  g_mutex_clear (&priv->lock);
+
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
@@ -571,8 +673,8 @@ gst_cuda_context_new_wrapped (CUcontext handler, CUdevice device)
 {
   GList *iter;
   gint tex_align = 0;
-
   GstCudaContext *self;
+  size_t default_gpu_stack_size;
 
   g_return_val_if_fail (handler, nullptr);
   g_return_val_if_fail (device >= 0, nullptr);
@@ -592,6 +694,16 @@ gst_cuda_context_new_wrapped (CUcontext handler, CUdevice device)
   self->priv->context = handler;
   self->priv->device = device;
   self->priv->tex_align = tex_align;
+
+  gst_cuda_context_push (self);
+  if (CuCtxGetLimit (&default_gpu_stack_size,
+          CU_LIMIT_STACK_SIZE) == CUDA_SUCCESS) {
+    self->priv->default_gpu_stack_size = (guint) default_gpu_stack_size;
+    GST_DEBUG ("cuda default stack size %" G_GUINT64_FORMAT,
+        (guint64) default_gpu_stack_size);
+  }
+  gst_cuda_context_pop (nullptr);
+
   gst_object_ref_sink (self);
 
 #ifdef G_OS_WIN32
@@ -618,6 +730,19 @@ gst_cuda_context_new_wrapped (CUcontext handler, CUdevice device)
     if (ret == CUDA_SUCCESS && supported)
       self->priv->os_handle_supported = TRUE;
   }
+
+  if (gst_cuda_stream_ordered_symbol_loaded ()) {
+    CUresult ret;
+    int supported = 0;
+
+    ret = CuDeviceGetAttribute (&supported,
+        CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED, device);
+    if (ret == CUDA_SUCCESS && supported)
+      self->priv->stream_ordered_alloc_supported = TRUE;
+  }
+
+  self->priv->ext_interop_supported =
+      gst_cuda_external_resource_interop_symbol_loaded ();
 
   std::lock_guard < std::mutex > lk (list_lock);
   g_object_weak_ref (G_OBJECT (self),

@@ -16,11 +16,15 @@ codecparser_sources = files([
   'vp8utils.c',
   'gstmpegvideometa.c',
   'gstav1parser.c',
+  'gsth266parser.c',
   'gsth264bitwriter.c',
   'gsth265bitwriter.c',
   'gstav1bitwriter.c',
+  'gstvp9bitwriter.c',
+  'gstjpegbitwriter.c',
+  'gstlcevcmeta.c',
 ])
-codecparser_headers = [
+codecparser_headers = files([
   'codecparsers-prelude.h',
   'gstmpegvideoparser.h',
   'gsth264parser.h',
@@ -34,8 +38,19 @@ codecparser_headers = [
   'gstmpegvideometa.h',
   'gstvp9parser.h',
   'gstav1parser.h',
-]
+  'gstlcevcmeta.h',
+  'gsth266parser.h',
+])
 install_headers(codecparser_headers, subdir : 'gstreamer-1.0/gst/codecparsers')
+
+doc_sources = []
+foreach s: codecparser_sources + codecparser_headers
+  doc_sources += s.full_path()
+endforeach
+
+libs_c_sources += {
+  'codecparsers': pathsep.join(doc_sources)
+}
 
 cp_args = [
   '-DGST_USE_UNSTABLE_API',
@@ -54,7 +69,7 @@ gstcodecparsers = library('gstcodecparsers-' + api_version,
   soversion : soversion,
   darwin_versions : osxversion,
   install : true,
-  dependencies : [gstbase_dep, libm],
+  dependencies : [gstbase_dep],
 )
 
 pkg_name = 'gstreamer-codecparsers-1.0'

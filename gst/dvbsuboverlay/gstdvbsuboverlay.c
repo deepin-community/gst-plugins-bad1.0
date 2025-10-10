@@ -833,7 +833,8 @@ new_dvb_subtitles_cb (DvbSub * dvb_sub, DVBSubtitles * subs, gpointer user_data)
 
   subs->page_time_out = stop - start;
 
-  gst_segment_to_running_time (&overlay->subtitle_segment, GST_FORMAT_TIME,
+  start =
+      gst_segment_to_running_time (&overlay->subtitle_segment, GST_FORMAT_TIME,
       start);
   g_assert (GST_CLOCK_TIME_IS_VALID (start));
   subs->pts = start;
@@ -1226,6 +1227,7 @@ gst_dvbsub_overlay_event_video (GstPad * pad, GstObject * parent,
     }
     case GST_EVENT_FLUSH_STOP:
       gst_segment_init (&render->video_segment, GST_FORMAT_TIME);
+      /* FALLTHROUGH */
     default:
       ret = gst_pad_push_event (render->srcpad, event);
       break;

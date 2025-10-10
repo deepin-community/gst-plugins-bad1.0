@@ -32,6 +32,8 @@
  * @title: GstWebRTC Enumerations
  */
 
+G_BEGIN_DECLS
+
 #ifndef GST_WEBRTC_API
 # ifdef BUILDING_GST_WEBRTC
 #  define GST_WEBRTC_API GST_API_EXPORT         /* from config.h */
@@ -53,8 +55,6 @@
 #define GST_WEBRTC_DEPRECATED G_DEPRECATED GST_WEBRTC_API
 #define GST_WEBRTC_DEPRECATED_FOR(f) G_DEPRECATED_FOR(f) GST_WEBRTC_API
 #endif
-
-#include <gst/webrtc/webrtc-enumtypes.h>
 
 /**
  * GstWebRTCDTLSTransport:
@@ -447,7 +447,7 @@ typedef enum /*<underscore_name=gst_webrtc_ice_transport_policy>*/
  * GstWebRTCKind:
  * @GST_WEBRTC_KIND_UNKNOWN: Kind has not yet been set
  * @GST_WEBRTC_KIND_AUDIO: Kind is audio
- * @GST_WEBRTC_KIND_VIDEO: Kind is audio
+ * @GST_WEBRTC_KIND_VIDEO: Kind is video
  *
  * https://w3c.github.io/mediacapture-main/#dom-mediastreamtrack-kind
  *
@@ -515,5 +515,7 @@ typedef enum /*<underscore_name=gst_webrtc_error>*/
   GST_WEBRTC_ERROR_INVALID_MODIFICATION,
   GST_WEBRTC_ERROR_TYPE_ERROR,
 } GstWebRTCError;
+
+G_END_DECLS
 
 #endif /* __GST_WEBRTC_FWD_H__ */

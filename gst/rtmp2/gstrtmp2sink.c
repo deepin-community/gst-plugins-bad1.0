@@ -151,6 +151,7 @@ enum
   PROP_CHUNK_SIZE,
   PROP_STATS,
   PROP_STOP_COMMANDS,
+  PROP_EXTRA_CONNECT_ARGS,
 };
 
 /* pad templates */
@@ -246,6 +247,28 @@ gst_rtmp2_sink_class_init (GstRtmp2SinkClass * klass)
           "RTMP commands to send on EOS event before closing connection",
           GST_TYPE_RTMP_STOP_COMMANDS, GST_RTMP_DEFAULT_STOP_COMMANDS,
           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
+  /**
+   * GstRtmp2Sink:extra-connect-args:
+   *
+   * Parse and append librtmp-style arbitrary data to the "connect" command.
+   * It can be used for non-standard authentication with some servers.
+   *
+   * The format is a whitespace-separated series of "conn=type:data" strings.
+   * Valid types are:
+   *
+   * - "B" for boolean with "0" and "1" for false and true, respectively, e.g.
+   *   "conn=B:1".
+   * - "N" for numbers in double format, e.g. "conn=N:1.23".
+   * - "S" for strings, e.g. "conn=S:somepassword".
+   * - "O" for objects and "N"-prefixed named values are not yet supported.
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (gobject_class, PROP_EXTRA_CONNECT_ARGS,
+      g_param_spec_string ("extra-connect-args", "librtmp-style arbitrary data",
+          "librtmp-style arbitrary data to be appended to the \"connect\" command",
+          NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_type_mark_as_plugin_api (GST_TYPE_RTMP_LOCATION_HANDLER, 0);
   GST_DEBUG_CATEGORY_INIT (gst_rtmp2_sink_debug_category, "rtmp2sink", 0,
@@ -386,6 +409,12 @@ gst_rtmp2_sink_set_property (GObject * object, guint property_id,
       self->stop_commands = g_value_get_flags (value);
       GST_OBJECT_UNLOCK (self);
       break;
+    case PROP_EXTRA_CONNECT_ARGS:
+      GST_OBJECT_LOCK (self);
+      g_free (self->location.extra_connect_args);
+      self->location.extra_connect_args = g_value_dup_string (value);
+      GST_OBJECT_UNLOCK (self);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
       break;
@@ -488,6 +517,11 @@ gst_rtmp2_sink_get_property (GObject * object, guint property_id,
       g_value_set_flags (value, self->stop_commands);
       GST_OBJECT_UNLOCK (self);
       break;
+    case PROP_EXTRA_CONNECT_ARGS:
+      GST_OBJECT_LOCK (self);
+      g_value_set_string (value, self->location.extra_connect_args);
+      GST_OBJECT_UNLOCK (self);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
       break;
@@ -533,8 +567,8 @@ gst_rtmp2_sink_start (GstBaseSink * sink)
   self->running = TRUE;
   self->cancellable = g_cancellable_new ();
   self->stream_id = 0;
-  self->last_ts = 0;
-  self->base_ts = 0;
+  self->last_ts = GST_CLOCK_TIME_NONE;
+  self->base_ts = GST_CLOCK_TIME_NONE;
 
   if (async) {
     gst_task_start (self->task);
@@ -700,27 +734,31 @@ buffer_to_message (GstRtmp2Sink * self, GstBuffer * buffer, GstBuffer ** outbuf)
 
     /* flvmux timestamps roll over after about 49 days */
     timestamp = header.timestamp;
-    if (timestamp + self->base_ts + G_MAXINT32 < self->last_ts) {
-      GST_WARNING_OBJECT (self, "Timestamp regression %" G_GUINT64_FORMAT
-          " -> %" G_GUINT64_FORMAT "; assuming overflow", self->last_ts,
-          timestamp + self->base_ts);
-      self->base_ts += G_MAXUINT32;
-      self->base_ts += 1;
-    } else if (timestamp + self->base_ts > self->last_ts + G_MAXINT32) {
-      GST_WARNING_OBJECT (self, "Timestamp jump %" G_GUINT64_FORMAT
-          " -> %" G_GUINT64_FORMAT "; assuming underflow", self->last_ts,
-          timestamp + self->base_ts);
-      if (self->base_ts > 0) {
-        self->base_ts -= G_MAXUINT32;
-        self->base_ts -= 1;
-      } else {
-        GST_WARNING_OBJECT (self, "Cannot regress further;"
-            " forcing timestamp to zero");
-        timestamp = 0;
+    if (self->base_ts == GST_CLOCK_TIME_NONE) {
+      self->last_ts = self->base_ts = timestamp;
+    } else {
+      if (timestamp + self->base_ts + G_MAXINT32 < self->last_ts) {
+        GST_WARNING_OBJECT (self, "Timestamp regression %" G_GUINT64_FORMAT
+            " -> %" G_GUINT64_FORMAT "; assuming overflow", self->last_ts,
+            timestamp + self->base_ts);
+        self->base_ts += G_MAXUINT32;
+        self->base_ts += 1;
+      } else if (timestamp + self->base_ts > self->last_ts + G_MAXINT32) {
+        GST_WARNING_OBJECT (self, "Timestamp jump %" G_GUINT64_FORMAT
+            " -> %" G_GUINT64_FORMAT "; assuming underflow", self->last_ts,
+            timestamp + self->base_ts);
+        if (self->base_ts > 0) {
+          self->base_ts -= G_MAXUINT32;
+          self->base_ts -= 1;
+        } else {
+          GST_WARNING_OBJECT (self, "Cannot regress further;"
+              " forcing timestamp to zero");
+          timestamp = 0;
+        }
       }
+      timestamp += self->base_ts;
+      self->last_ts = timestamp;
     }
-    timestamp += self->base_ts;
-    self->last_ts = timestamp;
 
     gst_buffer_unmap (buffer, &info);
   }

@@ -202,8 +202,8 @@ gst_va_base_dec_src_query (GstVideoDecoder * decoder, GstQuery * query)
         ret = TRUE;
         break;
       }
-      /* else jump to default */
     }
+      /* FALLTHROUGH */
     default:
       ret = GST_VIDEO_DECODER_CLASS (GST_VA_BASE_DEC_GET_PARENT_CLASS
           (decoder))->src_query (decoder, query);
@@ -266,7 +266,7 @@ _decide_allocation_for_video_crop (GstVideoDecoder * decoder,
     GstQuery * query, GstCaps * caps)
 {
   GstAllocator *allocator = NULL, *other_allocator = NULL;
-  GstAllocationParams other_params, params;
+  GstAllocationParams other_params = { 0, }, params = { 0, };
   gboolean update_pool = FALSE, update_allocator = FALSE;
   GstBufferPool *pool = NULL, *other_pool = NULL;
   guint size = 0, min, max, usage_hint;
@@ -372,7 +372,7 @@ _decide_allocation_for_video_crop (GstVideoDecoder * decoder,
 
   va_caps = gst_caps_copy (caps);
   gst_caps_set_features_simple (va_caps,
-      gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_VA));
+      gst_caps_features_new_single_static_str (GST_CAPS_FEATURE_MEMORY_VA));
 
   if (!(allocator = _create_allocator (base, va_caps)))
     goto cleanup;
@@ -475,7 +475,7 @@ static gboolean
 gst_va_base_dec_decide_allocation (GstVideoDecoder * decoder, GstQuery * query)
 {
   GstAllocator *allocator = NULL, *other_allocator = NULL;
-  GstAllocationParams other_params, params;
+  GstAllocationParams other_params = { 0, }, params = { 0, };
   GstBufferPool *pool = NULL, *other_pool = NULL;
   GstCaps *caps = NULL;
   GstVaBaseDec *base = GST_VA_BASE_DEC (decoder);
@@ -658,8 +658,7 @@ gst_va_base_dec_set_context (GstElement * element, GstContext * context)
   if (!ret
       || (old_display && new_display && old_display != new_display
           && base->decoder)) {
-    GST_ELEMENT_WARNING (base, RESOURCE, BUSY,
-        ("Can't replace VA display while operating"), (NULL));
+    GST_WARNING_OBJECT (base, "Can't replace VA display while operating");
   }
 
   gst_clear_object (&old_display);
@@ -674,27 +673,39 @@ gst_va_base_dec_negotiate (GstVideoDecoder * decoder)
 {
   GstVaBaseDec *base = GST_VA_BASE_DEC (decoder);
 
-  /* Ignore downstream renegotiation request. */
-  if (!base->need_negotiation)
-    return TRUE;
+  /* Do not (re-)open the decoder in case the input state hasn't changed. */
+  if (!base->need_negotiation) {
+    GST_DEBUG_OBJECT (decoder,
+        "Input state hasn't changed, no need to (re-)open the decoder");
+    goto done;
+  }
 
   base->need_negotiation = FALSE;
 
   if (!gst_va_decoder_config_is_equal (base->decoder, base->profile,
           base->rt_format, base->width, base->height)) {
     if (gst_va_decoder_is_open (base->decoder) &&
-        !gst_va_decoder_close (base->decoder))
+        !gst_va_decoder_close (base->decoder)) {
+      GST_WARNING_OBJECT (decoder, "Failed to close decoder");
       return FALSE;
-    if (!gst_va_decoder_open (base->decoder, base->profile, base->rt_format))
+    }
+    if (!gst_va_decoder_open (base->decoder, base->profile, base->rt_format)) {
+      GST_WARNING_OBJECT (decoder, "Failed to open decoder");
       return FALSE;
+    }
     if (!gst_va_decoder_set_frame_size (base->decoder, base->width,
-            base->height))
+            base->height)) {
+      GST_WARNING_OBJECT (decoder, "Failed to set frame size");
       return FALSE;
+    }
   }
 
-  if (!gst_va_base_dec_set_output_state (base))
+  if (!gst_va_base_dec_set_output_state (base)) {
+    GST_WARNING_OBJECT (decoder, "Failed to set output state");
     return FALSE;
+  }
 
+done:
   return GST_VIDEO_DECODER_CLASS (GST_VA_BASE_DEC_GET_PARENT_CLASS (decoder))
       ->negotiate (decoder);
 }
@@ -849,13 +860,13 @@ gst_va_base_dec_get_preferred_format_and_caps_features (GstVaBaseDec * base,
   GstCapsFeatures *features;
   guint num_structures, i, j;
   gboolean is_any;
-  /* array designators might not be supported by some compilers */
-  const GQuark feats[] = {
-    /* [VA] = */ g_quark_from_string (GST_CAPS_FEATURE_MEMORY_VA),
-    /* [DMABUF] = */ g_quark_from_string (GST_CAPS_FEATURE_MEMORY_DMABUF),
-    /* [SYSMEM] = */
-    g_quark_from_string (GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY),
-  };
+  GstIdStr sysmem = GST_ID_STR_INIT, dmabuf = GST_ID_STR_INIT, va =
+      GST_ID_STR_INIT;
+  const GstIdStr *feats[] = { &va, &dmabuf, &sysmem };
+
+  gst_id_str_set_static_str (&sysmem, GST_CAPS_FEATURE_MEMORY_SYSTEM_MEMORY);
+  gst_id_str_set_static_str (&dmabuf, GST_CAPS_FEATURE_MEMORY_DMABUF);
+  gst_id_str_set_static_str (&va, GST_CAPS_FEATURE_MEMORY_VA);
 
   g_return_if_fail (base);
 
@@ -898,7 +909,7 @@ gst_va_base_dec_get_preferred_format_and_caps_features (GstVaBaseDec * base,
       guint64 mod = 0;
 
       features = gst_caps_get_features (allowed_caps, j);
-      if (!gst_caps_features_contains_id (features, feats[i]))
+      if (!gst_caps_features_contains_id_str (features, feats[i]))
         continue;
 
       structure = gst_caps_get_structure (allowed_caps, j);
@@ -919,7 +930,7 @@ gst_va_base_dec_get_preferred_format_and_caps_features (GstVaBaseDec * base,
       if (i == DMABUF && modifier)
         *modifier = mod;
       if (capsfeatures)
-        *capsfeatures = gst_caps_features_new_id (feats[i], NULL);
+        *capsfeatures = gst_caps_features_new_id_str (feats[i], NULL);
 
       goto bail;
     }

@@ -30,7 +30,7 @@
 #include "gstmsdkcaps.h"
 
 #ifndef _WIN32
-#include <libdrm/drm_fourcc.h>
+#include <drm_fourcc.h>
 #include <gst/va/gstvavideoformat.h>
 #else
 #include <gst/d3d11/gstd3d11.h>
@@ -196,15 +196,17 @@ fixate_output_format (GstMsdkVPP * thiz, GstVideoInfo * vinfo, GstCaps * caps)
 #ifndef _WIN32
   if (is_va)
     gst_caps_set_features (ret, 0,
-        gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_VA));
+        gst_caps_features_new_single_static_str (GST_CAPS_FEATURE_MEMORY_VA));
 #else
   if (is_d3d)
     gst_caps_set_features (ret, 0,
-        gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY));
+        gst_caps_features_new_single_static_str
+        (GST_CAPS_FEATURE_MEMORY_D3D11_MEMORY));
 #endif
   else if (is_dma)
     gst_caps_set_features (ret, 0,
-        gst_caps_features_from_string (GST_CAPS_FEATURE_MEMORY_DMABUF));
+        gst_caps_features_new_single_static_str
+        (GST_CAPS_FEATURE_MEMORY_DMABUF));
 
   return ret;
 }
@@ -689,6 +691,7 @@ _get_preferred_src_caps (GstMsdkVPP * thiz, GstVideoInfo * vinfo,
   GstStructure *structure = NULL;
   GstCaps *outcaps, *fixate_caps;
   GstCapsFeatures *features;
+  gchar *colorimetry = NULL;
 
   /* Fixate the format */
   fixate_caps = fixate_output_format (thiz, vinfo, srccaps);
@@ -719,7 +722,12 @@ _get_preferred_src_caps (GstMsdkVPP * thiz, GstVideoInfo * vinfo,
   if (!set_multiview_mode (thiz, vinfo, structure))
     goto fixate_failed;
 
-  /*Fixme: Set colorimetry */
+  /* set colorimetry based on input info */
+  if ((colorimetry = gst_video_colorimetry_to_string (&vinfo->colorimetry))) {
+    gst_structure_set (structure, "colorimetry", G_TYPE_STRING, colorimetry,
+        NULL);
+    g_free (colorimetry);
+  }
 
   /* set interlace mode */
   if (!set_interlace_mode (thiz, vinfo, structure))

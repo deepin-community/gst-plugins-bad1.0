@@ -12,7 +12,6 @@ usr/lib/*/gstreamer-1.0/libgstaudiolatency.so
 usr/lib/*/gstreamer-1.0/libgstaudiomixmatrix.so
 usr/lib/*/gstreamer-1.0/libgstaudiovisualizers.so
 usr/lib/*/gstreamer-1.0/libgstautoconvert.so
-usr/lib/*/gstreamer-1.0/libgstavtp.so
 usr/lib/*/gstreamer-1.0/libgstbayer.so
 usr/lib/*/gstreamer-1.0/libgstbs2b.so
 usr/lib/*/gstreamer-1.0/libgstbz2.so
@@ -27,7 +26,6 @@ usr/lib/*/gstreamer-1.0/libgstcurl.so
 usr/lib/*/gstreamer-1.0/libgstdash.so
 usr/lib/*/gstreamer-1.0/libgstde265.so
 usr/lib/*/gstreamer-1.0/libgstdebugutilsbad.so
-usr/lib/*/gstreamer-1.0/libgstdirectfb.so
 usr/lib/*/gstreamer-1.0/libgstdtls.so
 usr/lib/*/gstreamer-1.0/libgstdtsdec.so
 usr/lib/*/gstreamer-1.0/libgstdvbsubenc.so
@@ -46,7 +44,6 @@ usr/lib/*/gstreamer-1.0/libgstgdp.so
 usr/lib/*/gstreamer-1.0/libgstgeometrictransform.so
 usr/lib/*/gstreamer-1.0/libgstgme.so
 usr/lib/*/gstreamer-1.0/libgstgsm.so
-usr/lib/*/gstreamer-1.0/libgstgtkwayland.so
 usr/lib/*/gstreamer-1.0/libgsthls.so
 usr/lib/*/gstreamer-1.0/libgstid3tag.so
 usr/lib/*/gstreamer-1.0/libgstinter.so
@@ -116,7 +113,6 @@ usr/lib/*/gstreamer-1.0/libgstvmnc.so
 usr/lib/*/gstreamer-1.0/libgstvoaacenc.so
 usr/lib/*/gstreamer-1.0/libgstvoamrwbenc.so
 usr/lib/*/gstreamer-1.0/libgstwebp.so
-usr/lib/*/gstreamer-1.0/libgstwebrtc.so
 usr/lib/*/gstreamer-1.0/libgstwildmidi.so
 usr/lib/*/gstreamer-1.0/libgstx265.so
 usr/lib/*/gstreamer-1.0/libgsty4mdec.so
@@ -128,6 +124,6 @@ usr/lib/*/gstreamer-1.0/libgstlc3.so
 usr/lib/*/gstreamer-1.0/libgstmse.so
 usr/lib/*/gstreamer-1.0/libgstsvtav1.so
 usr/lib/*/gstreamer-1.0/libgstunixfd.so
-usr/lib/*/gstreamer-1.0/libgstuvcgadget.so
+usr/lib/*/gstreamer-1.0/libgsttensordecoders.so
 usr/share/gstreamer-1.0/presets/
 usr/share/locale

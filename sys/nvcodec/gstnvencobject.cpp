@@ -145,11 +145,14 @@ GstNvEncObject::IsSuccess (NVENCSTATUS status, GstNvEncObject * self,
 
 #ifndef GST_DISABLE_GST_DEBUG
   const gchar *status_str = nvenc_status_to_string (status);
+  const gchar *error_detail = nullptr;
+  if (self && self->session_)
+    error_detail = NvEncGetLastErrorString (self->session_);
 
   if (self) {
     gst_debug_log_id (GST_CAT_DEFAULT, GST_LEVEL_ERROR, file, function,
-        line, self->id_.c_str (), "NvEnc API call failed: 0x%x, %s",
-        (guint) status, status_str);
+        line, self->id_.c_str (), "NvEnc API call failed: 0x%x, %s (%s)",
+        (guint) status, status_str, GST_STR_NULL (error_detail));
   } else {
     gst_debug_log (GST_CAT_DEFAULT, GST_LEVEL_ERROR, file, function,
       line, nullptr, "NvEnc API call failed: 0x%x, %s",
@@ -293,8 +296,11 @@ GstNvEncObject::InitSession (NV_ENC_INITIALIZE_PARAMS * params,
 
   if (memcmp (&params->encodeGUID, &NV_ENC_CODEC_H264_GUID, sizeof (GUID)) == 0) {
     codec_ = GST_NV_ENC_CODEC_H264;
-  } else {
+  } else if (memcmp (&params->encodeGUID,
+      &NV_ENC_CODEC_HEVC_GUID, sizeof (GUID)) == 0) {
     codec_ = GST_NV_ENC_CODEC_H265;
+  } else {
+    codec_ = GST_NV_ENC_CODEC_AV1;
   }
 
   info_ = *info;
@@ -312,6 +318,20 @@ GstNvEncObject::InitSession (NV_ENC_INITIALIZE_PARAMS * params,
     case GST_VIDEO_FORMAT_Y444_16LE:
     case GST_VIDEO_FORMAT_GBR_16LE:
       buffer_format_ = NV_ENC_BUFFER_FORMAT_YUV444_10BIT;
+      break;
+    case GST_VIDEO_FORMAT_VUYA:
+      buffer_format_ = NV_ENC_BUFFER_FORMAT_AYUV;
+      break;
+    case GST_VIDEO_FORMAT_RGBA:
+    case GST_VIDEO_FORMAT_RGBx:
+      buffer_format_ = NV_ENC_BUFFER_FORMAT_ABGR;
+      break;
+    case GST_VIDEO_FORMAT_BGRA:
+    case GST_VIDEO_FORMAT_BGRx:
+      buffer_format_ = NV_ENC_BUFFER_FORMAT_ARGB;
+      break;
+    case GST_VIDEO_FORMAT_RGB10A2_LE:
+      buffer_format_ = NV_ENC_BUFFER_FORMAT_ABGR10;
       break;
     default:
       GST_ERROR_ID (id_.c_str (), "Unexpected format %s",
@@ -670,10 +690,11 @@ GstNvEncObject::runResourceGC ()
   GST_LOG_ID (id_.c_str (), "Running resource GC");
 
   DeviceLock ();
-  for (auto it : resource_queue_) {
-    if (active_resource_queue_.find (it) == active_resource_queue_.end ()) {
-      releaseResourceUnlocked (it);
-      resource_queue_.erase (it);
+  for (auto it = resource_queue_.begin(); it != resource_queue_.end();) {
+    auto current = it++;
+    if (active_resource_queue_.find (*current) == active_resource_queue_.end ()) {
+      releaseResourceUnlocked (*current);
+      resource_queue_.erase (*current);
     }
   }
   DeviceUnlock ();
@@ -701,8 +722,8 @@ GstNvEncObject::DeviceUnlock ()
 }
 
 NVENCSTATUS
-GstNvEncObject::acquireResourceCuda (GstMemory * mem,
-    GstNvEncResource ** resource)
+GstNvEncObject::acquireResourceCuda (GstMemory * mem, guint width, guint height,
+      guint stride, GstNvEncResource ** resource)
 {
   GstNvEncResource *res;
   GstCudaMemory *cmem;
@@ -710,11 +731,6 @@ GstNvEncObject::acquireResourceCuda (GstMemory * mem,
   NV_ENC_MAP_INPUT_RESOURCE mapped_resource;
   NVENCSTATUS status;
   GstMapInfo info;
-
-  if (!gst_is_cuda_memory (mem)) {
-    GST_ERROR_ID (id_.c_str (), "Not a CUDA memory");
-    return NV_ENC_ERR_INVALID_CALL;
-  }
 
   cmem = GST_CUDA_MEMORY_CAST (mem);
 
@@ -740,9 +756,9 @@ GstNvEncObject::acquireResourceCuda (GstMemory * mem,
 
   new_resource.version = gst_nvenc_get_register_resource_version ();
   new_resource.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR;
-  new_resource.width = cmem->info.width;
-  new_resource.height = cmem->info.height;
-  new_resource.pitch = cmem->info.stride[0];
+  new_resource.width = width;
+  new_resource.height = height;
+  new_resource.pitch = stride;
   new_resource.resourceToRegister = info.data;
   new_resource.bufferFormat = buffer_format_;
 
@@ -874,8 +890,42 @@ GstNvEncObject::AcquireResource (GstMemory * mem, GstNvEncResource ** resource)
   } else
 #endif
   {
-    status = acquireResourceCuda (mem, resource);
+    if (!gst_is_cuda_memory (mem)) {
+      GST_ERROR_ID (id_.c_str (), "Not a CUDA memory");
+      return NV_ENC_ERR_INVALID_CALL;
+    }
+
+    auto cmem = GST_CUDA_MEMORY_CAST (mem);
+    auto width = cmem->info.width;
+    auto height = cmem->info.height;
+    auto stride = cmem->info.stride[0];
+
+    status = acquireResourceCuda (mem, width, height, stride, resource);
   }
+
+  if (status == NV_ENC_SUCCESS) {
+    GST_TRACE_ID (id_.c_str (), "Returning resource %u, "
+        "resource queue size %u (active %u)",
+        (*resource)->seq_num, (guint) resource_queue_.size (),
+        (guint) active_resource_queue_.size ());
+  }
+
+  return status;
+}
+
+NVENCSTATUS
+GstNvEncObject::AcquireResourceWithSize (GstMemory * mem,
+  guint width, guint height, guint stride, GstNvEncResource ** resource)
+{
+  NVENCSTATUS status;
+  std::lock_guard <std::recursive_mutex> lk (resource_lock_);
+
+  if (!gst_is_cuda_memory (mem)) {
+    GST_ERROR_ID (id_.c_str (), "Not a CUDA memory");
+    return NV_ENC_ERR_INVALID_CALL;
+  }
+
+  status = acquireResourceCuda (mem, width, height, stride, resource);
 
   if (status == NV_ENC_SUCCESS) {
     GST_TRACE_ID (id_.c_str (), "Returning resource %u, "

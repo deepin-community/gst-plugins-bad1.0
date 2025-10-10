@@ -47,7 +47,7 @@
 
 #include "gstd3d12dxgicapture.h"
 #include "gstd3d12pluginutils.h"
-#include <d3d11_3.h>
+#include <d3d11_4.h>
 #include <directx/d3dx12.h>
 #include <string.h>
 #include <mutex>
@@ -55,8 +55,8 @@
 #include <memory>
 #include <future>
 #include <wrl.h>
-#include "PSMain_sample.h"
-#include "VSMain_coord.h"
+#include <gst/d3dshader/gstd3dshader.h>
+#include <gmodule.h>
 
 #define _XM_NO_INTRINSICS_
 #include <DirectXMath.h>
@@ -75,15 +75,6 @@ static GList *g_dupl_list = nullptr;
 /* Below implementation were taken from Microsoft sample
  * https://github.com/microsoft/Windows-classic-samples/tree/master/Samples/DXGIDesktopDuplication
  */
-
-/* List of expected error cases */
-/* These are the errors we expect from general Dxgi API due to a transition */
-static HRESULT SystemTransitionsExpectedErrors[] = {
-  DXGI_ERROR_DEVICE_REMOVED,
-  DXGI_ERROR_ACCESS_LOST,
-  static_cast<HRESULT>(WAIT_ABANDONED),
-  S_OK
-};
 
 /* These are the errors we expect from IDXGIOutput1::DuplicateOutput
  * due to a transition */
@@ -144,6 +135,110 @@ flow_return_from_hr (ID3D11Device * device,
   }
 
   return GST_FLOW_ERROR;
+}
+
+static guint
+get_sdr_white_level (PCWSTR name)
+{
+  LONG ret = ERROR_SUCCESS;
+  std::vector < DISPLAYCONFIG_PATH_INFO > path_info;
+  std::vector < DISPLAYCONFIG_MODE_INFO > mode_info;
+  gint retry_count = 0;
+  guint nits = 80;
+
+  /* QueryDisplayConfig() may return ERROR_INSUFFICIENT_BUFFER if there was
+   * configuration update between GetDisplayConfigBufferSizes() and
+   * QueryDisplayConfig() call. */
+  while (1) {
+    UINT32 n_path = 0;
+    UINT32 n_mode = 0;
+
+    ret = GetDisplayConfigBufferSizes (QDC_ONLY_ACTIVE_PATHS, &n_path, &n_mode);
+    if (ret != ERROR_SUCCESS) {
+      GST_WARNING ("GetDisplayConfigBufferSizes failed %d", (gint) ret);
+      return nits;
+    }
+
+    path_info.resize (n_path);
+    mode_info.resize (n_mode);
+
+    ret = QueryDisplayConfig (QDC_ONLY_ACTIVE_PATHS, &n_path, path_info.data (),
+        &n_mode, mode_info.data (), nullptr);
+    if (ret == ERROR_INSUFFICIENT_BUFFER) {
+      /* XXX: avoid infinite loop */
+      retry_count++;
+      if (retry_count > 100) {
+        GST_WARNING ("Too many retry, give up");
+        return nits;
+      }
+
+      GST_DEBUG ("Insufficient buffer, retrying");
+      continue;
+    } else if (ret != ERROR_SUCCESS) {
+      GST_WARNING ("QueryDisplayConfig failed %d", (gint) ret);
+      return nits;
+    }
+
+    path_info.resize (n_path);
+    mode_info.resize (n_mode);
+    break;
+  }
+
+  for (size_t i = 0; i < path_info.size (); i++) {
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME src_name = { };
+    src_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+    src_name.header.size = sizeof (DISPLAYCONFIG_SOURCE_DEVICE_NAME);
+    src_name.header.adapterId = path_info[i].sourceInfo.adapterId;
+    src_name.header.id = path_info[i].sourceInfo.id;
+
+    ret = DisplayConfigGetDeviceInfo (&src_name.header);
+    if (ret == ERROR_SUCCESS && wcscmp (name, src_name.viewGdiDeviceName) == 0) {
+      DISPLAYCONFIG_SDR_WHITE_LEVEL level;
+      level.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+      level.header.size = sizeof (level);
+      level.header.adapterId = path_info[i].targetInfo.adapterId;
+      level.header.id = path_info[i].targetInfo.id;
+      ret = DisplayConfigGetDeviceInfo (&level.header);
+      if (ret != ERROR_SUCCESS) {
+        GST_WARNING ("Couldn't get SDR white level info");
+        return nits;
+      }
+
+      return (level.SDRWhiteLevel * 80) / 1000;
+    }
+  }
+
+  return nits;
+}
+
+struct DxgiCaptureVTable
+{
+  gboolean loaded;
+  DPI_AWARENESS_CONTEXT (WINAPI * SetThreadDpiAwarenessContext) (DPI_AWARENESS_CONTEXT context);
+};
+
+static DxgiCaptureVTable g_vtable = { };
+
+static gboolean
+gst_d3d12_dxgi_capture_load_library (void)
+{
+  static GModule *user32_module = nullptr;
+
+  GST_D3D12_CALL_ONCE_BEGIN {
+    g_vtable.loaded = FALSE;
+    user32_module = g_module_open ("user32.dll", G_MODULE_BIND_LAZY);
+    if (!user32_module)
+      return;
+
+    if (!g_module_symbol (user32_module, "SetThreadDpiAwarenessContext",
+        (gpointer *) &g_vtable.SetThreadDpiAwarenessContext)) {
+      return;
+    }
+
+    g_vtable.loaded = TRUE;
+  } GST_D3D12_CALL_ONCE_END;
+
+  return g_vtable.loaded;
 }
 
 struct PtrInfo
@@ -263,17 +358,16 @@ struct PtrInfo
   UINT64 token_ = 0;
 };
 
-struct MoveRectData
-{
-  RECT src_rect;
-  RECT dst_rect;
-  D3D12_BOX box;
-};
-
 struct VERTEX
 {
   XMFLOAT3 Pos;
   XMFLOAT2 TexCoord;
+};
+
+struct PSConstBuffer
+{
+  float sdr_white_level;
+  float padding[3];
 };
 
 class DesktopDupCtx
@@ -281,11 +375,25 @@ class DesktopDupCtx
 public:
   DesktopDupCtx () {}
 
-  GstFlowReturn Init (HMONITOR monitor)
+  ~DesktopDupCtx ()
+  {
+    if (context_) {
+      context_->ClearState ();
+      context_->Flush ();
+    }
+  }
+
+  GstFlowReturn Init (HMONITOR monitor, ID3D11Device5 * device,
+      ID3D11DeviceContext4 * context, ID3D11Fence * fence,
+      ID3D11SamplerState * sampler, ID3D11PixelShader * ps,
+      ID3D11PixelShader * ps_scrgb, ID3D11PixelShader * ps_scrgb_tonemap,
+      ID3D11Buffer * ps_cbuf, ID3D11VertexShader * vs,
+      ID3D11InputLayout * layout, gboolean use_reinhard)
   {
     ComPtr<IDXGIAdapter1> adapter;
     ComPtr<IDXGIOutput> output;
     ComPtr<IDXGIOutput1> output1;
+    ComPtr<IDXGIOutput6> output6;
 
     HRESULT hr = gst_d3d12_screen_capture_find_output_for_monitor (monitor,
         &adapter, &output);
@@ -300,42 +408,73 @@ public:
       return GST_FLOW_ERROR;
     }
 
-    HDESK hdesk = OpenInputDesktop (0, FALSE, GENERIC_ALL);
+    PSConstBuffer cbuf;
+    cbuf.sdr_white_level = 80.0;
+    gboolean is_hdr = FALSE;
+
+    if (gst_d3d12_dxgi_capture_load_library ()) {
+      hr = output.As (&output6);
+      if (SUCCEEDED (hr)) {
+        DXGI_OUTPUT_DESC1 desc1;
+        hr = output6->GetDesc1 (&desc1);
+        if (SUCCEEDED (hr) &&
+            desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) {
+          is_hdr = TRUE;
+
+          MONITORINFOEXW monitor_info = { };
+          monitor_info.cbSize = sizeof (MONITORINFOEXW);
+          if (GetMonitorInfoW (desc1.Monitor, (LPMONITORINFO) & monitor_info))
+            cbuf.sdr_white_level = get_sdr_white_level (monitor_info.szDevice);
+        }
+      }
+    }
+
+    auto prev_hdesk = GetThreadDesktop (GetCurrentThreadId ());
+    auto hdesk = OpenInputDesktop (0, FALSE, GENERIC_ALL);
     if (hdesk) {
       if (!SetThreadDesktop (hdesk)) {
         GST_WARNING ("SetThreadDesktop() failed, error %lu", GetLastError());
       }
 
-      CloseDesktop (hdesk);
     } else {
       GST_WARNING ("OpenInputDesktop() failed, error %lu", GetLastError());
     }
 
-    static const D3D_FEATURE_LEVEL feature_levels[] = {
-      D3D_FEATURE_LEVEL_11_1,
-      D3D_FEATURE_LEVEL_11_0,
-      D3D_FEATURE_LEVEL_10_1,
-      D3D_FEATURE_LEVEL_10_0,
-    };
+    hr = E_FAIL;
+    output_format_ = DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (is_hdr) {
+      DXGI_FORMAT formats[] = {
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+      };
 
-    hr = D3D11CreateDevice (adapter.Get (), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT, feature_levels,
-        G_N_ELEMENTS (feature_levels), D3D11_SDK_VERSION, &device_, nullptr,
-        nullptr);
-    if (FAILED (hr)) {
-      hr = D3D11CreateDevice (adapter.Get (), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-          D3D11_CREATE_DEVICE_BGRA_SUPPORT, &feature_levels[1],
-          G_N_ELEMENTS (feature_levels) - 1, D3D11_SDK_VERSION, &device_,
-          nullptr, nullptr);
+      /* XXX: DuplicateOutput1() would fail if dpi awareness is not configured */
+      auto prev_ctx = g_vtable.SetThreadDpiAwarenessContext
+          (DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+      hr = output6->DuplicateOutput1(device, 0, 2, formats, &dupl_);
+
+      /* And restore dpi context for the current thread */
+      if (prev_ctx != nullptr)
+        g_vtable.SetThreadDpiAwarenessContext (prev_ctx);
+
+      if (FAILED (hr)) {
+        GST_WARNING ("IDXGIOutput5::DuplicateOutput1 returned 0x%x",
+            (guint) hr);
+        is_hdr = FALSE;
+      } else {
+        output_format_ = DXGI_FORMAT_R16G16B16A16_UNORM;
+      }
     }
 
-    if (FAILED (hr)) {
-      GST_ERROR ("Couldn't create d3d11 device");
-      return GST_FLOW_ERROR;
-    }
+    if (FAILED (hr))
+      hr = output1->DuplicateOutput(device, &dupl_);
 
-    /* FIXME: Use DuplicateOutput1 to avoid potentail color conversion */
-    hr = output1->DuplicateOutput(device_.Get(), &dupl_);
+    if (prev_hdesk)
+      SetThreadDesktop (prev_hdesk);
+
+    if (hdesk)
+      CloseDesktop (hdesk);
+
     if (FAILED (hr)) {
       if (hr == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE) {
         GST_ERROR ("Hit the max allowed number of Desktop Duplication session");
@@ -353,50 +492,406 @@ public:
         return GST_D3D12_SCREEN_CAPTURE_FLOW_UNSUPPORTED;
       }
 
-      return flow_return_from_hr (device_.Get(), hr,
+      return flow_return_from_hr (device, hr,
           CreateDuplicationExpectedErrors);
     }
 
     dupl_->GetDesc (&output_desc_);
 
+    D3D11_TEXTURE2D_DESC desc = { };
+    desc.Width = output_desc_.ModeDesc.Width;
+    desc.Height = output_desc_.ModeDesc.Height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = output_format_;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+
+    device_ = device;
+    context_ = context;
+    shared_fence_ = fence;
+    sampler_ = sampler;
+    ps_cbuf_ = ps_cbuf;
+    vs_ = vs;
+    layout_ = layout;
+
+    if (is_hdr) {
+      GST_INFO ("HDR with SDR white level %d nits",
+          (guint) cbuf.sdr_white_level);
+      if (!use_reinhard) {
+        GST_INFO ("Use scRGB sampling");
+        ps_ = ps_scrgb;
+      } else {
+        GST_INFO ("use scRGB sampling with reinhard tonemapping");
+        ps_ = ps_scrgb_tonemap;
+      }
+    } else {
+      GST_INFO ("Monitor is SDR mode");
+      ps_ = ps;
+    }
+
+    hr = device->CreateTexture2D (&desc, nullptr, &texture_);
+    if (FAILED (hr)) {
+      GST_ERROR ("Couldn't create texture");
+      return GST_FLOW_ERROR;
+    }
+
+    hr = device->CreateRenderTargetView (texture_.Get (), nullptr, &rtv_);
+    if (FAILED (hr)) {
+      GST_ERROR ("Couldn't create render target view");
+      return GST_FLOW_ERROR;
+    }
+
+    D3D11_MAPPED_SUBRESOURCE map;
+    hr = context->Map (ps_cbuf_.Get (), 0, D3D11_MAP_WRITE_DISCARD, 0, &map); if (FAILED (hr)) {
+      GST_ERROR ("Couldn't map constant buffer");
+      return GST_FLOW_ERROR;
+    }
+
+    memcpy (map.pData, &cbuf, sizeof (PSConstBuffer));
+    context->Unmap (ps_cbuf_.Get (), 0);
+
+    viewport_.TopLeftX = 0;
+    viewport_.TopLeftY = 0;
+    viewport_.MinDepth = 0;
+    viewport_.MaxDepth = 1;
+    viewport_.Width = desc.Width;
+    viewport_.Height = desc.Height;
+
     return GST_FLOW_OK;
   }
 
-  void ReleaseFrame ()
+  void
+  setMoveRect (DXGI_OUTDUPL_MOVE_RECT * move_rect,
+      DXGI_MODE_ROTATION rotation, INT width, INT height,
+      RECT * src, RECT * dst)
   {
-    if (acquired_frame_) {
-      acquired_frame_ = nullptr;
-      dupl_->ReleaseFrame ();
+    switch (rotation) {
+      case DXGI_MODE_ROTATION_ROTATE90:
+        src->left = height - (move_rect->SourcePoint.y +
+            move_rect->DestinationRect.bottom - move_rect->DestinationRect.top);
+        src->top = move_rect->SourcePoint.x;
+        src->right = height - move_rect->SourcePoint.y;
+        src->bottom = move_rect->SourcePoint.x +
+            move_rect->DestinationRect.right - move_rect->DestinationRect.left;
+
+        dst->left = height - move_rect->DestinationRect.bottom;
+        dst->top = move_rect->DestinationRect.left;
+        dst->right = height - move_rect->DestinationRect.top;
+        dst->bottom = move_rect->DestinationRect.right;
+        break;
+      case DXGI_MODE_ROTATION_ROTATE180:
+        src->left = width - (move_rect->SourcePoint.x +
+            move_rect->DestinationRect.right - move_rect->DestinationRect.left);
+        src->top = height - (move_rect->SourcePoint.y +
+            move_rect->DestinationRect.bottom - move_rect->DestinationRect.top);
+        src->right = width - move_rect->SourcePoint.x;
+        src->bottom = height - move_rect->SourcePoint.y;
+
+        dst->left = width - move_rect->DestinationRect.right;
+        dst->top = height - move_rect->DestinationRect.bottom;
+        dst->right = width - move_rect->DestinationRect.left;
+        dst->bottom =  height - move_rect->DestinationRect.top;
+        break;
+      case DXGI_MODE_ROTATION_ROTATE270:
+        src->left = move_rect->SourcePoint.x;
+        src->top = width - (move_rect->SourcePoint.x +
+            move_rect->DestinationRect.right - move_rect->DestinationRect.left);
+        src->right = move_rect->SourcePoint.y +
+            move_rect->DestinationRect.bottom - move_rect->DestinationRect.top;
+        src->bottom = width - move_rect->SourcePoint.x;
+
+        dst->left = move_rect->DestinationRect.top;
+        dst->top = width - move_rect->DestinationRect.right;
+        dst->right = move_rect->DestinationRect.bottom;
+        dst->bottom =  width - move_rect->DestinationRect.left;
+        break;
+      case DXGI_MODE_ROTATION_UNSPECIFIED:
+      case DXGI_MODE_ROTATION_IDENTITY:
+      default:
+        src->left = move_rect->SourcePoint.x;
+        src->top = move_rect->SourcePoint.y;
+        src->right = move_rect->SourcePoint.x +
+            move_rect->DestinationRect.right - move_rect->DestinationRect.left;
+        src->bottom = move_rect->SourcePoint.y +
+            move_rect->DestinationRect.bottom - move_rect->DestinationRect.top;
+
+        *dst = move_rect->DestinationRect;
+        break;
     }
   }
 
-  GstFlowReturn AcquireNextFrame (IDXGIResource ** resource)
+  GstFlowReturn
+  copyMoveRects (DXGI_OUTDUPL_MOVE_RECT * rects, UINT move_count)
   {
-    HRESULT hr;
-
-    move_rect_.clear ();
-    dirty_rect_.clear ();
-    dirty_vertex_.clear ();
-
-    if (acquired_frame_) {
-      acquired_frame_ = nullptr;
-      dupl_->ReleaseFrame ();
+    if (!move_texture_) {
+      D3D11_TEXTURE2D_DESC desc;
+      texture_->GetDesc (&desc);
+      desc.BindFlags = 0;
+      desc.MiscFlags = 0;
+      auto hr = device_->CreateTexture2D (&desc, nullptr, &move_texture_);
+      if (FAILED (hr)) {
+        GST_ERROR ("Couldn't create move texture");
+        return GST_FLOW_ERROR;
+      }
     }
 
-    hr = dupl_->AcquireNextFrame(0, &frame_info_, &acquired_frame_);
-    if (hr == DXGI_ERROR_WAIT_TIMEOUT)
+    for (UINT i = 0; i < move_count; i++) {
+      RECT src;
+      RECT dst;
+
+      setMoveRect (&rects[i], output_desc_.Rotation,
+          output_desc_.ModeDesc.Width, output_desc_.ModeDesc.Height,
+          &src, &dst);
+
+      D3D11_BOX src_box = { };
+      src_box.front = 0;
+      src_box.back = 1;
+      src_box.left = src.left;
+      src_box.top = src.top;
+      src_box.right = src.right;
+      src_box.bottom = src.bottom;
+
+      context_->CopySubresourceRegion(move_texture_.Get(),
+          0, src.left, src.top, 0, texture_.Get (), 0, &src_box);
+      context_->CopySubresourceRegion (texture_.Get (), 0, dst.left, dst.top,
+          0, move_texture_.Get (), 0, &src_box);
+    }
+
+    return GST_FLOW_OK;
+  }
+
+  void
+  setDirtyVert (VERTEX* Vertices, RECT* Dirty,
+      DXGI_OUTDUPL_DESC* DeskDesc, D3D11_TEXTURE2D_DESC* FullDesc,
+      D3D11_TEXTURE2D_DESC* ThisDesc)
+  {
+    INT CenterX = FullDesc->Width / 2;
+    INT CenterY = FullDesc->Height / 2;
+
+    INT Width = FullDesc->Width;
+    INT Height = FullDesc->Height;
+
+    /* Rotation compensated destination rect */
+    RECT DestDirty = *Dirty;
+
+    /* Set appropriate coordinates compensated for rotation */
+    switch (DeskDesc->Rotation)
+    {
+      case DXGI_MODE_ROTATION_ROTATE90:
+        DestDirty.left = Width - Dirty->bottom;
+        DestDirty.top = Dirty->left;
+        DestDirty.right = Width - Dirty->top;
+        DestDirty.bottom = Dirty->right;
+
+        Vertices[0].TexCoord =
+            XMFLOAT2(Dirty->right / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->bottom / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[1].TexCoord =
+            XMFLOAT2(Dirty->left / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->bottom / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[2].TexCoord =
+            XMFLOAT2(Dirty->right / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->top / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[5].TexCoord =
+            XMFLOAT2(Dirty->left / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->top / static_cast<FLOAT>(ThisDesc->Height));
+        break;
+      case DXGI_MODE_ROTATION_ROTATE180:
+        DestDirty.left = Width - Dirty->right;
+        DestDirty.top = Height - Dirty->bottom;
+        DestDirty.right = Width - Dirty->left;
+        DestDirty.bottom = Height - Dirty->top;
+
+        Vertices[0].TexCoord =
+            XMFLOAT2(Dirty->right / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->top / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[1].TexCoord =
+            XMFLOAT2(Dirty->right / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->bottom / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[2].TexCoord =
+            XMFLOAT2(Dirty->left / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->top / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[5].TexCoord =
+            XMFLOAT2(Dirty->left / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->bottom / static_cast<FLOAT>(ThisDesc->Height));
+        break;
+      case DXGI_MODE_ROTATION_ROTATE270:
+        DestDirty.left = Dirty->top;
+        DestDirty.top = Height - Dirty->right;
+        DestDirty.right = Dirty->bottom;
+        DestDirty.bottom = Height - Dirty->left;
+
+        Vertices[0].TexCoord =
+            XMFLOAT2(Dirty->left / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->top / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[1].TexCoord =
+            XMFLOAT2(Dirty->right / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->top / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[2].TexCoord =
+            XMFLOAT2(Dirty->left / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->bottom / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[5].TexCoord =
+            XMFLOAT2(Dirty->right / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->bottom / static_cast<FLOAT>(ThisDesc->Height));
+        break;
+      case DXGI_MODE_ROTATION_UNSPECIFIED:
+      case DXGI_MODE_ROTATION_IDENTITY:
+      default:
+        Vertices[0].TexCoord =
+            XMFLOAT2(Dirty->left / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->bottom / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[1].TexCoord =
+            XMFLOAT2(Dirty->left / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->top / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[2].TexCoord =
+            XMFLOAT2(Dirty->right / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->bottom / static_cast<FLOAT>(ThisDesc->Height));
+        Vertices[5].TexCoord =
+            XMFLOAT2(Dirty->right / static_cast<FLOAT>(ThisDesc->Width),
+                     Dirty->top / static_cast<FLOAT>(ThisDesc->Height));
+        break;
+    }
+
+    /* Set positions */
+    Vertices[0].Pos =
+        XMFLOAT3(
+          (DestDirty.left - CenterX) / static_cast<FLOAT>(CenterX),
+          -1 * (DestDirty.bottom - CenterY) / static_cast<FLOAT>(CenterY),
+          0.0f);
+    Vertices[1].Pos =
+        XMFLOAT3(
+          (DestDirty.left - CenterX) / static_cast<FLOAT>(CenterX),
+          -1 * (DestDirty.top - CenterY) / static_cast<FLOAT>(CenterY),
+          0.0f);
+    Vertices[2].Pos =
+        XMFLOAT3(
+          (DestDirty.right - CenterX) / static_cast<FLOAT>(CenterX),
+          -1 * (DestDirty.bottom - CenterY) / static_cast<FLOAT>(CenterY),
+          0.0f);
+    Vertices[3].Pos = Vertices[2].Pos;
+    Vertices[4].Pos = Vertices[1].Pos;
+    Vertices[5].Pos =
+        XMFLOAT3(
+          (DestDirty.right - CenterX) / static_cast<FLOAT>(CenterX),
+          -1 * (DestDirty.top - CenterY) / static_cast<FLOAT>(CenterY),
+          0.0f);
+
+    Vertices[3].TexCoord = Vertices[2].TexCoord;
+    Vertices[4].TexCoord = Vertices[1].TexCoord;
+  }
+
+  GstFlowReturn
+  copyDirtyRects (ID3D11Texture2D * src, RECT * dirty_rects, UINT dirty_count)
+  {
+    if (dirty_count == 0)
       return GST_FLOW_OK;
 
+    ComPtr<ID3D11ShaderResourceView> cur_srv;
+    auto hr = device_->CreateShaderResourceView (src, nullptr, &cur_srv);
     if (FAILED (hr)) {
-      GST_WARNING ("AcquireNextFrame failed with 0x%x", (guint) hr);
-      return flow_return_from_hr (device_.Get (), hr, FrameInfoExpectedErrors);
+      GST_ERROR ("Couldn't create shader resource view");
+      return GST_FLOW_ERROR;
+    }
+
+    auto byte_needed = sizeof (VERTEX) * 6 * dirty_count;
+    dirty_vertex_.resize (dirty_count * 6);
+    VERTEX *vert_data = dirty_vertex_.data ();
+    D3D11_TEXTURE2D_DESC FullDesc;
+    D3D11_TEXTURE2D_DESC ThisDesc;
+
+    texture_->GetDesc (&FullDesc);
+    src->GetDesc (&ThisDesc);
+
+    for (guint i = 0; i < dirty_count; i++, vert_data += 6) {
+      setDirtyVert (vert_data, &dirty_rects[i], &output_desc_, &FullDesc,
+          &ThisDesc);
+    }
+
+    if (byte_needed > vertext_buf_size_)
+      vertex_buf_ = nullptr;
+
+    if (!vertex_buf_) {
+      vertext_buf_size_ = byte_needed;
+
+      D3D11_BUFFER_DESC buf_desc = { };
+      D3D11_SUBRESOURCE_DATA subresource = { };
+      buf_desc.Usage = D3D11_USAGE_DYNAMIC;
+      buf_desc.ByteWidth = byte_needed;
+      buf_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+      buf_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+      subresource.pSysMem = dirty_vertex_.data ();
+      subresource.SysMemPitch = byte_needed;
+
+      hr = device_->CreateBuffer (&buf_desc, &subresource, &vertex_buf_);
+      if (FAILED (hr)) {
+        GST_ERROR ("Couldn't create vertex buffer");
+        return GST_FLOW_ERROR;
+      }
+    } else {
+      D3D11_MAPPED_SUBRESOURCE mapped;
+      hr = context_->Map (vertex_buf_.Get (),  0, D3D11_MAP_WRITE_DISCARD,
+          0, &mapped);
+      if (FAILED (hr)) {
+        GST_ERROR ("Couldn't map vertex buffer");
+        return GST_FLOW_ERROR;
+      }
+
+      memcpy (mapped.pData, dirty_vertex_.data (), byte_needed);
+      context_->Unmap (vertex_buf_.Get (), 0);
+    }
+
+    UINT stride = sizeof (VERTEX);
+    UINT offset = 0;
+    ID3D11Buffer *vert[] = { vertex_buf_.Get () };
+    context_->IASetVertexBuffers (0, 1, vert, &stride, &offset);
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->IASetInputLayout(layout_.Get());
+    context_->VSSetShader(vs_.Get(), nullptr, 0);
+    context_->PSSetShader(ps_.Get(), nullptr, 0);
+    ID3D11Buffer *ps_cbuf[] = { ps_cbuf_.Get () };
+    context_->PSSetConstantBuffers (0, 1, ps_cbuf);
+
+    ID3D11ShaderResourceView *srv[] = { cur_srv.Get () };
+    context_->PSSetShaderResources(0, 1, srv);
+
+    ID3D11SamplerState *sampler[] = { sampler_.Get () };
+    context_->PSSetSamplers(0, 1, sampler);
+
+    context_->RSSetViewports (1, &viewport_);
+
+    ID3D11RenderTargetView *rtv[] = { rtv_.Get () };
+    context_->OMSetRenderTargets(1, rtv, nullptr);
+    context_->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+
+    context_->Draw (6 * dirty_count, 0);
+
+    srv[0] = nullptr;
+    rtv[0] = nullptr;
+
+    context_->PSSetShaderResources(0, 1, srv);
+    context_->OMSetRenderTargets(1, rtv, nullptr);
+
+    return GST_FLOW_OK;
+  }
+
+  GstFlowReturn
+  ExecuteInternal (IDXGIResource * resource)
+  {
+    ComPtr<ID3D11Texture2D> cur_texture;
+    HRESULT hr;
+    resource->QueryInterface (IID_PPV_ARGS (&cur_texture));
+    if (!cur_texture) {
+      GST_ERROR ("Couldn't get texture interface");
+      return GST_FLOW_ERROR;
     }
 
     metadata_buffer_.resize (frame_info_.TotalMetadataBufferSize);
     if (frame_info_.TotalMetadataBufferSize > 0) {
       UINT buf_size = frame_info_.TotalMetadataBufferSize;
       hr = dupl_->GetFrameMoveRects (buf_size,
-         (DXGI_OUTDUPL_MOVE_RECT *) metadata_buffer_.data (), &buf_size);
+        (DXGI_OUTDUPL_MOVE_RECT *) metadata_buffer_.data (), &buf_size);
       if (FAILED (hr)) {
         GST_ERROR ("Couldn't get move rect, hr: 0x%x", (guint) hr);
         return flow_return_from_hr (device_.Get (),
@@ -404,7 +899,12 @@ public:
       }
 
       auto move_count = buf_size / sizeof (DXGI_OUTDUPL_MOVE_RECT);
-      buildMoveRects (move_count);
+      if (move_count > 0) {
+        auto ret = copyMoveRects (
+            (DXGI_OUTDUPL_MOVE_RECT *) metadata_buffer_.data (), move_count);
+        if (ret != GST_FLOW_OK)
+          return ret;
+      }
 
       auto dirty_rects = metadata_buffer_.data () + buf_size;
       buf_size = frame_info_.TotalMetadataBufferSize - buf_size;
@@ -418,7 +918,12 @@ public:
       }
 
       auto dirty_count = buf_size / sizeof (RECT);
-      buildDirtyVertex ((RECT *) dirty_rects, dirty_count);
+      if (dirty_count > 0) {
+        auto ret = copyDirtyRects (cur_texture.Get (), (RECT *) dirty_rects,
+            dirty_count);
+        if (ret != GST_FLOW_OK)
+          return ret;
+      }
     }
 
     if (frame_info_.LastMouseUpdateTime.QuadPart != 0) {
@@ -440,8 +945,45 @@ public:
       }
     }
 
-    *resource = acquired_frame_.Get ();
-    (*resource)->AddRef ();
+    return GST_FLOW_OK;
+  }
+
+  GstFlowReturn
+  Execute (ID3D11Texture2D * dest, D3D11_BOX * src_box, UINT64 fence_val)
+  {
+    ComPtr<IDXGIResource> resource;
+    auto hr = dupl_->AcquireNextFrame(0, &frame_info_, &resource);
+    if (hr != DXGI_ERROR_WAIT_TIMEOUT) {
+      if (FAILED (hr)) {
+        GST_WARNING ("AcquireNextFrame failed with 0x%x", (guint) hr);
+        /* XXX: HDR <-> SDR mode switching seems to be racy,
+         * and AcquireNextFrame() seems to return DXGI_ERROR_INVALID_CALL
+         * sometimes on HDR <-> SDR mode switching.
+         * Do return GST_D3D12_SCREEN_CAPTURE_FLOW_UNSUPPORTED here
+         * if AcquireNextFrame() returns DXGI_ERROR_INVALID_CALL, then
+         * source element will do retry a bit more */
+        if (hr == DXGI_ERROR_INVALID_CALL) {
+          GST_WARNING ("DXGI_ERROR_INVALID_CALL, trying again");
+          dupl_->ReleaseFrame ();
+          return GST_D3D12_SCREEN_CAPTURE_FLOW_UNSUPPORTED;
+        }
+
+        dupl_->ReleaseFrame ();
+        return flow_return_from_hr (device_.Get (), hr, FrameInfoExpectedErrors);
+      }
+
+      auto ret = ExecuteInternal(resource.Get ());
+      dupl_->ReleaseFrame ();
+
+      if (ret != GST_FLOW_OK)
+        return ret;
+    } else {
+      dupl_->ReleaseFrame ();
+    }
+
+    context_->CopySubresourceRegion (dest, 0, 0, 0, 0,
+        texture_.Get (), 0, src_box);
+    context_->Signal (shared_fence_.Get(), fence_val);
 
     return GST_FLOW_OK;
   }
@@ -452,34 +994,14 @@ public:
     *height = output_desc_.ModeDesc.Height;
   }
 
+  DXGI_FORMAT GetFormat ()
+  {
+    return output_format_;
+  }
+
   DXGI_OUTDUPL_DESC GetDesc ()
   {
     return output_desc_;
-  }
-
-  UINT GetMoveCount ()
-  {
-    return move_rect_.size ();
-  }
-
-  const std::vector<MoveRectData> & GetMoveRects ()
-  {
-    return move_rect_;
-  }
-
-  UINT GetDirtyCount ()
-  {
-    return dirty_rect_.size ();
-  }
-
-  const std::vector<RECT> & GetDirtyRects ()
-  {
-    return dirty_rect_;
-  }
-
-  const std::vector<VERTEX> & GetDirtyVertex ()
-  {
-    return dirty_vertex_;
   }
 
   const PtrInfo & GetPointerInfo ()
@@ -487,183 +1009,14 @@ public:
     return ptr_info_;
   }
 
-private:
-  void buildMoveRects (UINT move_count)
+  ID3D11Fence * GetFence ()
   {
-    INT width = (INT) output_desc_.ModeDesc.Width;
-    INT height = (INT) output_desc_.ModeDesc.Height;
-
-    for (UINT i = 0; i < move_count; i++) {
-      DXGI_OUTDUPL_MOVE_RECT *move_rect =
-          ((DXGI_OUTDUPL_MOVE_RECT *) metadata_buffer_.data ()) + i;
-      RECT src_rect;
-      RECT dst_rect;
-
-      switch (output_desc_.Rotation) {
-        case DXGI_MODE_ROTATION_UNSPECIFIED:
-        case DXGI_MODE_ROTATION_IDENTITY:
-          src_rect.left = move_rect->SourcePoint.x;
-          src_rect.top = move_rect->SourcePoint.y;
-          src_rect.right = move_rect->SourcePoint.x +
-              move_rect->DestinationRect.right - move_rect->DestinationRect.left;
-          src_rect.bottom = move_rect->SourcePoint.y +
-              move_rect->DestinationRect.bottom - move_rect->DestinationRect.top;
-          dst_rect = move_rect->DestinationRect;
-          break;
-        case DXGI_MODE_ROTATION_ROTATE90:
-          src_rect.left = height - (move_rect->SourcePoint.y +
-              move_rect->DestinationRect.bottom - move_rect->DestinationRect.top);
-          src_rect.top = move_rect->SourcePoint.x;
-          src_rect.right = height - move_rect->SourcePoint.y;
-          src_rect.bottom = move_rect->SourcePoint.x +
-              move_rect->DestinationRect.right - move_rect->DestinationRect.left;
-
-          dst_rect.left = height - move_rect->DestinationRect.bottom;
-          dst_rect.top = move_rect->DestinationRect.left;
-          dst_rect.right = height - move_rect->DestinationRect.top;
-          dst_rect.bottom = move_rect->DestinationRect.right;
-          break;
-        case DXGI_MODE_ROTATION_ROTATE180:
-          src_rect.left = width - (move_rect->SourcePoint.x +
-              move_rect->DestinationRect.right - move_rect->DestinationRect.left);
-          src_rect.top = height - (move_rect->SourcePoint.y +
-              move_rect->DestinationRect.bottom - move_rect->DestinationRect.top);
-          src_rect.right = width - move_rect->SourcePoint.x;
-          src_rect.bottom = height - move_rect->SourcePoint.y;
-
-          dst_rect.left = width - move_rect->DestinationRect.right;
-          dst_rect.top = height - move_rect->DestinationRect.bottom;
-          dst_rect.right = width - move_rect->DestinationRect.left;
-          dst_rect.bottom =  height - move_rect->DestinationRect.top;
-          break;
-        case DXGI_MODE_ROTATION_ROTATE270:
-          src_rect.left = move_rect->SourcePoint.x;
-          src_rect.top = width - (move_rect->SourcePoint.x +
-              move_rect->DestinationRect.right - move_rect->DestinationRect.left);
-          src_rect.right = move_rect->SourcePoint.y +
-              move_rect->DestinationRect.bottom - move_rect->DestinationRect.top;
-          src_rect.bottom = width - move_rect->SourcePoint.x;
-
-          dst_rect.left = move_rect->DestinationRect.top;
-          dst_rect.top = width - move_rect->DestinationRect.right;
-          dst_rect.right = move_rect->DestinationRect.bottom;
-          dst_rect.bottom =  width - move_rect->DestinationRect.left;
-          break;
-        default:
-          continue;
-      }
-
-      MoveRectData rect_data = { };
-      rect_data.src_rect = src_rect;
-      rect_data.dst_rect = dst_rect;
-      rect_data.box.left = src_rect.left;
-      rect_data.box.top = src_rect.top;
-      rect_data.box.right = src_rect.right;
-      rect_data.box.bottom = src_rect.bottom;
-      rect_data.box.front = 0;
-      rect_data.box.back = 1;
-
-      move_rect_.push_back (rect_data);
-    }
+    return shared_fence_.Get ();
   }
 
-  void buildDirtyVertex (RECT * rects, UINT num_rect)
+  ID3D11Device * GetDevice ()
   {
-    if (num_rect == 0)
-      return;
-
-    dirty_vertex_.resize (num_rect * 6);
-    FLOAT width = output_desc_.ModeDesc.Width;
-    FLOAT height = output_desc_.ModeDesc.Height;
-    FLOAT center_x = width / 2.0f;
-    FLOAT center_y = height / 2.0f;
-
-    for (UINT i = 0; i < num_rect; i++) {
-      RECT dirty = rects[i];
-      RECT dest_dirty = dirty;
-      UINT base = i * 6;
-
-      dirty_rect_.push_back (dirty);
-
-      switch (output_desc_.Rotation) {
-        case DXGI_MODE_ROTATION_ROTATE90:
-          dest_dirty.left = width - dirty.bottom;
-          dest_dirty.top = dirty.left;
-          dest_dirty.right = width - dirty.top;
-          dest_dirty.bottom = dirty.right;
-
-          dirty_vertex_[base].TexCoord = XMFLOAT2 (
-              dirty.right / width, dirty.bottom / height);
-          dirty_vertex_[base + 1].TexCoord = XMFLOAT2 (
-              dirty.left / width, dirty.bottom / height);
-          dirty_vertex_[base + 2].TexCoord = XMFLOAT2 (
-              dirty.right / width, dirty.top / height);
-          dirty_vertex_[base + 5].TexCoord = XMFLOAT2(
-              dirty.left / width, dirty.top / height);
-          break;
-        case DXGI_MODE_ROTATION_ROTATE180:
-          dest_dirty.left = width - dirty.right;
-          dest_dirty.top = height - dirty.bottom;
-          dest_dirty.right = width - dirty.left;
-          dest_dirty.bottom = height - dirty.top;
-
-          dirty_vertex_[base].TexCoord = XMFLOAT2(
-              dirty.right / width, dirty.top / height);
-          dirty_vertex_[base + 1].TexCoord = XMFLOAT2 (
-              dirty.right / width, dirty.bottom / height);
-          dirty_vertex_[base + 2].TexCoord = XMFLOAT2 (
-              dirty.left / width, dirty.top / height);
-          dirty_vertex_[base + 5].TexCoord = XMFLOAT2 (
-              dirty.left / width, dirty.bottom / height);
-          break;
-        case DXGI_MODE_ROTATION_ROTATE270:
-          dest_dirty.left = dirty.top;
-          dest_dirty.top = height - dirty.right;
-          dest_dirty.right = dirty.bottom;
-          dest_dirty.bottom = height - dirty.left;
-
-          dirty_vertex_[base].TexCoord = XMFLOAT2 (
-              dirty.left / width, dirty.top / height);
-          dirty_vertex_[base + 1].TexCoord = XMFLOAT2 (
-              dirty.right / width, dirty.top / height);
-          dirty_vertex_[base + 2].TexCoord = XMFLOAT2 (
-              dirty.left / width, dirty.bottom / height);
-          dirty_vertex_[base + 5].TexCoord = XMFLOAT2 (
-              dirty.right / width, dirty.bottom / height);
-          break;
-        case DXGI_MODE_ROTATION_UNSPECIFIED:
-        case DXGI_MODE_ROTATION_IDENTITY:
-        default:
-          dirty_vertex_[base].TexCoord = XMFLOAT2 (
-              dirty.left / width, dirty.bottom / height);
-          dirty_vertex_[base + 1].TexCoord = XMFLOAT2 (
-              dirty.left / width, dirty.top / height);
-          dirty_vertex_[base + 2].TexCoord = XMFLOAT2 (
-              dirty.right / width, dirty.bottom / height);
-          dirty_vertex_[base + 5].TexCoord = XMFLOAT2 (
-              dirty.right / width, dirty.top / height);
-          break;
-      }
-
-      /* Set positions */
-      dirty_vertex_[base].Pos = XMFLOAT3 (
-          (dest_dirty.left - center_x) / center_x,
-          -1 * (dest_dirty.bottom - center_y) / center_y, 0.0f);
-      dirty_vertex_[base + 1].Pos = XMFLOAT3 (
-          (dest_dirty.left - center_x) / center_x,
-          -1 * (dest_dirty.top - center_y) / center_y, 0.0f);
-      dirty_vertex_[base + 2].Pos = XMFLOAT3 (
-          (dest_dirty.right - center_x) / center_x,
-          -1 * (dest_dirty.bottom - center_y) / center_y, 0.0f);
-      dirty_vertex_[base + 3].Pos = dirty_vertex_[base + 2].Pos;
-      dirty_vertex_[base + 4].Pos = dirty_vertex_[base + 1].Pos;
-      dirty_vertex_[base + 5].Pos = XMFLOAT3 (
-          (dest_dirty.right - center_x) / center_x,
-          -1 * (dest_dirty.top - center_y) / center_y, 0.0f);
-
-      dirty_vertex_[base + 3].TexCoord = dirty_vertex_[base + 2].TexCoord;
-      dirty_vertex_[base + 4].TexCoord = dirty_vertex_[base + 1].TexCoord;
-    }
+    return device_.Get ();
   }
 
 private:
@@ -671,11 +1024,24 @@ private:
   DXGI_OUTDUPL_DESC output_desc_;
   DXGI_OUTDUPL_FRAME_INFO frame_info_;
   ComPtr<IDXGIOutputDuplication> dupl_;
-  ComPtr<ID3D11Device> device_;
-  ComPtr<IDXGIResource> acquired_frame_;
-  std::vector<MoveRectData> move_rect_;
+  ComPtr<ID3D11Device5> device_;
+  ComPtr<ID3D11DeviceContext4> context_;
+  ComPtr<ID3D11Fence> shared_fence_;
+  ComPtr<ID3D11Texture2D> texture_;
+  ComPtr<ID3D11Texture2D> move_texture_;
+  ComPtr<ID3D11RenderTargetView> rtv_;
+  ComPtr<ID3D11SamplerState> sampler_;
+  ComPtr<ID3D11PixelShader> ps_;
+  ComPtr<ID3D11PixelShader> ps_scrgb_;
+  ComPtr<ID3D11PixelShader> ps_scrgb_tonemap_;
+  ComPtr<ID3D11Buffer> ps_cbuf_;
+  ComPtr<ID3D11VertexShader> vs_;
+  ComPtr<ID3D11InputLayout> layout_;
+  ComPtr<ID3D11Buffer> vertex_buf_;
+  UINT vertext_buf_size_ = 0;
+  D3D11_VIEWPORT viewport_ = { };
   std::vector<VERTEX> dirty_vertex_;
-  std::vector<RECT> dirty_rect_;
+  DXGI_FORMAT output_format_ = DXGI_FORMAT_B8G8R8A8_UNORM;
 
   /* frame metadata */
   std::vector<BYTE> metadata_buffer_;
@@ -685,64 +1051,66 @@ struct GstD3D12DxgiCapturePrivate
 {
   GstD3D12DxgiCapturePrivate ()
   {
-    event_handle = CreateEventEx (nullptr, nullptr, 0, EVENT_ALL_ACCESS);
     fence_data_pool = gst_d3d12_fence_data_pool_new ();
   }
 
   ~GstD3D12DxgiCapturePrivate ()
   {
-    if (device) {
-      auto fence_to_wait = MAX (fence_val, mouse_fence_val);
-      gst_d3d12_device_fence_wait (device, D3D12_COMMAND_LIST_TYPE_DIRECT,
-          fence_to_wait, event_handle);
-    }
-    CloseHandle (event_handle);
+    WaitGPU ();
+    ctx = nullptr;
     gst_clear_buffer (&mouse_buf);
     gst_clear_buffer (&mouse_xor_buf);
     gst_clear_object (&ca_pool);
     gst_clear_object (&fence_data_pool);
     gst_clear_object (&mouse_blend);
     gst_clear_object (&mouse_xor_blend);
-    gst_clear_object (&device);
+    gst_clear_object (&mouse_blend_scrgb);
+    gst_clear_object (&mouse_xor_blend_scrgb);
   }
 
-  GstD3D12Device *device = nullptr;
+  void WaitGPU ()
+  {
+    if (shared_fence) {
+      auto completed = shared_fence->GetCompletedValue ();
+      if (completed < fence_val)
+        shared_fence->SetEventOnCompletion (fence_val, nullptr);
+    }
+  }
 
   std::unique_ptr<DesktopDupCtx> ctx;
   ComPtr<IDXGIOutput1> output;
-  ComPtr<IDXGIResource> last_resource;
-  ComPtr<ID3D12Resource> shared_resource;
-  ComPtr<ID3D12Resource> move_frame;
-  ComPtr<ID3D12Resource> processed_frame;
-  ComPtr<ID3D12RootSignature> rs;
-  ComPtr<ID3D12PipelineState> pso;
-  GstD3D12CommandAllocatorPool *ca_pool = nullptr;
+  GstD3D12CmdAllocPool *ca_pool = nullptr;
   GstD3D12FenceDataPool *fence_data_pool;
-  GstD3D12FenceData *mouse_fence_data = nullptr;
   ComPtr<ID3D12GraphicsCommandList> cl;
-  ComPtr<ID3D12GraphicsCommandList> mouse_cl;
-  ComPtr<ID3D12DescriptorHeap> srv_heap;
-  ComPtr<ID3D12DescriptorHeap> rtv_heap;
-  ComPtr<ID3D12Resource> dirty_vertex_buf;
-  UINT dirty_vertex_size = 0;
+  ComPtr<ID3D12Fence> shared_fence;
+  ComPtr<ID3D11Device5> device11;
+  ComPtr<ID3D11DeviceContext4> context11;
+  ComPtr<ID3D11Fence> shared_fence11;
+  ComPtr<ID3D11SamplerState> sampler;
+  ComPtr<ID3D11PixelShader> ps;
+  ComPtr<ID3D11PixelShader> ps_scrgb;
+  ComPtr<ID3D11PixelShader> ps_scrgb_tonemap;
+  ComPtr<ID3D11VertexShader> vs;
+  ComPtr<ID3D11InputLayout> layout;
+  ComPtr<ID3D11Buffer> const_buf;
+
   GstBuffer *mouse_buf = nullptr;
   GstBuffer *mouse_xor_buf = nullptr;
-  D3D12_VIEWPORT viewport;
-  D3D12_RECT scissor_rect;
-  D3D12_RESOURCE_STATES resource_state = D3D12_RESOURCE_STATE_COMMON;
 
   GstD3D12Converter *mouse_blend = nullptr;
   GstD3D12Converter *mouse_xor_blend = nullptr;
+  GstD3D12Converter *mouse_blend_scrgb = nullptr;
+  GstD3D12Converter *mouse_xor_blend_scrgb = nullptr;
 
   HMONITOR monitor_handle = nullptr;
   RECT desktop_coordinates = { };
+  guint sdr_white_level = 80;
+  guint prepare_flags = 0;
 
   guint cached_width = 0;
   guint cached_height = 0;
 
-  HANDLE event_handle;
   guint64 fence_val = 0;
-  guint64 mouse_fence_val = 0;
 
   guint64 mouse_token = 0;
 
@@ -759,18 +1127,14 @@ struct _GstD3D12DxgiCapture
   GstD3D12DxgiCapturePrivate *priv;
 };
 
-static void gst_d3d12_dxgi_capture_dispose (GObject * object);
 static void gst_d3d12_dxgi_capture_finalize (GObject * object);
-static void gst_d3d12_dxgi_capture_set_property (GObject * object,
-    guint prop_id, const GValue * value, GParamSpec * pspec);
 static GstFlowReturn
-gst_d3d12_dxgi_capture_prepare (GstD3D12ScreenCapture * capture);
+gst_d3d12_dxgi_capture_prepare (GstD3D12ScreenCapture * capture, guint flags);
 static gboolean
 gst_d3d12_dxgi_capture_get_size (GstD3D12ScreenCapture * capture,
     guint * width, guint * height);
-static GstFlowReturn
-gst_d3d12_dxgi_capture_do_capture (GstD3D12ScreenCapture * capture,
-    GstBuffer * buffer, const D3D12_BOX * crop_box, gboolean draw_mouse);
+static GstVideoFormat
+gst_d3d12_dxgi_capture_get_format (GstD3D12ScreenCapture * capture);
 
 #define gst_d3d12_dxgi_capture_parent_class parent_class
 G_DEFINE_TYPE (GstD3D12DxgiCapture, gst_d3d12_dxgi_capture,
@@ -786,8 +1150,8 @@ gst_d3d12_dxgi_capture_class_init (GstD3D12DxgiCaptureClass * klass)
 
   capture_class->prepare = GST_DEBUG_FUNCPTR (gst_d3d12_dxgi_capture_prepare);
   capture_class->get_size = GST_DEBUG_FUNCPTR (gst_d3d12_dxgi_capture_get_size);
-  capture_class->do_capture =
-      GST_DEBUG_FUNCPTR (gst_d3d12_dxgi_capture_do_capture);
+  capture_class->get_format =
+      GST_DEBUG_FUNCPTR (gst_d3d12_dxgi_capture_get_format);
 }
 
 static void
@@ -819,35 +1183,14 @@ static gboolean
 gst_d3d12_dxgi_capture_open (GstD3D12DxgiCapture * self,
     HMONITOR monitor_handle)
 {
-  const D3D12_ROOT_SIGNATURE_FLAGS rs_flags =
-      D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
-      D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
-      D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
-      D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS |
-      D3D12_ROOT_SIGNATURE_FLAG_DENY_AMPLIFICATION_SHADER_ROOT_ACCESS |
-      D3D12_ROOT_SIGNATURE_FLAG_DENY_MESH_SHADER_ROOT_ACCESS;
-  const D3D12_STATIC_SAMPLER_DESC static_sampler_desc = {
-    D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
-    D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-    D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-    D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-    0,
-    1,
-    D3D12_COMPARISON_FUNC_ALWAYS,
-    D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK,
-    0,
-    D3D12_FLOAT32_MAX,
-    0,
-    0,
-    D3D12_SHADER_VISIBILITY_PIXEL
-  };
-
   auto priv = self->priv;
   priv->monitor_handle = monitor_handle;
 
   ComPtr < IDXGIOutput > output;
+  ComPtr < IDXGIOutput6 > output6;
+  ComPtr < IDXGIAdapter1 > adapter;
   auto hr = gst_d3d12_screen_capture_find_output_for_monitor (monitor_handle,
-      nullptr, &output);
+      &adapter, &output);
   if (!gst_d3d12_result (hr, self->device)) {
     GST_WARNING_OBJECT (self,
         "Failed to find associated adapter for monitor %p", monitor_handle);
@@ -888,6 +1231,19 @@ gst_d3d12_dxgi_capture_open (GstD3D12DxgiCapture * self,
     return FALSE;
   }
 
+  priv->sdr_white_level = 80;
+  hr = output.As (&output6);
+  if (SUCCEEDED (hr)) {
+    DXGI_OUTPUT_DESC1 desc1;
+    hr = output6->GetDesc1 (&desc1);
+    if (SUCCEEDED (hr) &&
+        desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) {
+      priv->sdr_white_level = get_sdr_white_level (monitor_info.szDevice);
+      GST_INFO_OBJECT (self, "HDR mode detected, SDR white level in nits: %d",
+          priv->sdr_white_level);
+    }
+  }
+
   priv->desktop_coordinates.left = dev_mode.dmPosition.x;
   priv->desktop_coordinates.top = dev_mode.dmPosition.y;
   priv->desktop_coordinates.right =
@@ -908,85 +1264,12 @@ gst_d3d12_dxgi_capture_open (GstD3D12DxgiCapture * self,
 
   auto device = gst_d3d12_device_get_device_handle (self->device);
 
-  CD3DX12_ROOT_PARAMETER param;
-  D3D12_DESCRIPTOR_RANGE range;
-  std::vector < D3D12_ROOT_PARAMETER > param_list;
-
-  range = CD3DX12_DESCRIPTOR_RANGE (D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
-  param.InitAsDescriptorTable (1, &range, D3D12_SHADER_VISIBILITY_PIXEL);
-  param_list.push_back (param);
-
-  D3D12_VERSIONED_ROOT_SIGNATURE_DESC rs_desc = { };
-  CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC::Init_1_0 (rs_desc,
-      param_list.size (), param_list.data (),
-      1, &static_sampler_desc, rs_flags);
-  ComPtr < ID3DBlob > rs_blob;
-  ComPtr < ID3DBlob > error_blob;
-  hr = D3DX12SerializeVersionedRootSignature (&rs_desc,
-      D3D_ROOT_SIGNATURE_VERSION_1_1, &rs_blob, &error_blob);
-  if (!gst_d3d12_result (hr, self->device)) {
-    const gchar *error_msg = nullptr;
-    if (error_blob)
-      error_msg = (const gchar *) error_blob->GetBufferPointer ();
-
-    GST_ERROR_OBJECT (self, "Couldn't serialize root signature, error: %s",
-        GST_STR_NULL (error_msg));
-    return FALSE;
-  }
-
-  hr = device->CreateRootSignature (0, rs_blob->GetBufferPointer (),
-      rs_blob->GetBufferSize (), IID_PPV_ARGS (&priv->rs));
-  if (!gst_d3d12_result (hr, self->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't create root signature");
-    return FALSE;
-  }
-
-  D3D12_INPUT_ELEMENT_DESC input_desc[2];
-  input_desc[0].SemanticName = "POSITION";
-  input_desc[0].SemanticIndex = 0;
-  input_desc[0].Format = DXGI_FORMAT_R32G32B32_FLOAT;
-  input_desc[0].InputSlot = 0;
-  input_desc[0].AlignedByteOffset = D3D12_APPEND_ALIGNED_ELEMENT;
-  input_desc[0].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-  input_desc[0].InstanceDataStepRate = 0;
-
-  input_desc[1].SemanticName = "TEXCOORD";
-  input_desc[1].SemanticIndex = 0;
-  input_desc[1].Format = DXGI_FORMAT_R32G32_FLOAT;
-  input_desc[1].InputSlot = 0;
-  input_desc[1].AlignedByteOffset = D3D12_APPEND_ALIGNED_ELEMENT;
-  input_desc[1].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-  input_desc[1].InstanceDataStepRate = 0;
-
-  D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc = { };
-  pso_desc.pRootSignature = priv->rs.Get ();
-  pso_desc.VS.BytecodeLength = sizeof (g_VSMain_coord);
-  pso_desc.VS.pShaderBytecode = g_VSMain_coord;
-  pso_desc.PS.BytecodeLength = sizeof (g_PSMain_sample);
-  pso_desc.PS.pShaderBytecode = g_PSMain_sample;
-  pso_desc.BlendState = CD3DX12_BLEND_DESC (D3D12_DEFAULT);
-  pso_desc.SampleMask = UINT_MAX;
-  pso_desc.RasterizerState = CD3DX12_RASTERIZER_DESC (D3D12_DEFAULT);
-  pso_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-  pso_desc.DepthStencilState.DepthEnable = FALSE;
-  pso_desc.DepthStencilState.StencilEnable = FALSE;
-  pso_desc.InputLayout.pInputElementDescs = input_desc;
-  pso_desc.InputLayout.NumElements = G_N_ELEMENTS (input_desc);
-  pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-  pso_desc.NumRenderTargets = 1;
-  pso_desc.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
-  pso_desc.SampleDesc.Count = 1;
-
-  hr = device->CreateGraphicsPipelineState (&pso_desc,
-      IID_PPV_ARGS (&priv->pso));
-  if (!gst_d3d12_result (hr, self->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't create pso");
-    return FALSE;
-  }
-
   /* size will be updated later */
   GstVideoInfo info;
+  GstVideoInfo scrgb_info;
   gst_video_info_set_format (&info, GST_VIDEO_FORMAT_BGRA,
+      priv->cached_width, priv->cached_height);
+  gst_video_info_set_format (&scrgb_info, GST_VIDEO_FORMAT_RGBA64_LE,
       priv->cached_width, priv->cached_height);
   D3D12_BLEND_DESC blend_desc = CD3DX12_BLEND_DESC (D3D12_DEFAULT);
 
@@ -1002,38 +1285,167 @@ gst_d3d12_dxgi_capture_open (GstD3D12DxgiCapture * self,
   blend_desc.RenderTarget[0].RenderTargetWriteMask =
       D3D12_COLOR_WRITE_ENABLE_ALL;
 
-  priv->mouse_blend = gst_d3d12_converter_new (self->device, &info, &info,
-      &blend_desc, nullptr, nullptr);
+  priv->mouse_blend = gst_d3d12_converter_new (self->device, nullptr, &info,
+      &info, &blend_desc, nullptr, nullptr);
+  priv->mouse_blend_scrgb = gst_d3d12_converter_new (self->device, nullptr,
+      &info, &scrgb_info, &blend_desc, nullptr, nullptr);
 
   blend_desc.RenderTarget[0].SrcBlend = D3D12_BLEND_INV_DEST_COLOR;
   blend_desc.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_COLOR;
-  priv->mouse_xor_blend = gst_d3d12_converter_new (self->device, &info, &info,
-      &blend_desc, nullptr, nullptr);
+  priv->mouse_xor_blend = gst_d3d12_converter_new (self->device, nullptr, &info,
+      &info, &blend_desc, nullptr, nullptr);
+  priv->mouse_xor_blend_scrgb = gst_d3d12_converter_new (self->device, nullptr,
+      &info, &scrgb_info, &blend_desc, nullptr, nullptr);
 
-  D3D12_DESCRIPTOR_HEAP_DESC heap_desc = { };
-  heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  heap_desc.NumDescriptors = 1;
-  heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-  hr = device->CreateDescriptorHeap (&heap_desc,
-      IID_PPV_ARGS (&priv->srv_heap));
+  hr = device->CreateFence (0,
+      D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS (&priv->shared_fence));
   if (!gst_d3d12_result (hr, self->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't create descriptor heap");
+    GST_ERROR_OBJECT (self, "Couldn't create shared fence");
     return FALSE;
   }
 
-  heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-  heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-  hr = device->CreateDescriptorHeap (&heap_desc,
-      IID_PPV_ARGS (&priv->rtv_heap));
-  if (!gst_d3d12_result (hr, self->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't create descriptor heap");
-    return FALSE;
-  }
-
-  priv->ca_pool = gst_d3d12_command_allocator_pool_new (self->device,
+  priv->ca_pool = gst_d3d12_cmd_alloc_pool_new (device,
       D3D12_COMMAND_LIST_TYPE_DIRECT);
 
-  priv->device = (GstD3D12Device *) gst_object_ref (self->device);
+  D3D_FEATURE_LEVEL feature_level = D3D_FEATURE_LEVEL_11_1;
+  ComPtr < ID3D11Device > device11;
+  ComPtr < ID3D11DeviceContext > context11;
+  hr = D3D11CreateDevice (adapter.Get (), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+      D3D11_CREATE_DEVICE_BGRA_SUPPORT, &feature_level, 1, D3D11_SDK_VERSION,
+      &device11, nullptr, &context11);
+
+  hr = device11.As (&priv->device11);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "ID3D11Device5 interface unavilable");
+    return FALSE;
+  }
+
+  hr = context11.As (&priv->context11);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "ID3D11DeviceContext4 interface unavilable");
+    return FALSE;
+  }
+
+  HANDLE fence_handle;
+  hr = device->CreateSharedHandle (priv->shared_fence.Get (),
+      nullptr, GENERIC_ALL, nullptr, &fence_handle);
+  if (!gst_d3d12_result (hr, self->device)) {
+    GST_ERROR_OBJECT (self, "Couldn't create shared fence handle");
+    return FALSE;
+  }
+
+  hr = priv->device11->OpenSharedFence (fence_handle,
+      IID_PPV_ARGS (&priv->shared_fence11));
+  CloseHandle (fence_handle);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "Couldn't create fence");
+    return FALSE;
+  }
+
+  GstD3DShaderByteCode vs_code;
+  if (!gst_d3d_plugin_shader_get_vs_blob (GST_D3D_PLUGIN_VS_COORD,
+          GST_D3D_SM_5_0, &vs_code)) {
+    GST_ERROR_OBJECT (self, "Couldn't get vs bytecode");
+    return FALSE;
+  }
+
+  D3D11_INPUT_ELEMENT_DESC input_desc[2] = { };
+  input_desc[0].SemanticName = "POSITION";
+  input_desc[0].SemanticIndex = 0;
+  input_desc[0].Format = DXGI_FORMAT_R32G32B32_FLOAT;
+  input_desc[0].InputSlot = 0;
+  input_desc[0].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+  input_desc[0].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+  input_desc[0].InstanceDataStepRate = 0;
+  input_desc[1].SemanticName = "TEXCOORD";
+  input_desc[1].SemanticIndex = 0;
+  input_desc[1].Format = DXGI_FORMAT_R32G32_FLOAT;
+  input_desc[1].InputSlot = 0;
+  input_desc[1].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
+  input_desc[1].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+  input_desc[1].InstanceDataStepRate = 0;
+
+  hr = priv->device11->CreateVertexShader (vs_code.byte_code,
+      vs_code.byte_code_len, nullptr, &priv->vs);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "Couldn't create vertex shader");
+    return FALSE;
+  }
+
+  hr = device11->CreateInputLayout (input_desc, 2, vs_code.byte_code,
+      vs_code.byte_code_len, &priv->layout);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "Couldn't create input layout");
+    return FALSE;
+  }
+
+  GstD3DShaderByteCode ps_code;
+  if (!gst_d3d_plugin_shader_get_ps_blob (GST_D3D_PLUGIN_PS_SAMPLE,
+          GST_D3D_SM_5_0, &ps_code)) {
+    GST_ERROR_OBJECT (self, "Couldn't get ps bytecode");
+    return FALSE;
+  }
+  hr = priv->device11->CreatePixelShader (ps_code.byte_code,
+      ps_code.byte_code_len, nullptr, &priv->ps);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "Couldn't create pixel shader");
+    return FALSE;
+  }
+
+  if (!gst_d3d_plugin_shader_get_ps_blob (GST_D3D_PLUGIN_PS_SAMPLE_SCRGB,
+          GST_D3D_SM_5_0, &ps_code)) {
+    GST_ERROR_OBJECT (self, "Couldn't get ps bytecode");
+    return FALSE;
+  }
+  hr = priv->device11->CreatePixelShader (ps_code.byte_code,
+      ps_code.byte_code_len, nullptr, &priv->ps_scrgb);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "Couldn't create pixel shader");
+    return FALSE;
+  }
+
+  if (!gst_d3d_plugin_shader_get_ps_blob
+      (GST_D3D_PLUGIN_PS_SAMPLE_SCRGB_TONEMAP, GST_D3D_SM_5_0, &ps_code)) {
+    GST_ERROR_OBJECT (self, "Couldn't get ps bytecode");
+    return FALSE;
+  }
+  hr = priv->device11->CreatePixelShader (ps_code.byte_code,
+      ps_code.byte_code_len, nullptr, &priv->ps_scrgb_tonemap);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "Couldn't create pixel shader");
+    return FALSE;
+  }
+
+  PSConstBuffer cbuf;
+  cbuf.sdr_white_level = (float) priv->sdr_white_level;
+
+  D3D11_BUFFER_DESC buffer_desc = { };
+  D3D11_SUBRESOURCE_DATA subresource = { };
+  buffer_desc.Usage = D3D11_USAGE_DYNAMIC;
+  buffer_desc.ByteWidth = sizeof (PSConstBuffer);
+  buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+  subresource.pSysMem = &cbuf;
+  subresource.SysMemPitch = sizeof (PSConstBuffer);
+  hr = priv->device11->CreateBuffer (&buffer_desc, &subresource,
+      &priv->const_buf);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "Couldn't create constant buffer");
+    return FALSE;
+  }
+
+  D3D11_SAMPLER_DESC sampler_desc = { };
+  sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+  sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+  sampler_desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
+  sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+  hr = priv->device11->CreateSamplerState (&sampler_desc, &priv->sampler);
+  if (FAILED (hr)) {
+    GST_ERROR_OBJECT (self, "Couldn't create sampler state");
+    return FALSE;
+  }
 
   return TRUE;
 }
@@ -1044,6 +1456,8 @@ gst_d3d12_dxgi_capture_new (GstD3D12Device * device, HMONITOR monitor_handle)
   GList *iter;
 
   g_return_val_if_fail (GST_IS_D3D12_DEVICE (device), nullptr);
+
+  gst_d3d12_dxgi_capture_load_library ();
 
   /* Check if we have dup object corresponding to monitor_handle,
    * and if there is already configured capture object, reuse it.
@@ -1093,7 +1507,11 @@ gst_d3d12_dxgi_capture_prepare_unlocked (GstD3D12DxgiCapture * self)
   }
 
   auto ctx = std::make_unique < DesktopDupCtx > ();
-  auto ret = ctx->Init (priv->monitor_handle);
+  auto ret = ctx->Init (priv->monitor_handle, priv->device11.Get (),
+      priv->context11.Get (), priv->shared_fence11.Get (),
+      priv->sampler.Get (), priv->ps.Get (), priv->ps_scrgb.Get (),
+      priv->ps_scrgb_tonemap.Get (), priv->const_buf.Get (),
+      priv->vs.Get (), priv->layout.Get (), priv->prepare_flags ? TRUE : FALSE);
   if (ret != GST_FLOW_OK) {
     GST_WARNING_OBJECT (self,
         "Couldn't prepare capturing, %sexpected failure",
@@ -1103,64 +1521,19 @@ gst_d3d12_dxgi_capture_prepare_unlocked (GstD3D12DxgiCapture * self)
   }
 
   ctx->GetSize (&priv->cached_width, &priv->cached_height);
-  priv->viewport.TopLeftX = 0;
-  priv->viewport.TopLeftY = 0;
-  priv->viewport.Width = priv->cached_width;
-  priv->viewport.Height = priv->cached_height;
-  priv->viewport.MinDepth = 0;
-  priv->viewport.MaxDepth = 1;
-
-  priv->scissor_rect.left = 0;
-  priv->scissor_rect.top = 0;
-  priv->scissor_rect.right = priv->cached_width;
-  priv->scissor_rect.bottom = priv->cached_height;
-
-  ComPtr < ID3D12Resource > processed_frame;
-  D3D12_CLEAR_VALUE clear_value = { };
-  clear_value.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  clear_value.Color[0] = 0.0f;
-  clear_value.Color[1] = 0.0f;
-  clear_value.Color[2] = 0.0f;
-  clear_value.Color[3] = 1.0f;
-
-  D3D12_HEAP_PROPERTIES heap_prop =
-      CD3DX12_HEAP_PROPERTIES (D3D12_HEAP_TYPE_DEFAULT);
-  D3D12_RESOURCE_DESC resource_desc =
-      CD3DX12_RESOURCE_DESC::Tex2D (DXGI_FORMAT_B8G8R8A8_UNORM,
-      priv->cached_width, priv->cached_height, 1, 1, 1, 0,
-      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
-      D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
-
-  auto device = gst_d3d12_device_get_device_handle (self->device);
-  auto hr = device->CreateCommittedResource (&heap_prop, D3D12_HEAP_FLAG_NONE,
-      &resource_desc, D3D12_RESOURCE_STATE_COMMON, &clear_value,
-      IID_PPV_ARGS (&processed_frame));
-  if (!gst_d3d12_result (hr, self->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't create texture");
-    return GST_FLOW_ERROR;
-  }
-
-  D3D12_RENDER_TARGET_VIEW_DESC rtv_desc = { };
-  rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-  rtv_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  rtv_desc.Texture2D.PlaneSlice = 0;
-
-  device->CreateRenderTargetView (processed_frame.Get (), &rtv_desc,
-      priv->rtv_heap->GetCPUDescriptorHandleForHeapStart ());
-
   priv->ctx = std::move (ctx);
-  priv->processed_frame = processed_frame;
 
   return GST_FLOW_OK;
 }
 
 static GstFlowReturn
-gst_d3d12_dxgi_capture_prepare (GstD3D12ScreenCapture * capture)
+gst_d3d12_dxgi_capture_prepare (GstD3D12ScreenCapture * capture, guint flags)
 {
   auto self = GST_D3D12_DXGI_CAPTURE (capture);
   auto priv = self->priv;
 
   std::lock_guard < std::mutex > lk (priv->lock);
+  priv->prepare_flags = flags;
   return gst_d3d12_dxgi_capture_prepare_unlocked (self);
 }
 
@@ -1194,216 +1567,26 @@ gst_d3d12_dxgi_capture_get_size (GstD3D12ScreenCapture * capture,
   return gst_d3d12_dxgi_capture_get_size_unlocked (self, width, height);
 }
 
-static gboolean
-gst_d3d12_dxgi_capture_copy_move_rects (GstD3D12DxgiCapture * self,
-    ID3D12GraphicsCommandList * cl)
+static GstVideoFormat
+gst_d3d12_dxgi_capture_get_format (GstD3D12ScreenCapture * capture)
 {
+  auto self = GST_D3D12_DXGI_CAPTURE (capture);
   auto priv = self->priv;
-  HRESULT hr;
 
-  auto device = gst_d3d12_device_get_device_handle (self->device);
+  std::lock_guard < std::mutex > lk (priv->lock);
+  if (!priv->ctx)
+    return GST_VIDEO_FORMAT_BGRA;
 
-  GST_LOG_OBJECT (self, "Rendering move rects");
+  auto format = priv->ctx->GetFormat ();
+  if (format == DXGI_FORMAT_R16G16B16A16_UNORM)
+    return GST_VIDEO_FORMAT_RGBA64_LE;
 
-  std::vector < D3D12_RESOURCE_BARRIER > barriers;
-  if (!priv->move_frame) {
-    D3D12_HEAP_PROPERTIES heap_prop =
-        CD3DX12_HEAP_PROPERTIES (D3D12_HEAP_TYPE_DEFAULT);
-    D3D12_RESOURCE_DESC resource_desc = priv->processed_frame->GetDesc ();
-    resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-    hr = device->CreateCommittedResource (&heap_prop,
-        D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_RESOURCE_STATE_COPY_DEST,
-        nullptr, IID_PPV_ARGS (&priv->move_frame));
-    if (!gst_d3d12_result (hr, self->device)) {
-      GST_ERROR_OBJECT (self, "Couldn't create move texture");
-      return FALSE;
-    }
-  }
-
-  D3D12_TEXTURE_COPY_LOCATION move_frame =
-      CD3DX12_TEXTURE_COPY_LOCATION (priv->move_frame.Get ());
-  D3D12_TEXTURE_COPY_LOCATION processed_frame =
-      CD3DX12_TEXTURE_COPY_LOCATION (priv->processed_frame.Get ());
-
-  const auto & data = priv->ctx->GetMoveRects ();
-  for (size_t i = 0; i < data.size (); i++) {
-    const auto & rect = data[i];
-    cl->CopyTextureRegion (&move_frame, rect.src_rect.left, rect.src_rect.top,
-        0, &processed_frame, &rect.box);
-  }
-
-  priv->resource_state = D3D12_RESOURCE_STATE_COPY_DEST;
-
-  barriers.clear ();
-  barriers.
-      push_back (CD3DX12_RESOURCE_BARRIER::Transition (priv->processed_frame.
-          Get (), D3D12_RESOURCE_STATE_COPY_SOURCE,
-          D3D12_RESOURCE_STATE_COPY_DEST));
-  barriers.push_back (CD3DX12_RESOURCE_BARRIER::Transition (priv->
-          move_frame.Get (), D3D12_RESOURCE_STATE_COPY_DEST,
-          D3D12_RESOURCE_STATE_COPY_SOURCE));
-  cl->ResourceBarrier (barriers.size (), barriers.data ());
-  for (size_t i = 0; i < data.size (); i++) {
-    const auto & rect = data[i];
-    cl->CopyTextureRegion (&processed_frame, rect.dst_rect.left,
-        rect.dst_rect.top, 0, &move_frame, &rect.box);
-  }
-
-  barriers.clear ();
-  barriers.push_back (CD3DX12_RESOURCE_BARRIER::Transition (priv->
-          move_frame.Get (), D3D12_RESOURCE_STATE_COPY_SOURCE,
-          D3D12_RESOURCE_STATE_COPY_DEST));
-  cl->ResourceBarrier (barriers.size (), barriers.data ());
-
-  return TRUE;
-}
-
-static gboolean
-gst_d3d12_dxgi_capture_copy_dirty_rects (GstD3D12DxgiCapture * self,
-    IDXGIResource * resource, ID3D12GraphicsCommandList * cl)
-{
-  auto priv = self->priv;
-  HRESULT hr;
-
-  auto device = gst_d3d12_device_get_device_handle (self->device);
-
-  GST_LOG_OBJECT (self, "Rendering dirty rects");
-
-  if (!priv->shared_resource) {
-    ComPtr < IDXGIResource1 > resource1;
-    hr = resource->QueryInterface (IID_PPV_ARGS (&resource1));
-    if (!gst_d3d12_result (hr, self->device)) {
-      GST_ERROR_OBJECT (self, "IDXGIResource1 interface unavailable");
-      return FALSE;
-    }
-
-    HANDLE shared_handle;
-    hr = resource1->CreateSharedHandle (nullptr, DXGI_SHARED_RESOURCE_READ,
-        nullptr, &shared_handle);
-    if (!gst_d3d12_result (hr, self->device)) {
-      GST_ERROR_OBJECT (self, "Couldn't create shared handle");
-      return FALSE;
-    }
-
-    hr = device->OpenSharedHandle (shared_handle,
-        IID_PPV_ARGS (&priv->shared_resource));
-    CloseHandle (shared_handle);
-    if (!gst_d3d12_result (hr, self->device)) {
-      GST_ERROR_OBJECT (self, "Couldn't open shared resource");
-      return FALSE;
-    }
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = { };
-    srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    srv_desc.Texture2D.PlaneSlice = 0;
-    srv_desc.Texture2D.MipLevels = 1;
-
-    device->CreateShaderResourceView (priv->shared_resource.Get (), &srv_desc,
-        priv->srv_heap->GetCPUDescriptorHandleForHeapStart ());
-  }
-
-  auto desc = priv->ctx->GetDesc ();
-  if (desc.Rotation == DXGI_MODE_ROTATION_UNSPECIFIED ||
-      desc.Rotation == DXGI_MODE_ROTATION_IDENTITY) {
-    const auto & rects = priv->ctx->GetDirtyRects ();
-    D3D12_TEXTURE_COPY_LOCATION src =
-        CD3DX12_TEXTURE_COPY_LOCATION (priv->shared_resource.Get ());
-    D3D12_TEXTURE_COPY_LOCATION dst =
-        CD3DX12_TEXTURE_COPY_LOCATION (priv->processed_frame.Get ());
-    D3D12_BOX box;
-    box.front = 0;
-    box.back = 1;
-
-    GST_LOG_OBJECT (self, "Perform copy");
-
-    for (size_t i = 0; i < rects.size (); i++) {
-      const auto & rect = rects[i];
-      box.left = rect.left;
-      box.right = rect.right;
-      box.top = rect.top;
-      box.bottom = rect.bottom;
-
-      cl->CopyTextureRegion (&dst, box.left, box.top, 0, &src, &box);
-    }
-
-    if (priv->resource_state == D3D12_RESOURCE_STATE_COMMON)
-      priv->resource_state = D3D12_RESOURCE_STATE_COPY_DEST;
-  } else {
-    GST_LOG_OBJECT (self, "Perform draw");
-
-    if (priv->resource_state != D3D12_RESOURCE_STATE_COMMON) {
-      D3D12_RESOURCE_BARRIER barrier =
-          CD3DX12_RESOURCE_BARRIER::Transition (priv->processed_frame.Get (),
-          priv->resource_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-      priv->cl->ResourceBarrier (1, &barrier);
-    }
-
-    cl->SetGraphicsRootSignature (priv->rs.Get ());
-    cl->IASetPrimitiveTopology (D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    cl->RSSetViewports (1, &priv->viewport);
-    cl->RSSetScissorRects (1, &priv->scissor_rect);
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv_heaps[] = {
-      priv->rtv_heap->GetCPUDescriptorHandleForHeapStart ()
-    };
-
-    cl->OMSetRenderTargets (1, rtv_heaps, FALSE, nullptr);
-
-    const auto & vertex = priv->ctx->GetDirtyVertex ();
-    UINT buf_size = vertex.size () * sizeof (VERTEX);
-    if (priv->dirty_vertex_size < buf_size)
-      priv->dirty_vertex_buf = nullptr;
-
-    if (!priv->dirty_vertex_buf) {
-      D3D12_HEAP_PROPERTIES heap_prop =
-          CD3DX12_HEAP_PROPERTIES (D3D12_HEAP_TYPE_UPLOAD);
-      D3D12_RESOURCE_DESC buffer_desc =
-          CD3DX12_RESOURCE_DESC::Buffer (buf_size);
-      hr = device->CreateCommittedResource (&heap_prop,
-          D3D12_HEAP_FLAG_CREATE_NOT_ZEROED, &buffer_desc,
-          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-          IID_PPV_ARGS (&priv->dirty_vertex_buf));
-      if (!gst_d3d12_result (hr, self->device)) {
-        GST_ERROR_OBJECT (self, "Couldn't create vertex buffer");
-        return FALSE;
-      }
-
-      priv->dirty_vertex_size = buf_size;
-    }
-
-    CD3DX12_RANGE range (0, 0);
-    void *data;
-    hr = priv->dirty_vertex_buf->Map (0, &range, &data);
-    if (!gst_d3d12_result (hr, self->device)) {
-      GST_ERROR_OBJECT (self, "Couldn't map buffer");
-      return FALSE;
-    }
-
-    memcpy (data, vertex.data (), buf_size);
-    priv->dirty_vertex_buf->Unmap (0, nullptr);
-    D3D12_VERTEX_BUFFER_VIEW vbv = { };
-    vbv.BufferLocation = priv->dirty_vertex_buf->GetGPUVirtualAddress ();
-    vbv.SizeInBytes = buf_size;
-    vbv.StrideInBytes = sizeof (VERTEX);
-
-    ID3D12DescriptorHeap *heaps[] = { priv->srv_heap.Get () };
-    cl->SetDescriptorHeaps (1, heaps);
-    cl->SetGraphicsRootDescriptorTable (0,
-        priv->srv_heap->GetGPUDescriptorHandleForHeapStart ());
-    cl->IASetVertexBuffers (0, 1, &vbv);
-    cl->DrawInstanced (vertex.size (), 1, 0, 0);
-
-    if (priv->resource_state == D3D12_RESOURCE_STATE_COMMON)
-      priv->resource_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
-  }
-
-  return TRUE;
+  return GST_VIDEO_FORMAT_BGRA;
 }
 
 static gboolean
 gst_d3d12_dxgi_capture_draw_mouse (GstD3D12DxgiCapture * self,
-    GstBuffer * buffer, const D3D12_BOX * crop_box)
+    GstBuffer * buffer, const D3D12_BOX * crop_box, gboolean is_hdr)
 {
   auto priv = self->priv;
   const auto & info = priv->ctx->GetPointerInfo ();
@@ -1415,10 +1598,14 @@ gst_d3d12_dxgi_capture_draw_mouse (GstD3D12DxgiCapture * self,
   if (!info.width_ || !info.height_)
     return TRUE;
 
-  if (info.position_info.Position.x + info.width_ < crop_box->left ||
-      info.position_info.Position.x > crop_box->right ||
-      info.position_info.Position.y + info.height_ < crop_box->top ||
-      info.position_info.Position.y > crop_box->bottom) {
+  if (static_cast < INT > (info.position_info.Position.x + info.width_) <
+      static_cast < INT > (crop_box->left) ||
+      static_cast < INT > (info.position_info.Position.x) >
+      static_cast < INT > (crop_box->right) ||
+      static_cast < INT > (info.position_info.Position.y + info.height_) <
+      static_cast < INT > (crop_box->top) ||
+      static_cast < INT > (info.position_info.Position.y) >
+      static_cast < INT > (crop_box->bottom)) {
     return TRUE;
   }
 
@@ -1460,13 +1647,13 @@ gst_d3d12_dxgi_capture_draw_mouse (GstD3D12DxgiCapture * self,
 
     priv->mouse_buf = gst_buffer_new ();
     auto mem = gst_d3d12_allocator_alloc_wrapped (nullptr, self->device,
-        mouse_texture.Get (), 0);
+        mouse_texture.Get (), 0, nullptr, nullptr);
     gst_buffer_append_memory (priv->mouse_buf, mem);
 
     if (mouse_xor_texture) {
       priv->mouse_xor_buf = gst_buffer_new ();
       auto mem = gst_d3d12_allocator_alloc_wrapped (nullptr, self->device,
-          mouse_xor_texture.Get (), 0);
+          mouse_xor_texture.Get (), 0, nullptr, nullptr);
       gst_buffer_append_memory (priv->mouse_xor_buf, mem);
     }
 
@@ -1500,63 +1687,70 @@ gst_d3d12_dxgi_capture_draw_mouse (GstD3D12DxgiCapture * self,
     }
   }
 
-  gst_d3d12_fence_data_pool_acquire (priv->fence_data_pool,
-      &priv->mouse_fence_data);
-  auto fence_data = priv->mouse_fence_data;
+  GstD3D12FenceData *fence_data = nullptr;
+  gst_d3d12_fence_data_pool_acquire (priv->fence_data_pool, &fence_data);
 
-  GstD3D12CommandAllocator *gst_ca = nullptr;
-  ComPtr < ID3D12CommandAllocator > ca;
-
-  if (!gst_d3d12_command_allocator_pool_acquire (priv->ca_pool, &gst_ca)) {
+  GstD3D12CmdAlloc *gst_ca = nullptr;
+  if (!gst_d3d12_cmd_alloc_pool_acquire (priv->ca_pool, &gst_ca)) {
     GST_ERROR_OBJECT (self, "Couldn't acquire command allocator");
+    gst_d3d12_fence_data_unref (fence_data);
     return FALSE;
   }
 
-  gst_d3d12_fence_data_add_notify_mini_object (fence_data, gst_ca);
+  gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_MINI_OBJECT (gst_ca));
 
-  gst_d3d12_command_allocator_get_handle (gst_ca, &ca);
+  auto ca = gst_d3d12_cmd_alloc_get_handle (gst_ca);
   hr = ca->Reset ();
   if (!gst_d3d12_result (hr, self->device)) {
     GST_ERROR_OBJECT (self, "Couldn't reset command allocator");
+    gst_d3d12_fence_data_unref (fence_data);
     return FALSE;
   }
 
-  if (!priv->mouse_cl) {
+  if (!priv->cl) {
     hr = device->CreateCommandList (0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        ca.Get (), nullptr, IID_PPV_ARGS (&priv->mouse_cl));
+        ca, nullptr, IID_PPV_ARGS (&priv->cl));
   } else {
-    hr = priv->mouse_cl->Reset (ca.Get (), nullptr);
+    hr = priv->cl->Reset (ca, nullptr);
   }
 
   if (!gst_d3d12_result (hr, self->device)) {
     GST_ERROR_OBJECT (self, "Couldn't reset command list");
+    gst_d3d12_fence_data_unref (fence_data);
     return FALSE;
   }
 
-  auto cl = priv->mouse_cl;
+  auto cl = priv->cl;
   gint ptr_x = info.position_info.Position.x - crop_box->left;
   gint ptr_y = info.position_info.Position.y - crop_box->top;
   gint ptr_w = info.width_;
   gint ptr_h = info.height_;
 
-  g_object_set (priv->mouse_blend, "src-x", 0, "src-y", 0, "src-width",
+  auto blend_conv = is_hdr ? priv->mouse_blend_scrgb : priv->mouse_blend;
+
+  g_object_set (blend_conv, "src-x", 0, "src-y", 0, "src-width",
       ptr_w, "src-height", ptr_h, "dest-x", ptr_x, "dest-y", ptr_y,
       "dest-width", ptr_w, "dest-height", ptr_h, nullptr);
 
-  if (!gst_d3d12_converter_convert_buffer (priv->mouse_blend,
-          priv->mouse_buf, buffer, fence_data, cl.Get ())) {
+  auto cq = gst_d3d12_device_get_cmd_queue (self->device,
+      D3D12_COMMAND_LIST_TYPE_DIRECT);
+  if (!gst_d3d12_converter_convert_buffer (blend_conv,
+          priv->mouse_buf, buffer, fence_data, cl.Get (), TRUE)) {
     GST_ERROR_OBJECT (self, "Couldn't build mouse blend command");
+    gst_d3d12_fence_data_unref (fence_data);
     return FALSE;
   }
 
   if (priv->mouse_xor_buf) {
-    g_object_set (priv->mouse_xor_blend, "src-x", 0, "src-y", 0, "src-width",
+    blend_conv = is_hdr ? priv->mouse_xor_blend_scrgb : priv->mouse_xor_blend;
+    g_object_set (blend_conv, "src-x", 0, "src-y", 0, "src-width",
         ptr_w, "src-height", ptr_h, "dest-x", ptr_x, "dest-y", ptr_y,
         "dest-width", ptr_w, "dest-height", ptr_h, nullptr);
 
-    if (!gst_d3d12_converter_convert_buffer (priv->mouse_xor_blend,
-            priv->mouse_xor_buf, buffer, fence_data, cl.Get ())) {
+    if (!gst_d3d12_converter_convert_buffer (blend_conv,
+            priv->mouse_xor_buf, buffer, fence_data, cl.Get (), FALSE)) {
       GST_ERROR_OBJECT (self, "Couldn't build mouse blend command");
+      gst_d3d12_fence_data_unref (fence_data);
       return FALSE;
     }
   }
@@ -1564,28 +1758,36 @@ gst_d3d12_dxgi_capture_draw_mouse (GstD3D12DxgiCapture * self,
   hr = cl->Close ();
   if (!gst_d3d12_result (hr, self->device)) {
     GST_ERROR_OBJECT (self, "Couldn't close command list");
+    gst_d3d12_fence_data_unref (fence_data);
     return FALSE;
   }
+
+  ID3D12CommandList *cmd_list[] = { cl.Get () };
+
+  guint64 fence_val = 0;
+  hr = gst_d3d12_cmd_queue_execute_command_lists (cq, 1, cmd_list, &fence_val);
+  if (!gst_d3d12_result (hr, self->device)) {
+    GST_ERROR_OBJECT (self, "Couldn't execute command list");
+    gst_d3d12_fence_data_unref (fence_data);
+    return FALSE;
+  }
+
+  gst_d3d12_cmd_queue_set_notify (cq, fence_val, fence_data,
+      (GDestroyNotify) gst_d3d12_fence_data_unref);
+  gst_d3d12_buffer_set_fence (buffer,
+      gst_d3d12_cmd_queue_get_fence_handle (cq), fence_val, FALSE);
 
   return TRUE;
 }
 
-static GstFlowReturn
-gst_d3d12_dxgi_capture_do_capture (GstD3D12ScreenCapture * capture,
+GstFlowReturn
+gst_d3d12_dxgi_capture_do_capture (GstD3D12DxgiCapture * capture,
     GstBuffer * buffer, const D3D12_BOX * crop_box, gboolean draw_mouse)
 {
   auto self = GST_D3D12_DXGI_CAPTURE (capture);
   auto priv = self->priv;
   GstFlowReturn ret = GST_FLOW_OK;
   guint width, height;
-  GstD3D12Memory *dmem;
-  ID3D12Resource *out_resource;
-  D3D12_TEXTURE_COPY_LOCATION src, dst;
-  ID3D12CommandList *cmd_list[1];
-  GstD3D12FenceData *fence_data = nullptr;
-  GstD3D12CommandAllocator *gst_ca = nullptr;
-  ComPtr < ID3D12CommandAllocator > ca;
-  HRESULT hr;
 
   std::lock_guard < std::mutex > lk (priv->lock);
   if (!priv->ctx) {
@@ -1607,12 +1809,27 @@ gst_d3d12_dxgi_capture_do_capture (GstD3D12ScreenCapture * capture,
     return GST_D3D12_SCREEN_CAPTURE_FLOW_SIZE_CHANGED;
   }
 
-  ComPtr < IDXGIResource > resource;
-  ret = priv->ctx->AcquireNextFrame (&resource);
+  auto dmem = (GstD3D12Memory *) gst_buffer_peek_memory (buffer, 0);
+  auto texture = gst_d3d12_memory_get_d3d11_texture (dmem,
+      priv->ctx->GetDevice ());
+  if (!texture) {
+    GST_ERROR_OBJECT (self, "Couldn't get d3d11 texture");
+    return GST_FLOW_ERROR;
+  }
+
+  D3D11_TEXTURE2D_DESC tex_desc;
+  texture->GetDesc (&tex_desc);
+  if (tex_desc.Format != priv->ctx->GetFormat ()) {
+    GST_INFO_OBJECT (self, "Format mismatch");
+    return GST_D3D12_SCREEN_CAPTURE_FLOW_SIZE_CHANGED;
+  }
+
+  priv->fence_val++;
+  ret = priv->ctx->Execute (texture, (D3D11_BOX *) crop_box, priv->fence_val);
   if (ret != GST_FLOW_OK) {
+    priv->fence_val--;
+    priv->WaitGPU ();
     priv->ctx = nullptr;
-    priv->processed_frame = nullptr;
-    priv->move_frame = nullptr;
     if (ret == GST_D3D12_SCREEN_CAPTURE_FLOW_EXPECTED_ERROR) {
       GST_WARNING_OBJECT (self, "Couldn't capture frame, but expected failure");
     } else {
@@ -1622,155 +1839,18 @@ gst_d3d12_dxgi_capture_do_capture (GstD3D12ScreenCapture * capture,
     return ret;
   }
 
-  if (resource) {
-    if (resource != priv->last_resource)
-      priv->shared_resource = nullptr;
+  gst_d3d12_memory_set_fence (dmem, priv->shared_fence.Get (),
+      priv->fence_val, FALSE);
 
-    priv->last_resource = resource;
+  GST_MINI_OBJECT_FLAG_SET (dmem, GST_D3D12_MEMORY_TRANSFER_NEED_DOWNLOAD);
+  GST_MINI_OBJECT_FLAG_UNSET (dmem, GST_D3D12_MEMORY_TRANSFER_NEED_UPLOAD);
+
+  if (draw_mouse && !gst_d3d12_dxgi_capture_draw_mouse (self, buffer, crop_box,
+          tex_desc.Format == DXGI_FORMAT_R16G16B16A16_UNORM)) {
+    priv->WaitGPU ();
+    priv->ctx = nullptr;
+    return GST_FLOW_ERROR;
   }
-
-  GST_LOG_OBJECT (self, "Capture done");
-
-  bool have_move_rect = false;
-  if (priv->ctx->GetMoveCount () > 0)
-    have_move_rect = true;
-  bool have_dirty_rect = false;
-  if ((priv->ctx->GetDirtyCount () > 0) && resource)
-    have_dirty_rect = true;
-
-  std::future < gboolean > mouse_blend_ret;
-  if (draw_mouse) {
-    /* Build mouse draw command from other thread */
-    mouse_blend_ret = std::async (std::launch::async,
-        gst_d3d12_dxgi_capture_draw_mouse, self, buffer, crop_box);
-  }
-
-  auto device = gst_d3d12_device_get_device_handle (self->device);
-  if (!gst_d3d12_command_allocator_pool_acquire (priv->ca_pool, &gst_ca)) {
-    GST_ERROR_OBJECT (self, "Couldn't acquire command allocator");
-    goto error;
-  }
-
-  gst_d3d12_fence_data_pool_acquire (priv->fence_data_pool, &fence_data);
-  gst_d3d12_fence_data_add_notify_mini_object (fence_data, gst_ca);
-
-  gst_d3d12_command_allocator_get_handle (gst_ca, &ca);
-
-  hr = ca->Reset ();
-  if (!gst_d3d12_result (hr, self->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't reset command allocator");
-    goto error;
-  }
-
-  if (!priv->cl) {
-    hr = device->CreateCommandList (0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        ca.Get (), priv->pso.Get (), IID_PPV_ARGS (&priv->cl));
-  } else {
-    hr = priv->cl->Reset (ca.Get (), priv->pso.Get ());
-  }
-
-  if (!gst_d3d12_result (hr, self->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't reset command list");
-    goto error;
-  }
-
-  priv->resource_state = D3D12_RESOURCE_STATE_COMMON;
-  if (have_move_rect &&
-      !gst_d3d12_dxgi_capture_copy_move_rects (self, priv->cl.Get ())) {
-    GST_ERROR_OBJECT (self, "Couldn't copy move rects");
-    goto error;
-  }
-
-  if (have_dirty_rect &&
-      !gst_d3d12_dxgi_capture_copy_dirty_rects (self, resource.Get (),
-          priv->cl.Get ())) {
-    GST_ERROR_OBJECT (self, "Couldn't copy dirty rects");
-    goto error;
-  }
-
-  dmem = (GstD3D12Memory *) gst_buffer_peek_memory (buffer, 0);
-  out_resource = gst_d3d12_memory_get_resource_handle (dmem);
-
-  src = CD3DX12_TEXTURE_COPY_LOCATION (priv->processed_frame.Get ());
-  dst = CD3DX12_TEXTURE_COPY_LOCATION (out_resource);
-
-  if (priv->resource_state != D3D12_RESOURCE_STATE_COMMON) {
-    D3D12_RESOURCE_BARRIER barrier =
-        CD3DX12_RESOURCE_BARRIER::Transition (priv->processed_frame.Get (),
-        priv->resource_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    priv->cl->ResourceBarrier (1, &barrier);
-  }
-
-  priv->cl->CopyTextureRegion (&dst, 0, 0, 0, &src, crop_box);
-
-  hr = priv->cl->Close ();
-  if (!gst_d3d12_result (hr, self->device)) {
-    GST_ERROR_OBJECT (self, "Couldn't close command list");
-    goto error;
-  }
-
-  cmd_list[0] = priv->cl.Get ();
-
-  if (!gst_d3d12_device_execute_command_lists (self->device,
-          D3D12_COMMAND_LIST_TYPE_DIRECT, 1, cmd_list, &priv->fence_val)) {
-    GST_ERROR_OBJECT (self, "Couldn't execute command list");
-    goto error;
-  }
-
-  gst_d3d12_device_set_fence_notify (self->device,
-      D3D12_COMMAND_LIST_TYPE_DIRECT, priv->fence_val, fence_data);
-
-  gst_d3d12_buffer_after_write (buffer, priv->fence_val);
-
-  if (draw_mouse) {
-    auto blend_ret = mouse_blend_ret.get ();
-    if (!blend_ret) {
-      GST_ERROR_OBJECT (self, "Couldn't build mouse draw command");
-      goto error;
-    }
-
-    if (priv->mouse_fence_data && priv->mouse_cl) {
-      cmd_list[0] = priv->mouse_cl.Get ();
-
-      if (!gst_d3d12_device_execute_command_lists (self->device,
-              D3D12_COMMAND_LIST_TYPE_DIRECT, 1, cmd_list,
-              &priv->mouse_fence_val)) {
-        GST_ERROR_OBJECT (self, "Couldn't execute command list");
-        goto error;
-      }
-
-      gst_d3d12_device_set_fence_notify (self->device,
-          D3D12_COMMAND_LIST_TYPE_DIRECT, priv->mouse_fence_val,
-          priv->mouse_fence_data);
-      priv->mouse_fence_data = nullptr;
-
-      gst_d3d12_buffer_after_write (buffer, priv->mouse_fence_val);
-    }
-  }
-
-  if (have_dirty_rect) {
-    gst_d3d12_device_fence_wait (self->device, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        priv->fence_val, priv->event_handle);
-  }
-
-  priv->ctx->ReleaseFrame ();
 
   return GST_FLOW_OK;
-
-error:
-  if (mouse_blend_ret.valid ())
-    mouse_blend_ret.get ();
-
-  gst_clear_d3d12_fence_data (&priv->mouse_fence_data);
-  gst_clear_d3d12_fence_data (&fence_data);
-  gst_clear_buffer (&priv->mouse_buf);
-  gst_clear_buffer (&priv->mouse_xor_buf);
-  resource = nullptr;
-  priv->last_resource = nullptr;
-  priv->shared_resource = nullptr;
-  priv->processed_frame = nullptr;
-  priv->move_frame = nullptr;
-  priv->ctx = nullptr;
-
-  return GST_FLOW_ERROR;
 }

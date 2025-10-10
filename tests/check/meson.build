@@ -1,3 +1,8 @@
+valgrind_dep = dependency('valgrind', required: false).partial_dependency(compile_args : true)
+if valgrind_dep.found()
+  cdata.set('HAVE_VALGRIND', 1)
+endif
+
 have_registry = true # FIXME get_option('registry')
 
 libparser = static_library('parser',
@@ -16,8 +21,8 @@ exif_dep = dependency('libexif', version : '>= 0.6.16', required : false)
 nalutils_dep = gstcodecparsers_dep.partial_dependency (compile_args: true, includes: true)
 
 enable_gst_play_tests = get_option('gst_play_tests')
-libsoup_dep = dependency('libsoup-2.4', version : '>=2.48', required : enable_gst_play_tests,
-  fallback : ['libsoup', 'libsoup_dep'])
+libsoup_dep = dependency('libsoup-3.0', include_type: 'system', required: enable_gst_play_tests,
+                         default_options: {'tests': false})
 
 # name, condition when to skip the test and extra dependencies
 base_tests = [
@@ -35,6 +40,7 @@ base_tests = [
   [['elements/ccextractor.c'], not closedcaption_dep.found(), ],
   [['elements/cudaconvert.c'], false, [gstgl_dep, gmodule_dep]],
   [['elements/cudafilter.c'], false, [gstgl_dep, gmodule_dep]],
+  [['elements/dashsink.c']],
   [['elements/d3d11colorconvert.c'], host_machine.system() != 'windows', ],
   [['elements/d3d11videosink.c'], host_machine.system() != 'windows', ],
   [['elements/fdkaac.c'], not fdkaac_dep.found(), ],
@@ -44,6 +50,7 @@ base_tests = [
   [['elements/h264parse.c'], false, [libparser_dep, gstcodecparsers_dep]],
   [['elements/h264timestamper.c'], false, [libparser_dep, gstcodecparsers_dep]],
   [['elements/h265parse.c'], false, [libparser_dep, gstcodecparsers_dep]],
+  [['elements/h266parse.c'], false, [libparser_dep, gstcodecparsers_dep]],
   [['elements/hlsdemux_m3u8.c'], not hls_dep.found(), [hls_dep]],
   [['elements/id3mux.c'], get_option('id3tag').disabled()],
   [['elements/interlace.c'], get_option('interlace').disabled()],
@@ -75,6 +82,9 @@ base_tests = [
   [['elements/switchbin.c'], get_option('switchbin').disabled()],
   [['elements/videoframe-audiolevel.c'], get_option('videoframe_audiolevel').disabled()],
   [['elements/viewfinderbin.c']],
+  [['elements/vkcolorconvert.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
+  [['elements/vkdeviceprovider.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
+  [['elements/vkupload.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['elements/voamrwbenc.c'], not voamrwbenc_dep.found(), [voamrwbenc_dep]],
   [['elements/vp9parse.c'], false, [gstcodecparsers_dep]],
   [['elements/av1parse.c'], false, [gstcodecparsers_dep]],
@@ -82,6 +92,7 @@ base_tests = [
   [['elements/wasapi2.c'], host_machine.system() != 'windows', ],
   [['libs/h264parser.c'], false, [gstcodecparsers_dep]],
   [['libs/h265parser.c'], false, [gstcodecparsers_dep]],
+  [['libs/h266parser.c'], false, [gstcodecparsers_dep]],
   [['libs/insertbin.c'], false, [gstinsertbin_dep]],
   [['libs/isoff.c'], false, [gstisoff_dep]],
   [['libs/nalutils.c', '../../gst-libs/gst/codecparsers/nalutils.c'], false, [nalutils_dep]],
@@ -98,20 +109,23 @@ base_tests = [
   [['libs/h265bitwriter.c'], false, [gstcodecparsers_dep]],
   [['libs/vkformat.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/av1bitwriter.c'], false, [gstcodecparsers_dep]],
+  [['libs/vp9bitwriter.c'], false, [gstcodecparsers_dep]],
+  [['libs/jpegbitwriter.c'], false, [gstcodecparsers_dep]],
   [['libs/vkmemory.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/analyticsmeta.c'], false, [gstanalytics_dep]],
-  [['elements/vkcolorconvert.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkwindow.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkdevice.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
-  [['elements/vkdeviceprovider.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkcommandpool.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkimage.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkinstance.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkimagebufferpool.c'], not gstvulkan_dep.found(), [gstvulkan_dep]],
   [['libs/vkvideodecode.c'], not gstvulkan_dep.found() or vulkan_conf.get('GST_VULKAN_HAVE_VIDEO_EXTENSIONS') != 1, [gstvulkan_dep]],
+  [['libs/vkvideoencodeh264.c'], not gstvulkan_dep.found() or vulkan_conf.get('GST_VULKAN_HAVE_VIDEO_EXTENSIONS') != 1, [gstvulkan_dep, gstcodecparsers_dep]],
+  [['libs/vkvideoencodeh265.c'], not gstvulkan_dep.found() or vulkan_conf.get('GST_VULKAN_HAVE_VIDEO_EXTENSIONS') != 1, [gstvulkan_dep, gstcodecparsers_dep]],
   [['libs/d3d11device.cpp'], not gstd3d11_dep.found(), [gstd3d11_dep]],
   [['libs/d3d11memory.c'], not gstd3d11_dep.found(), [gstd3d11_dep]],
   [['libs/cudamemory.c'], not gstcuda_dep.found(), [gstcuda_dep, gstcuda_stub_dep]],
+  [['libs/d3d12device.cpp'], not gstd3d12_dep.found(), [gstd3d12_dep]],
 ]
 
 # Make sure our headers are C++ clean
@@ -206,7 +220,8 @@ else
 endif
 gst_plugin_scanner_path = join_paths(gst_plugin_scanner_dir, 'gst-plugin-scanner')
 
-extra_args = []
+extra_args = cc.get_supported_arguments(['-Wno-aggregate-return'])
+
 # XXX: our MinGW 32bits toolchain complians when ComPtr is in use
 if host_system == 'windows' and cc.get_id() != 'msvc'
   mingw_args = cc.get_supported_arguments([

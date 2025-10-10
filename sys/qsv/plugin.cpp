@@ -57,8 +57,14 @@
 #include <windows.h>
 #include <versionhelpers.h>
 #include <gst/d3d11/gstd3d11.h>
+#include <gst/d3d11/gstd3d11device-private.h>
 #else
 #include <gst/va/gstva.h>
+#endif
+
+#ifdef HAVE_GST_D3D12
+#include <gst/d3d12/gstd3d12.h>
+#include <d3d11_4.h>
 #endif
 
 #include <glib/gi18n-lib.h>
@@ -250,6 +256,7 @@ plugin_init (GstPlugin * plugin)
     mfxSession session = nullptr;
     mfxImplDescription *desc = nullptr;
     GstObject *device = nullptr;
+    gboolean d3d12_interop = FALSE;
 
     status = MFXEnumImplementations (loader,
         i, MFX_IMPLCAPS_IMPLDESCSTRUCTURE, (mfxHDL *) & desc);
@@ -268,16 +275,28 @@ plugin_init (GstPlugin * plugin)
     if (!session)
       goto next;
 
+#ifdef HAVE_GST_D3D12
+    if (gst_d3d11_device_d3d12_import_supported (GST_D3D11_DEVICE (device))) {
+      GST_INFO_OBJECT (device, "Device supports D3D12 resource share");
+      d3d12_interop = TRUE;
+    }
+#endif
+
     gst_qsv_h264_dec_register (plugin, GST_RANK_MARGINAL, i, device, session);
     gst_qsv_h265_dec_register (plugin, GST_RANK_MARGINAL, i, device, session);
     gst_qsv_jpeg_dec_register (plugin, GST_RANK_SECONDARY, i, device, session);
     gst_qsv_vp9_dec_register (plugin, GST_RANK_MARGINAL, i, device, session);
 
-    gst_qsv_h264_enc_register (plugin, enc_rank, i, device, session);
-    gst_qsv_h265_enc_register (plugin, enc_rank, i, device, session);
-    gst_qsv_jpeg_enc_register (plugin, enc_rank, i, device, session);
-    gst_qsv_vp9_enc_register (plugin, enc_rank, i, device, session);
-    gst_qsv_av1_enc_register (plugin, enc_rank, i, device, session);
+    gst_qsv_h264_enc_register (plugin,
+        enc_rank, i, device, session, d3d12_interop);
+    gst_qsv_h265_enc_register (plugin,
+        enc_rank, i, device, session, d3d12_interop);
+    gst_qsv_jpeg_enc_register (plugin,
+        enc_rank, i, device, session, d3d12_interop);
+    gst_qsv_vp9_enc_register (plugin,
+        enc_rank, i, device, session, d3d12_interop);
+    gst_qsv_av1_enc_register (plugin,
+        enc_rank, i, device, session, d3d12_interop);
 
   next:
     MFXDispReleaseImplDescription (loader, desc);

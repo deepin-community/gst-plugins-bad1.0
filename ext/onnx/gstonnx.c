@@ -24,17 +24,24 @@
 #include "config.h"
 #endif
 
-#include "decoders/gstssdobjectdetector.h"
+/**
+ * SECTION:plugin-onnx
+ * @title: ONNX
+ * @short_description: A plugin for ONNX-Runtime
+ *
+ * A plugin containing the inference elements using the ONNX Runtime project.
+ *
+ * See https://onnxruntime.ai/
+ *
+ * Since: 1.20
+ */
+
 #include "gstonnxinference.h"
-#include "tensor/gsttensormeta.h"
 
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-  gboolean success = GST_ELEMENT_REGISTER (ssd_object_detector, plugin);
-  success |= GST_ELEMENT_REGISTER (onnx_inference, plugin);
-
-  return success;
+  return GST_ELEMENT_REGISTER (onnx_inference, plugin);
 }
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,

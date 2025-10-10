@@ -155,7 +155,7 @@ gst_srt_sink_start (GstBaseSink * bsink)
   if (!ret) {
     /* ensure error is posted since state change will fail */
     GST_ELEMENT_ERROR (self, RESOURCE, OPEN_WRITE, (NULL),
-        ("Failed to open SRT: %s", error->message));
+        ("Failed to open SRT: %s", error ? error->message : "Unknown error"));
     g_clear_error (&error);
   }
 
@@ -168,9 +168,40 @@ gst_srt_sink_stop (GstBaseSink * bsink)
   GstSRTSink *self = GST_SRT_SINK (bsink);
 
   g_clear_pointer (&self->headers, gst_buffer_list_unref);
+  self->headers_sent = FALSE;
   gst_srt_object_close (self->srtobject);
 
   return TRUE;
+}
+
+typedef struct
+{
+  GstBuffer *buf;
+  GstMapInfo *map_info;
+} StreamheaderCheckContext;
+
+static gboolean
+is_buffer_different (GstBuffer ** buffer, guint idx, gpointer data)
+{
+  StreamheaderCheckContext *ctx = (StreamheaderCheckContext *) data;
+
+  g_return_val_if_fail (buffer != NULL, FALSE);
+  g_return_val_if_fail (GST_IS_BUFFER (*buffer), FALSE);
+  g_return_val_if_fail (ctx != NULL, FALSE);
+  g_return_val_if_fail (GST_IS_BUFFER (ctx->buf), FALSE);
+  g_return_val_if_fail (ctx->map_info != NULL, FALSE);
+
+  if (*buffer == ctx->buf)
+    return FALSE;
+
+  if (gst_buffer_get_size (*buffer) != gst_buffer_get_size (ctx->buf))
+    return TRUE;
+
+  if (gst_buffer_memcmp (*buffer, 0, ctx->map_info->data, ctx->map_info->size)
+      != 0)
+    return TRUE;
+
+  return FALSE;
 }
 
 static GstFlowReturn
@@ -185,17 +216,25 @@ gst_srt_sink_render (GstBaseSink * sink, GstBuffer * buffer)
     ret = GST_FLOW_FLUSHING;
   }
 
-  if (self->headers && GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_HEADER)) {
-    GST_DEBUG_OBJECT (self, "Have streamheaders,"
-        " ignoring header %" GST_PTR_FORMAT, buffer);
-    return GST_FLOW_OK;
-  }
-
   if (!gst_buffer_map (buffer, &info, GST_MAP_READ)) {
     GST_ELEMENT_ERROR (self, RESOURCE, READ,
         ("Could not map the input stream"), (NULL));
     return GST_FLOW_ERROR;
   }
+
+  if (!self->headers_sent && self->headers &&
+      GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_HEADER)) {
+    StreamheaderCheckContext ctx = {.buf = buffer,.map_info = &info };
+
+    if (!gst_buffer_list_foreach (self->headers, is_buffer_different, &ctx)) {
+      GST_DEBUG_OBJECT (self, "Have streamheaders,"
+          " ignoring header %" GST_PTR_FORMAT, buffer);
+      gst_buffer_unmap (buffer, &info);
+      return GST_FLOW_OK;
+    }
+  }
+
+  self->headers_sent = TRUE;
 
   if (gst_srt_object_write (self->srtobject, self->headers, &info, &error) < 0) {
     GST_ELEMENT_ERROR (self, RESOURCE, WRITE,
@@ -250,6 +289,7 @@ gst_srt_sink_set_caps (GstBaseSink * bsink, GstCaps * caps)
   GST_DEBUG_OBJECT (self, "setcaps %" GST_PTR_FORMAT, caps);
 
   g_clear_pointer (&self->headers, gst_buffer_list_unref);
+  self->headers_sent = FALSE;
 
   s = gst_caps_get_structure (caps, 0);
   streamheader = gst_structure_get_value (s, "streamheader");

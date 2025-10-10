@@ -76,9 +76,11 @@ gst_webrtc_rtp_transceiver_set_property (GObject * object, guint prop_id,
 
   switch (prop_id) {
     case PROP_SENDER:
+      /* G_PARAM_CONSTRUCT_ONLY */
       webrtc->sender = g_value_dup_object (value);
       break;
     case PROP_RECEIVER:
+      /* G_PARAM_CONSTRUCT_ONLY */
       webrtc->receiver = g_value_dup_object (value);
       break;
     case PROP_MLINE:
@@ -263,7 +265,7 @@ gst_webrtc_rtp_transceiver_class_init (GstWebRTCRTPTransceiverClass * klass)
    * Since: 1.20
    **/
   g_object_class_install_property (gobject_class,
-      PROP_DIRECTION,
+      PROP_CURRENT_DIRECTION,
       g_param_spec_enum ("current-direction", "Current Direction",
           "Transceiver current direction",
           GST_TYPE_WEBRTC_RTP_TRANSCEIVER_DIRECTION,

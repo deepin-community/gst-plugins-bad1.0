@@ -173,11 +173,6 @@ uri_handler_set_uri (GstURIHandler * handler, const gchar * string,
   }
 
   stream_sep = strrchr (path_sep + 1, '/');
-  if (!stream_sep) {
-    g_set_error (error, GST_URI_ERROR, GST_URI_ERROR_BAD_REFERENCE,
-        "URI lacks stream: %s", string);
-    return FALSE;
-  }
 
   {
     gchar *string_without_path = g_strndup (string, path_sep - string);
@@ -194,7 +189,7 @@ uri_handler_set_uri (GstURIHandler * handler, const gchar * string,
   gst_uri_normalize (uri);
 
   scheme = gst_rtmp_scheme_from_uri (uri);
-  if (scheme < 0) {
+  if (scheme == GST_RTMP_SCHEME_ERROR) {
     g_set_error (error, GST_URI_ERROR, GST_URI_ERROR_BAD_REFERENCE,
         "URI has bad scheme: %s", string);
     goto out;
@@ -213,8 +208,10 @@ uri_handler_set_uri (GstURIHandler * handler, const gchar * string,
   }
 
   {
-    const gchar *path = path_sep + 1, *stream = stream_sep + 1;
-    gchar *application = g_strndup (path, stream_sep - path);
+    const gchar *path = path_sep + 1;
+    const gchar *stream = stream_sep ? stream_sep + 1 : "";
+    gchar *application =
+        stream_sep ? g_strndup (path, stream_sep - path) : g_strdup (path);
 
     GST_DEBUG_OBJECT (self, "setting location to %s://%s:%u/%s stream %s",
         gst_rtmp_scheme_to_string (scheme), host, port, application, stream);

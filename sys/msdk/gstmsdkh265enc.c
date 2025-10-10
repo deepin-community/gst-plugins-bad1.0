@@ -371,11 +371,11 @@ gst_msdkh265enc_configure (GstMsdkEnc * encoder)
   if (h265enc->profile_name) {
     encoder->param.mfx.CodecProfile = MFX_PROFILE_HEVC_MAIN;
 
-    if (!strcmp (h265enc->profile_name, "main-10"))
+    if (!g_strcmp0 (h265enc->profile_name, "main-10"))
       encoder->param.mfx.CodecProfile = MFX_PROFILE_HEVC_MAIN10;
-    else if (!strcmp (h265enc->profile_name, "main-still-picture"))
+    else if (!g_strcmp0 (h265enc->profile_name, "main-still-picture"))
       encoder->param.mfx.CodecProfile = MFX_PROFILE_HEVC_MAINSP;
-    else if (!strcmp (h265enc->profile_name, "main-10-still-picture")) {
+    else if (!g_strcmp0 (h265enc->profile_name, "main-10-still-picture")) {
       encoder->param.mfx.CodecProfile = MFX_PROFILE_HEVC_MAIN10;
       h265enc->ext_param.Header.BufferId = MFX_EXTBUFF_HEVC_PARAM;
       h265enc->ext_param.Header.BufferSz = sizeof (h265enc->ext_param);
@@ -383,17 +383,18 @@ gst_msdkh265enc_configure (GstMsdkEnc * encoder)
           MFX_HEVC_CONSTR_REXT_ONE_PICTURE_ONLY;
       gst_msdkenc_add_extra_param (encoder,
           (mfxExtBuffer *) & h265enc->ext_param);
-    } else if (!strcmp (h265enc->profile_name, "main-444") ||
-        !strcmp (h265enc->profile_name, "main-422-10") ||
-        !strcmp (h265enc->profile_name, "main-444-10") ||
-        !strcmp (h265enc->profile_name, "main-12"))
+    } else if (!g_strcmp0 (h265enc->profile_name, "main-444") ||
+        !g_strcmp0 (h265enc->profile_name, "main-422-10") ||
+        !g_strcmp0 (h265enc->profile_name, "main-444-10") ||
+        !g_strcmp0 (h265enc->profile_name, "main-12") ||
+        !g_strcmp0 (h265enc->profile_name, "main-422-12"))
       encoder->param.mfx.CodecProfile = MFX_PROFILE_HEVC_REXT;
 
 #if (MFX_VERSION >= 1032)
-    else if (!strcmp (h265enc->profile_name, "screen-extended-main") ||
-        !strcmp (h265enc->profile_name, "screen-extended-main-10") ||
-        !strcmp (h265enc->profile_name, "screen-extended-main-444") ||
-        !strcmp (h265enc->profile_name, "screen-extended-main-444-10"))
+    else if (!g_strcmp0 (h265enc->profile_name, "screen-extended-main") ||
+        !g_strcmp0 (h265enc->profile_name, "screen-extended-main-10") ||
+        !g_strcmp0 (h265enc->profile_name, "screen-extended-main-444") ||
+        !g_strcmp0 (h265enc->profile_name, "screen-extended-main-444-10"))
       encoder->param.mfx.CodecProfile = MFX_PROFILE_HEVC_SCC;
 #endif
   } else {
@@ -410,6 +411,7 @@ gst_msdkh265enc_configure (GstMsdkEnc * encoder)
 #endif
 #if (MFX_VERSION >= 1031)
       case MFX_FOURCC_P016:
+      case MFX_FOURCC_Y216:
 #endif
         encoder->param.mfx.CodecProfile = MFX_PROFILE_HEVC_REXT;
         break;
@@ -596,6 +598,10 @@ gst_msdkh265enc_set_src_caps (GstMsdkEnc * encoder)
 #if (MFX_VERSION >= 1031)
       case MFX_FOURCC_P016:
         gst_structure_set (structure, "profile", G_TYPE_STRING, "main-12",
+            NULL);
+        break;
+      case MFX_FOURCC_Y216:
+        gst_structure_set (structure, "profile", G_TYPE_STRING, "main-422-12",
             NULL);
         break;
 #endif
@@ -939,6 +945,7 @@ gst_msdkh265enc_is_format_supported (GstMsdkEnc * encoder,
           h265enc->tune_mode == MFX_CODINGOPTION_OFF)
         return TRUE;
 #endif
+      /* FALLTHROUGH */
     default:
       return FALSE;
   }

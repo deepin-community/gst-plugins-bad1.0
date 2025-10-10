@@ -1,0 +1,23 @@
+From: Fabian Greffrath <fabian@debian.org>
+Date: Wed, 4 Sep 2019 13:07:34 +0200
+Subject: Set a reasonable default soundfont for Debian
+
+Bug-Debian: https://bugs.debian.org/929185
+Forwarded: not-needed
+---
+ ext/fluidsynth/gstfluiddec.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ext/fluidsynth/gstfluiddec.c b/ext/fluidsynth/gstfluiddec.c
+index c25f0ca..5770022 100644
+--- a/ext/fluidsynth/gstfluiddec.c
++++ b/ext/fluidsynth/gstfluiddec.c
+@@ -73,7 +73,7 @@ enum
+   LAST_SIGNAL
+ };
+ 
+-#define DEFAULT_SOUNDFONT       NULL
++#define DEFAULT_SOUNDFONT       "/usr/share/sounds/sf3/default-GM.sf3"
+ #define DEFAULT_SYNTH_CHORUS    TRUE
+ #define DEFAULT_SYNTH_REVERB    TRUE
+ #define DEFAULT_SYNTH_GAIN      0.2

@@ -25,6 +25,15 @@ extra_args = [
   '-DG_LOG_DOMAIN="GStreamer-Dxva"',
 ]
 
+doc_sources = []
+foreach s: dxva_sources + dxva_headers
+  doc_sources += s.full_path()
+endforeach
+
+libs_sources += {
+  'dxva': pathsep.join(doc_sources)
+}
+
 if host_system != 'windows' and not build_gir
   subdir_done()
 endif
@@ -38,7 +47,8 @@ gstdxva = library('gstdxva-' + api_version,
   version : libversion,
   soversion : soversion,
   install : true,
-  dependencies : [gstvideo_dep, gstcodecs_dep]
+  dependencies : [gstvideo_dep, gstcodecs_dep],
+  override_options: ['cpp_std=c++11'],
 )
 
 library_def = {'lib': gstdxva}

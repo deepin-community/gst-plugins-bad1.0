@@ -6,9 +6,31 @@ applemedia_sources = [
     'coremediabuffer.c',
     'videotexturecache.m',
     'videotexturecache-gl.m',
-    'atdec.c',
     'glcontexthelper.c',
     'helpers.c',
+]
+
+applemedia_headers = [
+  'metal-helpers.h',
+  'vtutil.h',
+  'iosglmemory.h',
+  'corevideobuffer.h',
+  'videotexturecache.h',
+  'coremediabuffer.h',
+  'vtenc.h',
+  'avsamplevideosink.h',
+  'helpers.h',
+  'corevideomemory.h',
+  'iosassetsrc.h',
+  'iosurfaceglmemory.h',
+  'avfdeviceprovider.h',
+  'avfassetsrc.h',
+  'iosurfacevulkanmemory.h',
+  'videotexturecache-vulkan.h',
+  'vtdec.h',
+  'avfvideosrc.h',
+  'videotexturecache-gl.h',
+  'glcontexthelper.h',
 ]
 
 applemedia_args = [
@@ -20,65 +42,83 @@ applemedia_args = [
     '-DGST_USE_UNSTABLE_API'
 ]
 
+avfoundation_sources = [
+  'avfvideosrc.m',
+  'avfassetsrc.m',
+  'avsamplevideosink.m',
+  'avfdeviceprovider.m',
+]
+
+vt_sources = [
+  'vtenc.c',
+  'vtdec.c'
+]
+
+ios_sources = [
+  'iosassetsrc.m',
+  'iosglmemory.c',
+]
+
+non_ios_sources = [
+  'iosurfaceglmemory.c'
+]
+
+vulkan_sources = [
+  'videotexturecache-vulkan.mm',
+  'iosurfacevulkanmemory.c',
+]
+
+doc_sources = []
+foreach s: applemedia_sources + avfoundation_sources + vt_sources + ios_sources + non_ios_sources + vulkan_sources + applemedia_headers
+  doc_sources += meson.current_source_dir() / s
+endforeach
+
+plugin_sources += {
+  'applemedia': pathsep.join(doc_sources)
+}
+
 applemedia_objc_args = []
+applemedia_found_deps = false
 applemedia_option = get_option('applemedia')
 if not ['darwin', 'ios'].contains(host_system) or applemedia_option.disabled()
-  applemedia_found_deps = false
   subdir_done()
 endif
 
-if ['darwin', 'ios'].contains(host_system)
-  objc = meson.get_compiler('objc')
-  if not objc.has_argument('-fobjc-arc')
-    error('ARC is required for building')
-  endif
-
-  applemedia_objc_args += ['-fobjc-arc']
-
-  objcpp = meson.get_compiler('objcpp')
+objc = meson.get_compiler('objc')
+if not objc.has_argument('-fobjc-arc')
+  error('ARC is required for building')
 endif
+
+applemedia_objc_args += ['-fobjc-arc']
+objcpp = meson.get_compiler('objcpp')
 
 applemedia_frameworks = []
 corefoundation_dep = dependency('CoreFoundation', required : applemedia_option)
 coremedia_dep = dependency('CoreMedia', required : applemedia_option)
 corevideo_dep = dependency('CoreVideo', required : applemedia_option)
-audiotoolbox_dep = dependency('AudioToolbox', required : applemedia_option)
-applemedia_frameworks += [corefoundation_dep, coremedia_dep, corevideo_dep, audiotoolbox_dep]
+applemedia_frameworks += [corefoundation_dep, coremedia_dep, corevideo_dep]
 
 avfoundation_dep = dependency('AVFoundation', required : applemedia_option)
 if avfoundation_dep.found()
-    applemedia_sources += [
-        'avfvideosrc.m',
-        'avfassetsrc.m',
-        'avsamplevideosink.m',
-        'avfdeviceprovider.m',
-    ]
+    applemedia_sources += avfoundation_sources
     applemedia_frameworks += [avfoundation_dep]
 endif
 
 videotoolbox_dep = dependency('VideoToolbox', required : applemedia_option)
 if videotoolbox_dep.found()
-    applemedia_sources += [
-        'vtenc.c',
-        'vtdec.c'
-    ]
+    applemedia_sources += vt_sources
     applemedia_frameworks += [videotoolbox_dep]
 endif
 
 if host_system == 'ios'
-    applemedia_sources += [
-        'iosassetsrc.m',
-        'iosglmemory.c'
-    ]
+    applemedia_sources += ios_sources
     applemedia_objc_args += ['-fobjc-abi-version=2', '-fobjc-legacy-dispatch']
 
     ios_media_dep = dependency('appleframeworks', modules : ['Foundation', 'AssetsLibrary'], required : applemedia_option)
     iosurface_dep = dependency('IOSurface', required : applemedia_option)
     applemedia_frameworks += [ios_media_dep, iosurface_dep]
 else
-    applemedia_sources += [
-        'iosurfaceglmemory.c'
-    ]
+    applemedia_sources += non_ios_sources
     cocoa_dep = dependency('Cocoa', required : applemedia_option)
     iosurface_dep = dependency('IOSurface', required : applemedia_option)
     applemedia_opengl_dep = dependency('appleframeworks', modules : ['OpenGL'], required : applemedia_option)
@@ -93,15 +133,15 @@ foreach framework : applemedia_frameworks
 endforeach
 
 applemedia_objcpp_args = []
-if gstvulkan_dep.found() and have_objcpp
-  moltenvk_dep = cc.find_library('MoltenVK', required : false)
-  metal_dep = dependency('appleframeworks', modules : ['Metal'], required : false)
-  if metal_dep.found() and moltenvk_dep.found() and cc.has_header ('MoltenVK/vk_mvk_moltenvk.h')
+vulkan_option = get_option('vulkan')
+vk_required = applemedia_option.enabled() and vulkan_option.enabled()
+if gstvulkan_dep.found() and have_objcpp and not vulkan_option.disabled()
+  moltenvk_dep = objcpp.find_library('MoltenVK', required: vk_required)
+  metal_dep = dependency('appleframeworks', modules : ['Metal'], required: vk_required)
+  have_mvk_header = objcpp.has_header('MoltenVK/vk_mvk_moltenvk.h', required: vk_required)
+  if metal_dep.found() and moltenvk_dep.found() and have_mvk_header
     applemedia_frameworks += [moltenvk_dep, gstvulkan_dep, metal_dep]
-    applemedia_sources += [
-      'videotexturecache-vulkan.mm',
-      'iosurfacevulkanmemory.c',
-    ]
+    applemedia_sources += vulkan_sources
     applemedia_args += ['-DAPPLEMEDIA_MOLTENVK']
     # override_options : ['cpp_std=c++11'] doesn't seem to work for objcpp
     applemedia_objcpp_args += objcpp.get_supported_arguments([
@@ -118,7 +158,7 @@ if applemedia_found_deps
         objcpp_args : gst_plugins_bad_args + applemedia_args + applemedia_objc_args + applemedia_objcpp_args,
         link_args : noseh_link_args,
         include_directories : [configinc, libsinc],
-        dependencies : [gstvideo_dep, gstaudio_dep, gstpbutils_dep, gst_dep, gstbase_dep, gstgl_dep, gstglproto_dep, gstcodecparsers_dep] + applemedia_frameworks,
+        dependencies : [gstvideo_dep, gstpbutils_dep, gst_dep, gstbase_dep, gstgl_dep, gstglproto_dep, gstcodecparsers_dep] + applemedia_frameworks,
         override_options : ['cpp_std=c++11'],
         install : true,
         install_dir : plugins_install_dir,

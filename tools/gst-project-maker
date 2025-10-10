@@ -164,14 +164,14 @@ cat >$basedir/plugins/meson.build <<EOF
 lib_args = common_args + []
 
 # sources used to compile this plug-in
-plugin_sources = [
+sources = [
   '${gstreplace}plugin.c',
   '${gstreplace}.c',
   '${gstreplace}.h'
 ]
 
 shlib = shared_library('${gstreplace}',
-  plugin_sources,
+  sources,
   c_args : lib_args,
   include_directories: [configinc],
   dependencies : plugin_deps,
@@ -286,7 +286,7 @@ generate | sed \
   -e "s/gstreplace/$gstreplace/g" \
   -e "s/replace/$replace/g" >$basedir/plugins/${gstreplace}plugin.c
 
-gst-indent $basedir/plugins/${gstreplace}plugin.c || echo "Warning: could not run gst-indent on the generated code." 1>&2
+gst-indent-1.0 $basedir/plugins/${gstreplace}plugin.c || echo "Warning: could not run gst-indent on the generated code." 1>&2
 rm -f $basedir/plugins/${gstreplace}plugin.c~
 
 cat >$basedir/plugins/${gstreplace}.c <<EOF

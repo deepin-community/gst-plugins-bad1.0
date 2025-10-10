@@ -41,21 +41,21 @@
  * Then, depending on the #GstAV1OBUType of the newly parsed #GstAV1OBU,
  * you should call the differents functions to parse the structure details:
  *
- *   * #GST_AV1_OBU_SEQUENCE_HEADER: gst_av1_parser_parse_sequence_header_obu()
+ *   * %GST_AV1_OBU_SEQUENCE_HEADER: gst_av1_parser_parse_sequence_header_obu()
  *
- *   * #GST_AV1_OBU_TEMPORAL_DELIMITER: gst_av1_parser_parse_temporal_delimiter_obu()
+ *   * %GST_AV1_OBU_TEMPORAL_DELIMITER: gst_av1_parser_parse_temporal_delimiter_obu()
  *
- *   * #GST_AV1_OBU_FRAME: gst_av1_parser_parse_frame_obu()
+ *   * %GST_AV1_OBU_FRAME: gst_av1_parser_parse_frame_obu()
  *
- *   * #GST_AV1_OBU_FRAME_HEADER: gst_av1_parser_parse_frame_header_obu()
+ *   * %GST_AV1_OBU_FRAME_HEADER: gst_av1_parser_parse_frame_header_obu()
  *
- *   * #GST_AV1_OBU_TILE_GROUP: gst_av1_parser_parse_tile_group_obu()
+ *   * %GST_AV1_OBU_TILE_GROUP: gst_av1_parser_parse_tile_group_obu()
  *
- *   * #GST_AV1_OBU_METADATA: gst_av1_parser_parse_metadata_obu()
+ *   * %GST_AV1_OBU_METADATA: gst_av1_parser_parse_metadata_obu()
  *
- *   * #GST_AV1_OBU_REDUNDANT_FRAME_HEADER: gst_av1_parser_parse_frame_header_obu()
+ *   * %GST_AV1_OBU_REDUNDANT_FRAME_HEADER: gst_av1_parser_parse_frame_header_obu()
  *
- *   * #GST_AV1_OBU_TILE_LIST: gst_av1_parser_parse_tile_list_obu()
+ *   * %GST_AV1_OBU_TILE_LIST: gst_av1_parser_parse_tile_list_obu()
  *
  * Note: Some parser functions are dependent on information provided in the sequence
  * header and reference frame's information. It maintains a state inside itself, which
@@ -486,18 +486,7 @@ static gboolean
 av1_seq_level_idx_is_valid (GstAV1SeqLevels seq_level_idx)
 {
   return seq_level_idx == GST_AV1_SEQ_LEVEL_MAX
-      || (seq_level_idx < GST_AV1_SEQ_LEVELS
-      /* The following levels are currently undefined. */
-      && seq_level_idx != GST_AV1_SEQ_LEVEL_2_2
-      && seq_level_idx != GST_AV1_SEQ_LEVEL_2_3
-      && seq_level_idx != GST_AV1_SEQ_LEVEL_3_2
-      && seq_level_idx != GST_AV1_SEQ_LEVEL_3_3
-      && seq_level_idx != GST_AV1_SEQ_LEVEL_4_2
-      && seq_level_idx != GST_AV1_SEQ_LEVEL_4_3
-      && seq_level_idx != GST_AV1_SEQ_LEVEL_7_0
-      && seq_level_idx != GST_AV1_SEQ_LEVEL_7_1
-      && seq_level_idx != GST_AV1_SEQ_LEVEL_7_2
-      && seq_level_idx != GST_AV1_SEQ_LEVEL_7_3);
+      || seq_level_idx < GST_AV1_SEQ_LEVELS;
 }
 
 static void

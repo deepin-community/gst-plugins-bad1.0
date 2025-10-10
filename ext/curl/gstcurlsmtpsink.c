@@ -51,22 +51,23 @@
 #include <string.h>
 #include <stdio.h>
 
-#if HAVE_SYS_SOCKET_H
+#ifdef HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
 #endif
 #include <sys/types.h>
+#ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
-#if HAVE_PWD_H
+#endif
+#ifdef HAVE_PWD_H
 #include <pwd.h>
 #endif
-#if HAVE_NETINET_IN_H
+#ifdef HAVE_NETINET_IN_H
 #include <netinet/in.h>
 #endif
-#include <unistd.h>
-#if HAVE_NETINET_IP_H
+#ifdef HAVE_NETINET_IP_H
 #include <netinet/ip.h>
 #endif
-#if HAVE_NETINET_TCP_H
+#ifdef HAVE_NETINET_TCP_H
 #include <netinet/tcp.h>
 #endif
 #include <sys/stat.h>
@@ -637,7 +638,7 @@ gst_curl_smtp_sink_set_transfer_options_unlocked (GstCurlBaseSink * bcsink)
 
   /* time */
   date = g_date_time_new_now_local ();
-  date_str = g_date_time_format (date, "%a, %e %b %Y %H:%M:%S %z");
+  date_str = g_date_time_format (date, "%a, %_e %b %Y %H:%M:%S %z");
   g_date_time_unref (date);
 
   /* recipient, sender and subject are all UTF-8 strings, which are additionally

@@ -32,6 +32,8 @@
 #define GST_CAT_DEFAULT gst_va_base_enc_debug
 GST_DEBUG_CATEGORY_STATIC (GST_CAT_DEFAULT);
 
+#define GST_FLOW_OUTPUT_NOT_READY GST_FLOW_CUSTOM_SUCCESS_2
+
 struct _GstVaBaseEncPrivate
 {
   GstVideoInfo sinkpad_info;
@@ -73,6 +75,8 @@ gst_va_base_enc_reset_state_default (GstVaBaseEnc * base)
   base->profile = VAProfileNone;
   base->rt_format = 0;
   base->codedbuf_size = 0;
+  base->preferred_output_delay = 0;
+  base->min_buffers = 1;
   g_atomic_int_set (&base->reconf, FALSE);
 }
 
@@ -414,7 +418,7 @@ gst_va_base_enc_propose_allocation (GstVideoEncoder * venc, GstQuery * query)
   if (!(allocator = _allocator_from_caps (base, caps)))
     return FALSE;
 
-  pool = gst_va_pool_new_with_config (caps, 1, 0, usage_hint,
+  pool = gst_va_pool_new_with_config (caps, base->min_buffers, 0, usage_hint,
       GST_VA_FEATURE_AUTO, allocator, &params);
   if (!pool) {
     gst_object_unref (allocator);
@@ -425,7 +429,7 @@ gst_va_base_enc_propose_allocation (GstVideoEncoder * venc, GstQuery * query)
     goto config_failed;
 
   gst_query_add_allocation_param (query, allocator, &params);
-  gst_query_add_allocation_pool (query, pool, size, 1, 0);
+  gst_query_add_allocation_pool (query, pool, size, base->min_buffers, 0);
 
   GST_DEBUG_OBJECT (base,
       "proposing %" GST_PTR_FORMAT " with allocator %" GST_PTR_FORMAT,
@@ -459,7 +463,7 @@ _push_buffer_to_downstream (GstVaBaseEnc * base, GstVideoCodecFrame * frame)
   }
 
   if (frame->output_buffer)
-    GST_LOG_OBJECT (base, "Push to downstream: frame system_frame_number: %d,"
+    GST_LOG_OBJECT (base, "Push to downstream: frame system_frame_number: %u,"
         " pts: %" GST_TIME_FORMAT ", dts: %" GST_TIME_FORMAT
         " duration: %" GST_TIME_FORMAT ", buffer size: %" G_GSIZE_FORMAT,
         frame->system_frame_number, GST_TIME_ARGS (frame->pts),
@@ -499,10 +503,37 @@ _push_out_one_buffer (GstVaBaseEnc * base)
 
   if (ret != GST_FLOW_OK) {
     GST_DEBUG_OBJECT (base, "fails to push one buffer, system_frame_number "
-        "%d: %s", system_frame_number, gst_flow_get_name (ret));
+        "%u: %s", system_frame_number, gst_flow_get_name (ret));
   }
 
   return ret;
+}
+
+static GstFlowReturn
+_try_to_push_out_one_buffer (GstVaBaseEnc * base)
+{
+  GstVideoCodecFrame *frame_out;
+  GstVaEncFrame *frame_enc;
+  VASurfaceID surface;
+  gboolean ready;
+
+  frame_out = g_queue_peek_head (&base->output_list);
+  if (frame_out == NULL)
+    return GST_FLOW_OUTPUT_NOT_READY;
+
+  frame_enc = gst_va_get_enc_frame (frame_out);
+
+  surface = gst_va_encode_picture_get_reconstruct_surface (frame_enc->picture);
+
+  ready = va_check_surface_has_status (base->display, surface, VASurfaceReady);
+
+  GST_LOG_OBJECT (base, "Output of system_frame_number %u is %s",
+      frame_out->system_frame_number, ready ? "ready" : "not ready");
+
+  if (!ready)
+    return GST_FLOW_OUTPUT_NOT_READY;
+
+  return _push_out_one_buffer (base);
 }
 
 static GstFlowReturn
@@ -557,7 +588,7 @@ gst_va_base_enc_drain (GstVideoEncoder * venc)
   g_queue_clear_full (&base->ref_list,
       (GDestroyNotify) gst_video_codec_frame_unref);
 
-  gst_queue_array_clear (base->dts_queue);
+  gst_vec_deque_clear (base->dts_queue);
 
   return GST_FLOW_OK;
 
@@ -593,7 +624,7 @@ error_and_purge_all:
   g_queue_clear_full (&base->ref_list,
       (GDestroyNotify) gst_video_codec_frame_unref);
 
-  gst_queue_array_clear (base->dts_queue);
+  gst_vec_deque_clear (base->dts_queue);
 
   return ret;
 }
@@ -626,7 +657,7 @@ gst_va_base_enc_handle_frame (GstVideoEncoder * venc,
   GstVideoCodecFrame *frame_encode = NULL;
 
   GST_LOG_OBJECT (venc,
-      "handle frame id %d, dts %" GST_TIME_FORMAT ", pts %" GST_TIME_FORMAT,
+      "handle frame id %u, dts %" GST_TIME_FORMAT ", pts %" GST_TIME_FORMAT,
       frame->system_frame_number,
       GST_TIME_ARGS (GST_BUFFER_DTS (frame->input_buffer)),
       GST_TIME_ARGS (GST_BUFFER_PTS (frame->input_buffer)));
@@ -655,17 +686,41 @@ gst_va_base_enc_handle_frame (GstVideoEncoder * venc,
   /* pass it to reorder list and we should not use it again. */
   frame = NULL;
 
-  while (frame_encode) {
-    ret = base_class->encode_frame (base, frame_encode, FALSE);
+  if (frame_encode) {
+    while (frame_encode) {
+      ret = base_class->encode_frame (base, frame_encode, FALSE);
+      if (ret != GST_FLOW_OK)
+        goto error_encode;
+
+      while (ret == GST_FLOW_OK && g_queue_get_length (&base->output_list) >
+          base->preferred_output_delay)
+        ret = _push_out_one_buffer (base);
+
+      if (ret != GST_FLOW_OK)
+        goto error_push_buffer;
+
+      /* Try to push out all ready frames. */
+      do {
+        ret = _try_to_push_out_one_buffer (base);
+      } while (ret == GST_FLOW_OK);
+      if (ret == GST_FLOW_OUTPUT_NOT_READY)
+        ret = GST_FLOW_OK;
+      if (ret != GST_FLOW_OK)
+        goto error_push_buffer;
+
+      frame_encode = NULL;
+      if (!base_class->reorder_frame (base, NULL, FALSE, &frame_encode))
+        goto error_reorder;
+    }
+  } else {
+    /* Try to push out all ready frames. */
+    do {
+      ret = _try_to_push_out_one_buffer (base);
+    } while (ret == GST_FLOW_OK);
+    if (ret == GST_FLOW_OUTPUT_NOT_READY)
+      ret = GST_FLOW_OK;
     if (ret != GST_FLOW_OK)
-      goto error_encode;
-
-    while (g_queue_get_length (&base->output_list) > 0)
-      ret = _push_out_one_buffer (base);
-
-    frame_encode = NULL;
-    if (!base_class->reorder_frame (base, NULL, FALSE, &frame_encode))
-      goto error_reorder;
+      goto error_push_buffer;
   }
 
   return ret;
@@ -706,6 +761,12 @@ error_encode:
     gst_video_encoder_finish_frame (venc, frame_encode);
     return ret;
   }
+error_push_buffer:
+  {
+    GST_ELEMENT_ERROR (venc, STREAM, ENCODE,
+        ("Failed to push one frame."), (NULL));
+    return ret;
+  }
 }
 
 static GstFlowReturn
@@ -718,6 +779,7 @@ static gboolean
 gst_va_base_enc_set_format (GstVideoEncoder * venc, GstVideoCodecState * state)
 {
   GstVaBaseEnc *base = GST_VA_BASE_ENC (venc);
+  GstQuery *query;
 
   g_return_val_if_fail (state->caps != NULL, FALSE);
 
@@ -738,6 +800,13 @@ gst_va_base_enc_set_format (GstVideoEncoder * venc, GstVideoCodecState * state)
     gst_video_codec_state_unref (base->input_state);
   base->input_state = gst_video_codec_state_ref (state);
 
+  /* in case live streaming, we should run on low-latency mode */
+  base->is_live = FALSE;
+  query = gst_query_new_latency ();
+  if (gst_pad_peer_query (GST_VIDEO_ENCODER_SINK_PAD (venc), query))
+    gst_query_parse_latency (query, &base->is_live, NULL, NULL);
+  gst_query_unref (query);
+
   if (!gst_va_base_enc_reset (base))
     return FALSE;
 
@@ -752,7 +821,7 @@ gst_va_base_enc_flush (GstVideoEncoder * venc)
 
   _flush_all_frames (GST_VA_BASE_ENC (venc));
 
-  gst_queue_array_clear (base->dts_queue);
+  gst_vec_deque_clear (base->dts_queue);
 
   return TRUE;
 }
@@ -812,8 +881,8 @@ gst_va_base_enc_src_query (GstVideoEncoder * venc, GstQuery * query)
         ret = TRUE;
         break;
       }
-      /* else jump to default */
     }
+      /* FALLTHROUGH */
     default:
       ret = GST_VIDEO_ENCODER_CLASS (parent_class)->src_query (venc, query);
       break;
@@ -850,8 +919,7 @@ gst_va_base_enc_set_context (GstElement * element, GstContext * context)
 
   if (!ret || (old_display && new_display && old_display != new_display
           && base->encoder)) {
-    GST_ELEMENT_WARNING (element, RESOURCE, BUSY,
-        ("Can't replace VA display while operating"), (NULL));
+    GST_WARNING_OBJECT (element, "Can't replace VA display while operating");
   }
 
   gst_clear_object (&old_display);
@@ -890,8 +958,9 @@ gst_va_base_enc_init (GstVaBaseEnc * self)
   g_queue_init (&self->ref_list);
   g_queue_init (&self->output_list);
   gst_video_info_init (&self->in_info);
+  self->min_buffers = 1;
 
-  self->dts_queue = gst_queue_array_new_for_struct (sizeof (GstClockTime), 8);
+  self->dts_queue = gst_vec_deque_new_for_struct (sizeof (GstClockTime), 8);
 
   self->priv = gst_va_base_enc_get_instance_private (self);
 }
@@ -903,7 +972,7 @@ gst_va_base_enc_dispose (GObject * object)
 
   _flush_all_frames (GST_VA_BASE_ENC (object));
   gst_va_base_enc_close (GST_VIDEO_ENCODER (object));
-  g_clear_pointer (&base->dts_queue, gst_queue_array_free);
+  g_clear_pointer (&base->dts_queue, gst_vec_deque_free);
 
   G_OBJECT_CLASS (parent_class)->dispose (object);
 }
@@ -977,14 +1046,20 @@ gst_va_base_enc_add_rate_control_parameter (GstVaBaseEnc * base,
       .bits_per_second = max_bitrate_bits,
       .target_percentage = target_percentage,
       .window_size = window_size,
-      .initial_qp = qp_i,
       .min_qp = min_qp,
       .max_qp = max_qp,
       .rc_flags.bits.mb_rate_control = mbbrc,
-      .quality_factor = 0,
     },
   };
   /* *INDENT-ON* */
+
+  if (rc_mode == VA_RC_ICQ) {
+    rate_control.rate_control.ICQ_quality_factor = qp_i;
+  } else if (rc_mode == VA_RC_QVBR) {
+    rate_control.rate_control.quality_factor = qp_i;
+  } else {
+    rate_control.rate_control.initial_qp = qp_i;
+  }
 
   if (!gst_va_encoder_add_param (base->encoder, picture,
           VAEncMiscParameterBufferType, &rate_control, sizeof (rate_control))) {
@@ -1069,7 +1144,8 @@ gst_va_base_enc_add_hrd_parameter (GstVaBaseEnc * base,
   };
   /* *INDENT-ON* */
 
-  if (rc_mode == VA_RC_NONE || rc_mode == VA_RC_CQP || rc_mode == VA_RC_VCM)
+  if (rc_mode == VA_RC_NONE || rc_mode == VA_RC_CQP ||
+      rc_mode == VA_RC_VCM || rc_mode == VA_RC_ICQ)
     return TRUE;
 
   if (!gst_va_encoder_add_param (base->encoder, picture,
@@ -1093,16 +1169,13 @@ gst_va_base_enc_add_trellis_parameter (GstVaBaseEnc * base,
   } trellis = {
     .type = VAEncMiscParameterTypeQuantization,
     .tr.quantization_flags.bits = {
-       .disable_trellis = 0,
-       .enable_trellis_I = 1,
-       .enable_trellis_B = 1,
-       .enable_trellis_P = 1,
+       .disable_trellis = !use_trellis,
+       .enable_trellis_I = use_trellis,
+       .enable_trellis_B = use_trellis,
+       .enable_trellis_P = use_trellis,
     },
   };
   /* *INDENT-ON* */
-
-  if (!use_trellis)
-    return TRUE;
 
   if (!gst_va_encoder_add_param (base->encoder, picture,
           VAEncMiscParameterBufferType, &trellis, sizeof (trellis))) {
@@ -1121,7 +1194,9 @@ gst_va_base_enc_add_codec_tag (GstVaBaseEnc * base, const gchar * codec_name)
   const gchar *encoder_name;
   guint bitrate = 0;
 
-  g_object_get (venc, "bitrate", &bitrate, NULL);
+  if (g_object_class_find_property (G_OBJECT_GET_CLASS (base), "bitrate"))
+    g_object_get (venc, "bitrate", &bitrate, NULL);
+
   if (bitrate > 0)
     gst_tag_list_add (tags, GST_TAG_MERGE_REPLACE, GST_TAG_NOMINAL_BITRATE,
         bitrate, NULL);
@@ -1145,7 +1220,7 @@ gst_va_base_enc_push_dts (GstVaBaseEnc * base,
 {
   /* We need to manually insert max_reorder_num slots before the
      first frame to ensure DTS never bigger than PTS. */
-  if (gst_queue_array_get_length (base->dts_queue) == 0 && max_reorder_num > 0) {
+  if (gst_vec_deque_get_length (base->dts_queue) == 0 && max_reorder_num > 0) {
     GstClockTime dts_diff = 0, dts;
 
     if (GST_CLOCK_TIME_IS_VALID (frame->duration))
@@ -1161,12 +1236,12 @@ gst_va_base_enc_push_dts (GstVaBaseEnc * base,
         dts = frame->pts;
       }
 
-      gst_queue_array_push_tail_struct (base->dts_queue, &dts);
+      gst_vec_deque_push_tail_struct (base->dts_queue, &dts);
       max_reorder_num--;
     }
   }
 
-  gst_queue_array_push_tail_struct (base->dts_queue, &frame->pts);
+  gst_vec_deque_push_tail_struct (base->dts_queue, &frame->pts);
 }
 
 GstClockTime
@@ -1174,10 +1249,10 @@ gst_va_base_enc_pop_dts (GstVaBaseEnc * base)
 {
   GstClockTime dts;
 
-  g_return_val_if_fail (gst_queue_array_get_length (base->dts_queue) > 0,
+  g_return_val_if_fail (gst_vec_deque_get_length (base->dts_queue) > 0,
       GST_CLOCK_TIME_NONE);
 
-  dts = *((GstClockTime *) gst_queue_array_pop_head_struct (base->dts_queue));
+  dts = *((GstClockTime *) gst_vec_deque_pop_head_struct (base->dts_queue));
   return dts;
 }
 

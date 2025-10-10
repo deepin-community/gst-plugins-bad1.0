@@ -1,6 +1,6 @@
 project('gst-plugins-bad', 'c', 'cpp',
-  version : '1.24.6',
-  meson_version : '>= 1.1',
+  version : '1.26.6',
+  meson_version : '>= 1.4',
   default_options : [ 'warning_level=1',
                       'buildtype=debugoptimized' ])
 
@@ -37,6 +37,7 @@ osxversion = curversion + 1
 plugins_install_dir = join_paths(get_option('libdir'), 'gstreamer-1.0')
 static_build = get_option('default_library') == 'static'
 plugins = []
+plugin_sources = {}
 gst_libraries = []
 
 cc = meson.get_compiler('c')
@@ -52,7 +53,6 @@ else
 endif
 
 cdata = configuration_data()
-cdata.set('ENABLE_NLS', 1)
 
 if cc.get_id() == 'msvc'
   msvc_args = [
@@ -133,20 +133,20 @@ if gst_version_is_dev
   add_project_arguments('-DG_DISABLE_DEPRECATED', language: 'c')
 endif
 
-cast_checks = get_option('gobject-cast-checks')
-if cast_checks.disabled() or (cast_checks.auto() and not gst_version_is_dev)
+# Same logic as in GLib.
+glib_debug = get_option('glib_debug')
+if glib_debug.disabled() or (
+   glib_debug.auto() and (not get_option('debug') or get_option('optimization') not in [ '0', 'g' ]))
   message('Disabling GLib cast checks')
   add_project_arguments('-DG_DISABLE_CAST_CHECKS', language: 'c')
 endif
 
-glib_asserts = get_option('glib-asserts')
-if glib_asserts.disabled() or (glib_asserts.auto() and not gst_version_is_dev)
+if not get_option('glib_assert')
   message('Disabling GLib asserts')
   add_project_arguments('-DG_DISABLE_ASSERT', language: 'c')
 endif
 
-glib_checks = get_option('glib-checks')
-if glib_checks.disabled() or (glib_checks.auto() and not gst_version_is_dev)
+if not get_option('glib_checks')
   message('Disabling GLib checks')
   add_project_arguments('-DG_DISABLE_CHECKS', language: 'c')
 endif
@@ -160,6 +160,7 @@ check_headers = [
   ['HAVE_NETINET_IP_H', 'netinet/ip.h'],
   ['HAVE_NETINET_TCP_H', 'netinet/tcp.h'],
   ['HAVE_PTHREAD_H', 'pthread.h'],
+  ['HAVE_PWD_H', 'pwd.h'],
   ['HAVE_STDINT_H', 'stdint.h'],
   ['HAVE_STDLIB_H', 'stdlib.h'],
   ['HAVE_STRINGS_H', 'strings.h'],
@@ -219,23 +220,30 @@ cdata.set_quoted('GST_LICENSE', 'LGPL')
 cdata.set_quoted('LIBDIR', join_paths(get_option('prefix'), get_option('libdir')))
 cdata.set_quoted('LOCALEDIR', join_paths(get_option('prefix'), get_option('localedir')))
 
+# NOTE: Keep entries alphabetically sorted
 warning_flags = [
-  '-Wmissing-declarations',
-  '-Wredundant-decls',
-  '-Wwrite-strings',
+  '-Waddress',
   '-Wformat',
   '-Wformat-security',
+  '-Wimplicit-fallthrough=3',
   '-Winit-self',
+  '-Wmissing-declarations',
   '-Wmissing-include-dirs',
-  '-Waddress',
+  '-Wmissing-parameter-type',
   '-Wno-multichar',
-  '-Wvla',
   '-Wpointer-arith',
+  '-Wredundant-decls',
+  '-Wshift-negative-value',
+  '-Wtype-limits',
+  '-Wundef',
+  '-Wvla',
+  '-Wwrite-strings',
 ]
 
 warning_c_flags = [
   '-Wmissing-prototypes',
   '-Wold-style-definition',
+  '-Waggregate-return',
 ]
 
 warning_cxx_flags = [
@@ -398,6 +406,17 @@ if x11_dep.found()
   cdata.set('HAVE_X11', 1)
 endif
 
+# Optional dep of msdk and va
+if host_system not in ['darwin', 'ios', 'android', 'windows', 'gnu']
+  libdrm_dep = dependency('libdrm', version : '>=2.4.50',
+    required : get_option('drm').enabled() or get_option('msdk').enabled(),
+  )
+  cdata.set('HAVE_LIBDRM', libdrm_dep.found())
+else
+  libdrm_dep = dependency('', required: false)
+endif
+
+
 #
 # Solaris and Illumos distros split a lot of networking-related code
 # into '-lsocket -lnsl'.  Anything that calls socketpair(), getifaddr(),
@@ -427,6 +446,8 @@ if host_machine.system() == 'windows'
 
   if not building_for_win7
     add_project_arguments([
+      '-U_WIN32_WINNT',
+      '-UWINVER',
       '-D_WIN32_WINNT=_WIN32_WINNT_WIN7',
       '-DWINVER=_WIN32_WINNT_WIN7',
     ], language: ['c', 'cpp'])
@@ -463,8 +484,7 @@ have_orcc = false
 orcc_args = []
 orc_targets = []
 # Used by various libraries/elements that use Orc code
-orc_dep = dependency('orc-0.4', version : orc_req, required : get_option('orc'),
-    fallback : ['orc', 'orc_dep'])
+orc_dep = dependency('orc-0.4', version : orc_req, required : get_option('orc'), allow_fallback: true)
 orcc = find_program('orcc', required : get_option('orc'))
 if orc_dep.found() and orcc.found()
   have_orcc = true
@@ -525,6 +545,7 @@ gir_init_section = [ '--add-init-section=extern void gst_init(gint*,gchar**);' +
     'g_setenv("GST_REGISTRY_1.0", "@0@", TRUE);'.format(meson.current_build_dir() + '/gir_empty_registry.reg') + \
     'g_setenv("GST_PLUGIN_PATH_1_0", "", TRUE);' + \
     'g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", "", TRUE);' + \
+    'g_setenv("GST_TRACERS", "", TRUE);' + \
     'gst_init(NULL,NULL);', '--quiet']
 
 presetdir = join_paths(get_option('datadir'), 'gstreamer-' + api_version, 'presets')
@@ -554,6 +575,12 @@ pkgconfig.generate(
 )
 
 gpl_allowed = get_option('gpl').allowed()
+
+if host_machine.system() == 'windows'
+  pathsep = ';'
+else
+  pathsep = ':'
+endif
 
 subdir('gst-libs')
 subdir('gst')
@@ -588,6 +615,7 @@ endif
 
 # xgettext is optional (on Windows for instance)
 if find_program('xgettext', required : get_option('nls')).found()
+  cdata.set('ENABLE_NLS', 1)
   subdir('po')
 endif
 
@@ -608,7 +636,7 @@ endif
 
 configure_file(output : 'config.h', configuration : cdata)
 
-meson.add_dist_script('scripts/gen-changelog.py', meson.project_name(), '1.22.0', meson.project_version())
+meson.add_dist_script('scripts/gen-changelog.py', meson.project_name(), '1.24.0', meson.project_version())
 
 subdir('docs')
 

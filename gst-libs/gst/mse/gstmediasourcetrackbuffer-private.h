@@ -66,16 +66,9 @@ void gst_media_source_track_buffer_add (GstMediaSourceTrackBuffer * self,
     GstSample * sample);
 
 GST_MSE_PRIVATE
-void gst_media_source_track_buffer_remove (GstMediaSourceTrackBuffer * self,
-    GstSample * sample);
-
-GST_MSE_PRIVATE
 gsize
 gst_media_source_track_buffer_remove_range (GstMediaSourceTrackBuffer * self,
     GstClockTime start, GstClockTime end);
-
-GST_MSE_PRIVATE
-void gst_media_source_track_buffer_clear (GstMediaSourceTrackBuffer * self);
 
 GST_MSE_PRIVATE
 void gst_media_source_track_buffer_eos (GstMediaSourceTrackBuffer * self);
@@ -85,7 +78,7 @@ gboolean gst_media_source_track_buffer_is_eos (
     GstMediaSourceTrackBuffer * self);
 
 GST_MSE_PRIVATE
-gboolean gst_media_source_track_buffer_await_eos_until (
+void gst_media_source_track_buffer_await_new_data_until (
     GstMediaSourceTrackBuffer * self, gint64 deadline);
 
 GST_MSE_PRIVATE
@@ -94,7 +87,6 @@ gsize gst_media_source_track_buffer_get_storage_size (
 
 GST_MSE_PRIVATE
 GstIterator * gst_media_source_track_buffer_iter_samples (
-    GstMediaSourceTrackBuffer * buffer, GstClockTime start_dts,
-    GstSample * start_sample);
+    GstMediaSourceTrackBuffer * self);
 
 G_END_DECLS

@@ -76,6 +76,8 @@ static void
 gst_dshow_device_provider_dispose (GObject * gobject)
 {
   CoUninitialize ();
+
+  G_OBJECT_CLASS (gst_dshow_device_provider_parent_class)->dispose (gobject);
 }
 
 static GstDevice *
@@ -270,9 +272,11 @@ gst_dshow_device_get_property (GObject * object, guint prop_id,
 
   switch (prop_id) {
     case PROP_DEVICE:
+      /* G_PARAM_CONSTRUCT_ONLY */
       g_value_set_string (value, device->device);
       break;
     case PROP_DEVICE_NAME:
+      /* G_PARAM_CONSTRUCT_ONLY */
       g_value_set_string (value, device->device_name);
       break;
     case PROP_DEVICE_INDEX:

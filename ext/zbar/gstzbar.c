@@ -22,26 +22,27 @@
  * @title: zbar
  *
  * Detect bar codes in the video streams and send them as element messages to
- * the #GstBus if .#GstZBar:message property is %TRUE.
- * If the .#GstZBar:attach-frame property is %TRUE, the posted barcode message
+ * the #GstBus if #GstZBar:message property is %TRUE.
+ * If the #GstZBar:attach-frame property is %TRUE, the posted barcode message
  * includes a sample of the frame where the barcode was detected (Since 1.6).
  *
- * The element generate messages named`barcode`. The structure contains these fields:
+ * The element generates messages named `barcode`. The structure contains these fields:
  *
  * * #GstClockTime `timestamp`: the timestamp of the buffer that triggered the message.
  * * gchar * `type`: the symbol type.
- * * gchar * `symbol`: the detected bar code data.
+ * * gchar * `symbol`: the detected bar code data, as a string.
+ * * GBytes * `symbol-bytes`: the detected bar code data, as bytes. (Since 1.26)
  * * gint `quality`: an unscaled, relative quantity: larger values are better than smaller
  *   values.
- * * GstSample `frame`: the frame in which the barcode message was detected, if
- *   the .#GstZBar:attach-frame property was set to %TRUE (Since 1.6)
+ * * #GstSample `frame`: the frame in which the barcode message was detected, if
+ *   the #GstZBar:attach-frame property was set to %TRUE (Since 1.6)
  *
  * ## Example launch lines
  * |[
  * gst-launch-1.0 -m v4l2src ! videoconvert ! zbar ! videoconvert ! xvimagesink
  * ]| This pipeline will detect barcodes and send them as messages.
  * |[
- * gst-launch-1.0 -m v4l2src ! tee name=t ! queue ! videoconvert ! zbar ! fakesink t. ! queue ! xvimagesink
+ * gst-launch-1.0 -m v4l2src ! tee name=t ! queue ! videoconvert ! zbar ! fakesink t. ! queue ! videoconvert ! xvimagesink
  * ]| Same as above, but running the filter on a branch to keep the display in color
  *
  */
@@ -56,7 +57,6 @@
 #include <math.h>
 
 #include <gst/video/video.h>
-
 
 GST_DEBUG_CATEGORY_STATIC (zbar_debug);
 #define GST_CAT_DEFAULT zbar_debug
@@ -73,12 +73,14 @@ enum
   PROP_0,
   PROP_MESSAGE,
   PROP_ATTACH_FRAME,
-  PROP_CACHE
+  PROP_CACHE,
+  PROP_BINARY
 };
 
 #define DEFAULT_CACHE    FALSE
 #define DEFAULT_MESSAGE  TRUE
 #define DEFAULT_ATTACH_FRAME FALSE
+#define DEFAULT_BINARY FALSE
 
 #define ZBAR_YUV_CAPS \
     "{ Y800, I420, YV12, NV12, NV21, Y41B, Y42B, YUV9, YVU9 }"
@@ -156,6 +158,18 @@ gst_zbar_class_init (GstZBarClass * g_class)
           G_PARAM_READWRITE | GST_PARAM_MUTABLE_READY |
           G_PARAM_STATIC_STRINGS));
 
+  /**
+   * zbar:binary:
+   *
+   * Enable or disable binary QR codes, where binary data is not converted to text.
+   *
+   * Since: 1.26
+   */
+  g_object_class_install_property (gobject_class, PROP_BINARY,
+      g_param_spec_boolean ("binary", "binary",
+          "Enable or disable binary QR codes, where binary data is not converted to text",
+          DEFAULT_BINARY, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   gst_element_class_set_static_metadata (gstelement_class, "Barcode detector",
       "Filter/Analyzer/Video",
       "Detect bar codes in the video streams",
@@ -179,6 +193,7 @@ gst_zbar_init (GstZBar * zbar)
   zbar->cache = DEFAULT_CACHE;
   zbar->message = DEFAULT_MESSAGE;
   zbar->attach_frame = DEFAULT_ATTACH_FRAME;
+  zbar->binary = DEFAULT_BINARY;
 
   zbar->scanner = zbar_image_scanner_create ();
 }
@@ -212,6 +227,9 @@ gst_zbar_set_property (GObject * object, guint prop_id, const GValue * value,
     case PROP_ATTACH_FRAME:
       zbar->attach_frame = g_value_get_boolean (value);
       break;
+    case PROP_BINARY:
+      zbar->binary = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -236,6 +254,9 @@ gst_zbar_get_property (GObject * object, guint prop_id, GValue * value,
       break;
     case PROP_ATTACH_FRAME:
       g_value_set_boolean (value, zbar->attach_frame);
+      break;
+    case PROP_BINARY:
+      g_value_set_boolean (value, zbar->binary);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -279,6 +300,8 @@ gst_zbar_transform_frame_ip (GstVideoFilter * vfilter, GstVideoFrame * frame)
   for (; symbol; symbol = zbar_symbol_next (symbol)) {
     zbar_symbol_type_t typ = zbar_symbol_get_type (symbol);
     const char *data = zbar_symbol_get_data (symbol);
+    unsigned len = zbar_symbol_get_data_length (symbol);
+    GBytes *data_bytes = g_bytes_new (data, len);
     gint quality = zbar_symbol_get_quality (symbol);
 
     GST_DEBUG_OBJECT (zbar, "decoded %s symbol \"%s\" at quality %d",
@@ -308,7 +331,9 @@ gst_zbar_transform_frame_ip (GstVideoFilter * vfilter, GstVideoFrame * frame)
           "stream-time", G_TYPE_UINT64, stream_time,
           "running-time", G_TYPE_UINT64, running_time,
           "type", G_TYPE_STRING, zbar_get_symbol_name (typ),
-          "symbol", G_TYPE_STRING, data, "quality", G_TYPE_INT, quality, NULL);
+          "symbol", G_TYPE_STRING, data,
+          "symbol-bytes", G_TYPE_BYTES, data_bytes,
+          "quality", G_TYPE_INT, quality, NULL);
 
       if (GST_CLOCK_TIME_IS_VALID (duration))
         gst_structure_set (s, "duration", G_TYPE_UINT64, duration, NULL);
@@ -325,6 +350,7 @@ gst_zbar_transform_frame_ip (GstVideoFilter * vfilter, GstVideoFrame * frame)
       m = gst_message_new_element (GST_OBJECT (zbar), s);
       gst_element_post_message (GST_ELEMENT (zbar), m);
 
+      g_bytes_unref (data_bytes);
     } else if (zbar->attach_frame)
       GST_WARNING_OBJECT (zbar,
           "attach-frame=true has no effect if message=false");
@@ -345,6 +371,9 @@ gst_zbar_start (GstBaseTransform * base)
 
   /* start the cache if enabled (e.g. for filtering dupes) */
   zbar_image_scanner_enable_cache (zbar->scanner, zbar->cache);
+  /* use binary mode if enabled */
+  zbar_image_scanner_set_config (zbar->scanner, 0, ZBAR_CFG_BINARY,
+      zbar->binary);
 
   return TRUE;
 }

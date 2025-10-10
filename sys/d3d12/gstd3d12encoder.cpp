@@ -23,7 +23,6 @@
 
 #include "gstd3d12encoder.h"
 #include "gstd3d12encoderbufferpool.h"
-#include "gstd3d12pluginutils.h"
 #include <gst/base/gstqueuearray.h>
 #include <directx/d3dx12.h>
 #include <wrl.h>
@@ -63,7 +62,7 @@ struct EncoderSessionData
 {
   EncoderSessionData ()
   {
-    output_queue = gst_queue_array_new_for_struct (sizeof (EncoderOutputData),
+    output_queue = gst_vec_deque_new_for_struct (sizeof (EncoderOutputData),
         16);
   }
 
@@ -73,7 +72,7 @@ struct EncoderSessionData
       gst_buffer_pool_set_active (upload_pool, FALSE);
     gst_clear_object (&upload_pool);
     gst_clear_object (&encoder_pool);
-    gst_queue_array_free (output_queue);
+    gst_vec_deque_free (output_queue);
   }
 
   ComPtr<ID3D12VideoEncoder> encoder;
@@ -81,7 +80,7 @@ struct EncoderSessionData
 
   std::mutex queue_lock;
   std::condition_variable queue_cond;
-  GstQueueArray *output_queue;
+  GstVecDeque *output_queue;
 
   GstD3D12EncoderBufferPool *encoder_pool = nullptr;
   GstBufferPool *upload_pool = nullptr;
@@ -89,26 +88,19 @@ struct EncoderSessionData
 
 struct EncoderCmdData
 {
-  EncoderCmdData ()
-  {
-    event_handle = CreateEventEx (nullptr, nullptr, 0, EVENT_ALL_ACCESS);
-  }
-
   ~EncoderCmdData ()
   {
     if (queue)
-      gst_d3d12_command_queue_fence_wait (queue, G_MAXUINT64, event_handle);
+      gst_d3d12_cmd_queue_fence_wait (queue, G_MAXUINT64);
 
-    CloseHandle (event_handle);
     gst_clear_object (&ca_pool);
     gst_clear_object (&queue);
   }
 
   ComPtr<ID3D12VideoDevice3> video_device;
   ComPtr<ID3D12VideoEncodeCommandList2> cl;
-  GstD3D12CommandQueue *queue = nullptr;
-  GstD3D12CommandAllocatorPool *ca_pool = nullptr;
-  HANDLE event_handle;
+  GstD3D12CmdQueue *queue = nullptr;
+  GstD3D12CmdAllocPool *ca_pool = nullptr;
   guint64 fence_val = 0;
 };
 
@@ -146,8 +138,6 @@ struct GstD3D12EncoderPrivate
 /* *INDENT-ON* */
 
 static void gst_d3d12_encoder_finalize (GObject * object);
-static void gst_d3d12_encoder_set_property (GObject * object, guint prop_id,
-    const GValue * value, GParamSpec * pspec);
 static void gst_d3d12_encoder_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec);
 
@@ -307,14 +297,14 @@ gst_d3d12_encoder_open (GstVideoEncoder * encoder)
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE;
 
   auto cmd = std::make_unique < EncoderCmdData > ();
-  cmd->queue = gst_d3d12_command_queue_new (self->device,
-      &queue_desc, ASYNC_DEPTH);
+  cmd->queue = gst_d3d12_cmd_queue_new (device, &queue_desc,
+      D3D12_FENCE_FLAG_NONE, ASYNC_DEPTH);
   if (!cmd->queue) {
     GST_ERROR_OBJECT (self, "Couldn't create command queue");
     return FALSE;
   }
 
-  cmd->ca_pool = gst_d3d12_command_allocator_pool_new (self->device,
+  cmd->ca_pool = gst_d3d12_cmd_alloc_pool_new (device,
       D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE);
   cmd->video_device = video_device;
 
@@ -356,15 +346,14 @@ gst_d3d12_encoder_drain (GstD3D12Encoder * self, gboolean locked)
   if (priv->cmd) {
     GST_DEBUG_OBJECT (self, "Waiting for command finish %" G_GUINT64_FORMAT,
         priv->cmd->fence_val);
-    gst_d3d12_command_queue_fence_wait (priv->cmd->queue, priv->cmd->fence_val,
-        priv->cmd->event_handle);
+    gst_d3d12_cmd_queue_fence_wait (priv->cmd->queue, priv->cmd->fence_val);
   }
 
   if (priv->session && priv->output_thread) {
     GST_DEBUG_OBJECT (self, "Sending empty task");
     auto empty_data = EncoderOutputData ();
     std::lock_guard < std::mutex > lk (priv->session->queue_lock);
-    gst_queue_array_push_tail_struct (priv->session->output_queue, &empty_data);
+    gst_vec_deque_push_tail_struct (priv->session->output_queue, &empty_data);
     priv->session->queue_cond.notify_one ();
   }
 
@@ -458,7 +447,7 @@ gst_d3d12_encoder_create_upload_pool (GstD3D12Encoder * self)
   auto params = gst_d3d12_allocation_params_new (self->device, &info,
       GST_D3D12_ALLOCATION_FLAG_DEFAULT,
       D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS |
-      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_HEAP_FLAG_NONE);
   gst_buffer_pool_config_set_d3d12_allocation_params (config, params);
   gst_d3d12_allocation_params_free (params);
   gst_buffer_pool_config_set_params (config, caps, info.size, 0, 0);
@@ -529,7 +518,7 @@ gst_d3d12_encoder_propose_allocation (GstVideoEncoder * encoder,
     auto params = gst_d3d12_allocation_params_new (self->device, &info,
         GST_D3D12_ALLOCATION_FLAG_DEFAULT,
         D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS |
-        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_HEAP_FLAG_NONE);
     gst_d3d12_allocation_params_alignment (params, &align);
     gst_buffer_pool_config_set_d3d12_allocation_params (config, params);
     gst_d3d12_allocation_params_free (params);
@@ -709,10 +698,9 @@ gst_d3d12_encoder_upload_frame (GstD3D12Encoder * self, GstBuffer * buffer)
   auto mem = gst_buffer_peek_memory (buffer, 0);
   if (gst_is_d3d12_memory (mem)) {
     auto dmem = GST_D3D12_MEMORY_CAST (mem);
-    if (dmem->device == self->device) {
+    if (gst_d3d12_device_is_equal (dmem->device, self->device)) {
       GstMapInfo map_info;
-      if (!gst_memory_map (mem, &map_info,
-              (GstMapFlags) (GST_MAP_READ | GST_MAP_D3D12))) {
+      if (!gst_memory_map (mem, &map_info, GST_MAP_READ_D3D12)) {
         GST_ERROR_OBJECT (self, "Couldn't map memory");
         return nullptr;
       }
@@ -720,7 +708,7 @@ gst_d3d12_encoder_upload_frame (GstD3D12Encoder * self, GstBuffer * buffer)
       gst_memory_unmap (mem, &map_info);
 
       auto resource = gst_d3d12_memory_get_resource_handle (dmem);
-      auto desc = resource->GetDesc ();
+      auto desc = GetDesc (resource);
       if (desc.Width >= (UINT64) priv->config.resolution.Width &&
           desc.Height >= priv->config.resolution.Height) {
         return gst_buffer_ref (buffer);
@@ -740,11 +728,16 @@ gst_d3d12_encoder_upload_frame (GstD3D12Encoder * self, GstBuffer * buffer)
     std::vector < GstD3D12CopyTextureRegionArgs > copy_args;
     auto dmem = GST_D3D12_MEMORY_CAST (mem);
     auto src_resource = gst_d3d12_memory_get_resource_handle (dmem);
+    ComPtr < ID3D12Fence > fence_to_wait;
+    guint64 fence_val_to_wait = 0;
+
+    gst_d3d12_memory_get_fence (dmem, &fence_to_wait, &fence_val_to_wait);
+
     dmem = (GstD3D12Memory *) gst_buffer_peek_memory (upload, 0);
     auto dst_resource = gst_d3d12_memory_get_resource_handle (dmem);
     D3D12_BOX src_box[2];
 
-    auto desc = src_resource->GetDesc ();
+    auto desc = GetDesc (src_resource);
 
     UINT width = MIN ((UINT) desc.Width, priv->config.resolution.Width);
     UINT height = MIN ((UINT) desc.Height, priv->config.resolution.Height);
@@ -774,9 +767,18 @@ gst_d3d12_encoder_upload_frame (GstD3D12Encoder * self, GstBuffer * buffer)
     }
 
     guint64 fence_val = 0;
+    guint num_fences_to_wait = 0;
+    ID3D12Fence *fences_to_wait[] = { fence_to_wait.Get () };
+    guint64 fence_values_to_wait[] = { fence_val_to_wait };
+    if (fence_to_wait)
+      num_fences_to_wait++;
+
     gst_d3d12_device_copy_texture_region (self->device, copy_args.size (),
-        copy_args.data (), D3D12_COMMAND_LIST_TYPE_DIRECT, &fence_val);
-    gst_d3d12_buffer_after_write (upload, fence_val);
+        copy_args.data (), nullptr, num_fences_to_wait, fences_to_wait,
+        fence_values_to_wait, D3D12_COMMAND_LIST_TYPE_DIRECT, &fence_val);
+    gst_d3d12_buffer_set_fence (upload,
+        gst_d3d12_device_get_fence_handle (self->device,
+            D3D12_COMMAND_LIST_TYPE_DIRECT), fence_val, FALSE);
   } else {
     GstVideoFrame src_frame, dst_frame;
     if (!gst_video_frame_map (&src_frame, info, buffer, GST_MAP_READ)) {
@@ -808,7 +810,7 @@ gst_d3d12_encoder_upload_frame (GstD3D12Encoder * self, GstBuffer * buffer)
       auto src_data = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&src_frame, i);
       auto dst_data = (guint8 *) GST_VIDEO_FRAME_PLANE_DATA (&dst_frame, i);
 
-      for (guint j = 0; j < height; j++) {
+      for (gint j = 0; j < height; j++) {
         memcpy (dst_data, src_data, width_in_bytes);
         dst_data += dst_stride;
         src_data += src_stride;
@@ -820,8 +822,7 @@ gst_d3d12_encoder_upload_frame (GstD3D12Encoder * self, GstBuffer * buffer)
 
     GstMapInfo map_info;
     mem = gst_buffer_peek_memory (upload, 0);
-    if (!gst_memory_map (mem, &map_info,
-            (GstMapFlags) (GST_MAP_READ | GST_MAP_D3D12))) {
+    if (!gst_memory_map (mem, &map_info, GST_MAP_READ_D3D12)) {
       GST_ERROR_OBJECT (self, "Couldn't map memory");
       gst_buffer_unref (upload);
       return nullptr;
@@ -864,7 +865,7 @@ gst_d3d12_encoder_build_command (GstD3D12Encoder * self,
         auto ref_pic =
             in_args->PictureControlDesc.ReferenceFrames.ppTexture2Ds[i];
         ref_pic->AddRef ();
-        gst_d3d12_fence_data_add_notify_com (fence_data, ref_pic);
+        gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_COM (ref_pic));
         pre_enc_barrier.push_back (CD3DX12_RESOURCE_BARRIER::
             Transition (ref_pic, D3D12_RESOURCE_STATE_COMMON,
                 D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ));
@@ -876,8 +877,8 @@ gst_d3d12_encoder_build_command (GstD3D12Encoder * self,
       auto ref_pic =
           in_args->PictureControlDesc.ReferenceFrames.ppTexture2Ds[0];
       ref_pic->AddRef ();
-      gst_d3d12_fence_data_add_notify_com (fence_data, ref_pic);
-      auto ref_pic_desc = ref_pic->GetDesc ();
+      gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_COM (ref_pic));
+      auto ref_pic_desc = GetDesc (ref_pic);
 
       for (UINT i = 0;
           i < in_args->PictureControlDesc.ReferenceFrames.NumTexture2Ds; i++) {
@@ -905,8 +906,9 @@ gst_d3d12_encoder_build_command (GstD3D12Encoder * self,
   /* Reconstructed picture barries */
   if (out_args->ReconstructedPicture.pReconstructedPicture) {
     out_args->ReconstructedPicture.pReconstructedPicture->AddRef ();
-    gst_d3d12_fence_data_add_notify_com (fence_data,
-        out_args->ReconstructedPicture.pReconstructedPicture);
+    gst_d3d12_fence_data_push (fence_data,
+        FENCE_NOTIFY_COM (out_args->
+            ReconstructedPicture.pReconstructedPicture));
 
     if (array_of_textures) {
       pre_enc_barrier.push_back (CD3DX12_RESOURCE_BARRIER::
@@ -920,7 +922,7 @@ gst_d3d12_encoder_build_command (GstD3D12Encoder * self,
               D3D12_RESOURCE_STATE_COMMON));
     } else {
       auto recon_pic_desc =
-          out_args->ReconstructedPicture.pReconstructedPicture->GetDesc ();
+          GetDesc (out_args->ReconstructedPicture.pReconstructedPicture);
       UINT mip_slice, plane_slice, array_slice;
 
       D3D12DecomposeSubresource (out_args->
@@ -963,8 +965,8 @@ gst_d3d12_encoder_build_command (GstD3D12Encoder * self,
   auto heap = priv->session->heap;
 
   command_list->EncodeFrame (encoder.Get (), heap.Get (), in_args, out_args);
-  gst_d3d12_fence_data_add_notify_com (fence_data, encoder.Detach ());
-  gst_d3d12_fence_data_add_notify_com (fence_data, heap.Detach ());
+  gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_COM (encoder.Detach ()));
+  gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_COM (heap.Detach ()));
 
   post_enc_barrier.
       push_back (CD3DX12_RESOURCE_BARRIER::Transition (out_args->Bitstream.
@@ -1135,18 +1137,16 @@ gst_d3d12_encoder_output_loop (GstD3D12Encoder * self)
 
   GST_DEBUG_OBJECT (self, "Entering output thread");
 
-  HANDLE event_handle = CreateEventEx (nullptr, nullptr, 0, EVENT_ALL_ACCESS);
-
   while (true) {
     EncoderOutputData output_data;
     {
       GST_LOG_OBJECT (self, "Waiting for output data");
       std::unique_lock < std::mutex > lk (priv->session->queue_lock);
-      while (gst_queue_array_is_empty (priv->session->output_queue))
+      while (gst_vec_deque_is_empty (priv->session->output_queue))
         priv->session->queue_cond.wait (lk);
 
       output_data = *((EncoderOutputData *)
-          gst_queue_array_pop_head_struct (priv->session->output_queue));
+          gst_vec_deque_pop_head_struct (priv->session->output_queue));
     }
 
     if (!output_data.frame) {
@@ -1157,8 +1157,7 @@ gst_d3d12_encoder_output_loop (GstD3D12Encoder * self)
     GST_LOG_OBJECT (self, "Processing output %" G_GUINT64_FORMAT,
         output_data.fence_val);
 
-    gst_d3d12_command_queue_fence_wait (priv->cmd->queue, output_data.fence_val,
-        event_handle);
+    gst_d3d12_cmd_queue_fence_wait (priv->cmd->queue, output_data.fence_val);
 
     if (priv->flushing) {
       GST_DEBUG_OBJECT (self, "We are flushing");
@@ -1208,8 +1207,6 @@ gst_d3d12_encoder_output_loop (GstD3D12Encoder * self)
 
   GST_DEBUG_OBJECT (self, "Leaving output thread");
 
-  CloseHandle (event_handle);
-
   return nullptr;
 }
 
@@ -1247,20 +1244,19 @@ gst_d3d12_encoder_handle_frame (GstVideoEncoder * encoder,
 
   GstD3D12FenceData *fence_data;
   gst_d3d12_fence_data_pool_acquire (priv->fence_data_pool, &fence_data);
-  gst_d3d12_fence_data_add_notify_mini_object (fence_data, upload);
+  gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_MINI_OBJECT (upload));
 
-  GstD3D12CommandAllocator *gst_ca;
-  if (!gst_d3d12_command_allocator_pool_acquire (priv->cmd->ca_pool, &gst_ca)) {
+  GstD3D12CmdAlloc *gst_ca;
+  if (!gst_d3d12_cmd_alloc_pool_acquire (priv->cmd->ca_pool, &gst_ca)) {
     GST_ERROR_OBJECT (self, "Couldn't acquire command allocator");
     gst_d3d12_fence_data_unref (fence_data);
     gst_video_encoder_finish_frame (encoder, frame);
     return GST_FLOW_ERROR;
   }
 
-  gst_d3d12_fence_data_add_notify_mini_object (fence_data, gst_ca);
+  gst_d3d12_fence_data_push (fence_data, FENCE_NOTIFY_MINI_OBJECT (gst_ca));
 
-  ComPtr < ID3D12CommandAllocator > ca;
-  gst_d3d12_command_allocator_get_handle (gst_ca, &ca);
+  auto ca = gst_d3d12_cmd_alloc_get_handle (gst_ca);
   auto hr = ca->Reset ();
   if (!gst_d3d12_result (hr, self->device)) {
     GST_ERROR_OBJECT (self, "Couldn't reset command allocator");
@@ -1272,9 +1268,9 @@ gst_d3d12_encoder_handle_frame (GstVideoEncoder * encoder,
   if (!priv->cmd->cl) {
     auto device = gst_d3d12_device_get_device_handle (self->device);
     hr = device->CreateCommandList (0, D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE,
-        ca.Get (), nullptr, IID_PPV_ARGS (&priv->cmd->cl));
+        ca, nullptr, IID_PPV_ARGS (&priv->cmd->cl));
   } else {
-    hr = priv->cmd->cl->Reset (ca.Get ());
+    hr = priv->cmd->cl->Reset (ca);
   }
 
   if (!gst_d3d12_result (hr, self->device)) {
@@ -1383,7 +1379,8 @@ gst_d3d12_encoder_handle_frame (GstVideoEncoder * encoder,
   }
   GST_VIDEO_ENCODER_STREAM_LOCK (self);
 
-  gst_d3d12_fence_data_add_notify_mini_object (fence_data, encoder_buf);
+  gst_d3d12_fence_data_push (fence_data,
+      FENCE_NOTIFY_MINI_OBJECT (encoder_buf));
 
   ComPtr < ID3D12Resource > metadata;
   ComPtr < ID3D12Resource > resolved_metadata;
@@ -1430,19 +1427,15 @@ gst_d3d12_encoder_handle_frame (GstVideoEncoder * encoder,
     return GST_FLOW_ERROR;
   }
 
-  auto completed = gst_d3d12_device_get_completed_value (self->device,
-      D3D12_COMMAND_LIST_TYPE_DIRECT);
-  if (completed < mem->fence_value) {
-    auto queue = gst_d3d12_device_get_command_queue (self->device,
-        D3D12_COMMAND_LIST_TYPE_DIRECT);
-    ComPtr < ID3D12Fence > fence;
-    gst_d3d12_command_queue_get_fence (queue, &fence);
-    gst_d3d12_command_queue_execute_wait (priv->cmd->queue, fence.Get (),
-        mem->fence_value);
+  ComPtr < ID3D12Fence > fence_to_wait;
+  guint64 fence_val_to_wait = 0;
+  if (gst_d3d12_memory_get_fence (mem, &fence_to_wait, &fence_val_to_wait)) {
+    gst_d3d12_cmd_queue_execute_wait (priv->cmd->queue,
+        fence_to_wait.Get (), fence_val_to_wait);
   }
 
   ID3D12CommandList *cmd_list[] = { cl.Get () };
-  hr = gst_d3d12_command_queue_execute_command_lists (priv->cmd->queue,
+  hr = gst_d3d12_cmd_queue_execute_command_lists (priv->cmd->queue,
       1, cmd_list, &priv->cmd->fence_val);
   if (!gst_d3d12_result (hr, self->device)) {
     GST_ERROR_OBJECT (self, "Couldn't execute command list");
@@ -1452,7 +1445,7 @@ gst_d3d12_encoder_handle_frame (GstVideoEncoder * encoder,
     return GST_FLOW_ERROR;
   }
 
-  gst_d3d12_command_queue_set_notify (priv->cmd->queue, priv->cmd->fence_val,
+  gst_d3d12_cmd_queue_set_notify (priv->cmd->queue, priv->cmd->fence_val,
       fence_data, (GDestroyNotify) gst_d3d12_fence_data_unref);
 
   auto output_data = EncoderOutputData ();
@@ -1466,8 +1459,7 @@ gst_d3d12_encoder_handle_frame (GstVideoEncoder * encoder,
   GST_VIDEO_ENCODER_STREAM_UNLOCK (self);
   {
     std::lock_guard < std::mutex > lk (priv->session->queue_lock);
-    gst_queue_array_push_tail_struct (priv->session->output_queue,
-        &output_data);
+    gst_vec_deque_push_tail_struct (priv->session->output_queue, &output_data);
     priv->session->queue_cond.notify_one ();
   }
   GST_VIDEO_ENCODER_STREAM_LOCK (self);

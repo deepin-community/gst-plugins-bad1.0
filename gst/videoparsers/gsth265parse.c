@@ -209,7 +209,7 @@ gst_h265_parse_reset_frame (GstH265Parse * h265parse)
   h265parse->have_sps_in_frame = FALSE;
   h265parse->have_pps_in_frame = FALSE;
   gst_adapter_clear (h265parse->frame_out);
-  gst_video_clear_user_data (&h265parse->user_data);
+  gst_video_clear_user_data (&h265parse->user_data, FALSE);
   gst_video_clear_user_data_unregistered (&h265parse->user_data_unregistered,
       FALSE);
 }
@@ -303,6 +303,7 @@ gst_h265_parse_stop (GstBaseParse * parse)
   gst_h265_parse_reset (h265parse);
 
   gst_h265_parser_free (h265parse->nalparser);
+  h265parse->nalparser = NULL;
 
   return TRUE;
 }
@@ -728,9 +729,6 @@ gst_h265_parse_process_sei_user_data_unregistered (GstH265Parse * h265parse,
 {
   GstByteReader br;
 
-  if (urud->data == NULL || urud->size < 1)
-    return;
-
   gst_byte_reader_init (&br, urud->data, urud->size);
 
   gst_video_parse_user_data_unregistered ((GstElement *) h265parse,
@@ -981,6 +979,15 @@ gst_h265_parse_process_nal (GstH265Parse * h265parse, GstH265NalUnit * nalu)
       }
       break;
     }
+    case GST_H265_NAL_FD:
+      if (!GST_H265_PARSE_STATE_VALID (h265parse, GST_H265_PARSE_STATE_GOT_SPS)) {
+        GST_DEBUG_OBJECT (h265parse, "dropping FD received before SPS");
+        return FALSE;
+      }
+      pres = gst_h265_parser_parse_nal (nalparser, nalu);
+      if (pres != GST_H265_PARSER_OK)
+        return FALSE;
+      break;
     case GST_H265_NAL_AUD:
     default:
       /* Just accumulate AU Delimiter, whether it's before SPS or not */
@@ -3060,8 +3067,7 @@ gst_h265_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
 
     for (i = 0; i < h265parse->time_code.num_clock_ts; i++) {
       gint field_count = -1;
-      guint64 n_frames_tmp;
-      guint n_frames = G_MAXUINT32;
+      guint64 n_frames = G_MAXUINT64;
       GstVideoTimeCodeFlags flags = 0;
       guint64 scale_n, scale_d;
 
@@ -3105,11 +3111,36 @@ gst_h265_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
         field_count = 0;
       }
 
-      /* Dropping of the two lowest (value 0 and 1) n_frames[ i ] counts when
-       * seconds_value[ i ] is equal to 0 and minutes_value[ i ] is not an integer
-       * multiple of 10 */
-      if (h265parse->time_code.counting_type[i] == 4)
-        flags |= GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME;
+      /* Table D.11 - Definition of counting_type[ i ] values */
+      switch (h265parse->time_code.counting_type[i]) {
+          /* Dropping of the two lowest (value 0 and 1) n_frames[ i ] counts when
+           * seconds_value[ i ] is equal to 0 and minutes_value[ i ] is not an
+           * integer multiple of 10 */
+        case 4:
+          flags |= GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME;
+          break;
+
+          /* Dropping of unspecified numbers of unspecified n_frames[ i ] count
+           * values */
+        case 6:
+          if (h265parse->parsed_fps_d != 1001)
+            break;
+
+          switch (h265parse->parsed_fps_n) {
+            case 30000:
+            case 60000:
+            case 120000:
+              flags |= GST_VIDEO_TIME_CODE_FLAGS_DROP_FRAME;
+              break;
+
+            default:
+              break;
+          }
+          break;
+
+        default:
+          break;
+      }
 
       if (h265parse->sei_pic_struct != GST_H265_SEI_PIC_STRUCT_FRAME)
         flags |= GST_VIDEO_TIME_CODE_FLAGS_INTERLACED;
@@ -3137,30 +3168,37 @@ gst_h265_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
       scale_n = (guint64) h265parse->parsed_fps_n * vui->num_units_in_tick;
       scale_d = (guint64) h265parse->parsed_fps_d * vui->time_scale;
 
-      n_frames_tmp =
-          gst_util_uint64_scale_int (h265parse->time_code.n_frames[i], scale_n,
-          scale_d);
-      if (n_frames_tmp <= G_MAXUINT32) {
-        if (h265parse->time_code.units_field_based_flag[i])
-          n_frames_tmp *= 2;
+      if (h265parse->time_code.units_field_based_flag[i])
+        scale_n *= 2;
 
-        if (n_frames_tmp <= G_MAXUINT32)
-          n_frames = (guint) n_frames_tmp;
-      }
+      n_frames = gst_util_uint64_scale (h265parse->time_code.n_frames[i],
+          scale_n, scale_d);
 
-      if (n_frames != G_MAXUINT32) {
+      if (n_frames <= G_MAXUINT32) {
+        GST_LOG_OBJECT (h265parse,
+            "Add time code meta %02u:%02u:%02u:%02u",
+            h265parse->time_code.hours_flag[i] ?
+            h265parse->time_code.hours_value[i] : 0,
+            h265parse->time_code.minutes_flag[i] ?
+            h265parse->time_code.minutes_value[i] : 0,
+            h265parse->time_code.seconds_flag[i] ?
+            h265parse->time_code.seconds_value[i] : 0, (guint) n_frames);
+
         gst_buffer_add_video_time_code_meta_full (parse_buffer,
             h265parse->parsed_fps_n,
             h265parse->parsed_fps_d,
             NULL,
             flags,
-            h265parse->time_code.hours_flag[i] ? h265parse->time_code.
-            hours_value[i] : 0,
-            h265parse->time_code.minutes_flag[i] ? h265parse->time_code.
-            minutes_value[i] : 0,
-            h265parse->time_code.seconds_flag[i] ? h265parse->time_code.
-            seconds_value[i] : 0, n_frames, field_count);
-      }
+            h265parse->time_code.hours_flag[i] ?
+            h265parse->time_code.hours_value[i] : 0,
+            h265parse->time_code.minutes_flag[i] ?
+            h265parse->time_code.minutes_value[i] : 0,
+            h265parse->time_code.seconds_flag[i] ?
+            h265parse->time_code.seconds_value[i] : 0,
+            (guint) n_frames, field_count);
+      } else
+        GST_WARNING_OBJECT (h265parse,
+            "Skipping time code meta, n_frames calculation failed");
     }
   }
 

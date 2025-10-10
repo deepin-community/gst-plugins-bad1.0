@@ -32,7 +32,7 @@
 #include "gstmsdkcaps.h"
 
 #ifndef _WIN32
-#include <libdrm/drm_fourcc.h>
+#include <drm_fourcc.h>
 #include <gst/video/video-info-dma.h>
 #include "gstmsdkallocator_libva.h"
 #include <gst/va/gstvavideoformat.h>
@@ -85,7 +85,8 @@ static const Profile profs_hevc[] = {
   {MFX_PROFILE_HEVC_MAIN, "main"},
   {MFX_PROFILE_HEVC_MAIN10, "main-10, main-10-still-picture"},
   {MFX_PROFILE_HEVC_MAINSP, "main-still-picture"},
-  {MFX_PROFILE_HEVC_REXT, "main-444, main-444-10, main-422-10, main-12"},
+  {MFX_PROFILE_HEVC_REXT,
+      "main-444, main-444-10, main-422-10, main-12, main-422-12"},
 #if (MFX_VERSION >= 1032)
   {MFX_PROFILE_HEVC_SCC, "screen-extended-main, screen-extended-main-10, "
         "screen-extended-main-444, screen-extended-main-444-10"},
@@ -1604,7 +1605,7 @@ _enc_get_static_raw_formats (guint codec_id)
       return "NV12, YUY2, UYVY, BGRA";
     case MFX_CODEC_HEVC:
       return "NV12, YUY2, BGRA, BGR10A2_LE, P010_10LE, VUYA, Y410, Y210, "
-          "P012_LE";
+          "P012_LE, Y212_LE";
     case MFX_CODEC_MPEG2:
       return "NV12";
     case MFX_CODEC_VP9:
@@ -1776,7 +1777,7 @@ _dec_get_static_dma_formats (guint codec_id)
     case MFX_CODEC_AVC:
       return "NV12, BGRA, BGRx";
     case MFX_CODEC_HEVC:
-      return "NV12, P010_10LE, YUY2, Y210,  VUYA, Y410, P012_LE, "
+      return "NV12, P010_10LE, YUY2, Y210, VUYA, Y410, P012_LE, "
           "Y212_LE, Y412_LE, BGRA, BGRx";
     case MFX_CODEC_MPEG2:
       return "NV12";
@@ -2011,7 +2012,7 @@ gst_msdkcaps_set_strings (GstCaps * caps,
 
   if (features) {
     GstStructure *s = NULL;
-    GstCapsFeatures *f = gst_caps_features_from_string (features);
+    GstCapsFeatures *f = gst_caps_features_new_single_static_str (features);
 
     for (guint i = 0; i < size; i++) {
       if (gst_caps_features_is_equal (f, gst_caps_get_features (caps, i))) {

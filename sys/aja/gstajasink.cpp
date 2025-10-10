@@ -330,7 +330,7 @@ static void gst_aja_sink_init(GstAjaSink *self) {
   self->handle_ancillary_meta = DEFAULT_HANDLE_ANCILLARY_META;
 
   self->queue =
-      gst_queue_array_new_for_struct(sizeof(QueueItem), self->queue_size);
+      gst_vec_deque_new_for_struct(sizeof(QueueItem), self->queue_size);
 }
 
 void gst_aja_sink_set_property(GObject *object, guint property_id,
@@ -451,8 +451,9 @@ void gst_aja_sink_finalize(GObject *object) {
   GstAjaSink *self = GST_AJA_SINK(object);
 
   g_assert(self->device == NULL);
-  g_assert(gst_queue_array_get_length(self->queue) == 0);
-  g_clear_pointer(&self->queue, gst_queue_array_free);
+  g_assert(gst_vec_deque_get_length(self->queue) == 0);
+  g_clear_pointer(&self->queue, gst_vec_deque_free);
+  g_free(self->device_identifier);
 
   g_mutex_clear(&self->queue_lock);
   g_cond_clear(&self->queue_cond);
@@ -557,7 +558,7 @@ static gboolean gst_aja_sink_stop(GstAjaSink *self) {
   self->configured_audio_channels = 0;
   GST_OBJECT_UNLOCK(self);
 
-  while ((item = (QueueItem *)gst_queue_array_pop_head_struct(self->queue))) {
+  while ((item = (QueueItem *)gst_vec_deque_pop_head_struct(self->queue))) {
     if (item->type == QUEUE_ITEM_TYPE_FRAME) {
       gst_buffer_unmap(item->video_buffer, &item->video_map);
       gst_buffer_unref(item->video_buffer);
@@ -1417,7 +1418,7 @@ static gboolean gst_aja_sink_event(GstBaseSink *bsink, GstEvent *event) {
 
       g_mutex_lock(&self->queue_lock);
       while (
-          (item = (QueueItem *)gst_queue_array_pop_head_struct(self->queue))) {
+          (item = (QueueItem *)gst_vec_deque_pop_head_struct(self->queue))) {
         if (item->type == QUEUE_ITEM_TYPE_FRAME) {
           gst_buffer_unmap(item->video_buffer, &item->video_map);
           gst_buffer_unref(item->video_buffer);
@@ -1842,8 +1843,8 @@ static GstFlowReturn gst_aja_sink_render(GstBaseSink *bsink,
   }
 
   g_mutex_lock(&self->queue_lock);
-  while (gst_queue_array_get_length(self->queue) >= self->queue_size) {
-    QueueItem *tmp = (QueueItem *)gst_queue_array_pop_head_struct(self->queue);
+  while (gst_vec_deque_get_length(self->queue) >= self->queue_size) {
+    QueueItem *tmp = (QueueItem *)gst_vec_deque_pop_head_struct(self->queue);
 
     if (tmp->type == QUEUE_ITEM_TYPE_FRAME) {
       GST_WARNING_OBJECT(self, "Element queue overrun, dropping old frame");
@@ -1874,9 +1875,9 @@ static GstFlowReturn gst_aja_sink_render(GstBaseSink *bsink,
 
   GST_TRACE_OBJECT(self, "Queuing frame video %p audio %p", item.video_map.data,
                    item.audio_buffer ? item.audio_map.data : NULL);
-  gst_queue_array_push_tail_struct(self->queue, &item);
-  GST_TRACE_OBJECT(self, "%u frames queued",
-                   gst_queue_array_get_length(self->queue));
+  gst_vec_deque_push_tail_struct(self->queue, &item);
+  GST_TRACE_OBJECT(self, "%" G_GSIZE_FORMAT " frames queued",
+                   gst_vec_deque_get_length(self->queue));
   g_cond_signal(&self->queue_cond);
   g_mutex_unlock(&self->queue_lock);
 
@@ -1907,7 +1908,7 @@ static void output_thread_func(AJAThread *thread, void *data) {
 
   g_mutex_lock(&self->queue_lock);
 restart:
-  if (self->draining && gst_queue_array_get_length(self->queue) == 0) {
+  if (self->draining && gst_vec_deque_get_length(self->queue) == 0) {
     GST_DEBUG_OBJECT(self, "Drained");
     self->draining = FALSE;
     g_cond_signal(&self->drain_cond);
@@ -1916,7 +1917,7 @@ restart:
   GST_DEBUG_OBJECT(self, "Waiting for playing or shutdown");
   while ((!self->playing && !self->shutdown) ||
          (self->playing &&
-          gst_queue_array_get_length(self->queue) < self->queue_size / 2 &&
+          gst_vec_deque_get_length(self->queue) < self->queue_size / 2 &&
           !self->eos))
     g_cond_wait(&self->queue_cond, &self->queue_lock);
   if (self->shutdown) {
@@ -2011,26 +2012,28 @@ restart:
 
   g_mutex_lock(&self->queue_lock);
   while (self->playing && !self->shutdown &&
-         !(self->draining && gst_queue_array_get_length(self->queue) == 0)) {
+         !(self->draining && gst_vec_deque_get_length(self->queue) == 0)) {
     AUTOCIRCULATE_STATUS status;
 
     self->device->device->AutoCirculateGetStatus(self->channel, status);
 
-    GST_TRACE_OBJECT(self,
-                     "Start frame %d "
-                     "end frame %d "
-                     "active frame %d "
-                     "start time %" G_GUINT64_FORMAT
-                     " "
-                     "current time %" G_GUINT64_FORMAT
-                     " "
-                     "frames processed %u "
-                     "frames dropped %u "
-                     "buffer level %u",
-                     status.acStartFrame, status.acEndFrame,
-                     status.acActiveFrame, status.acRDTSCStartTime,
-                     status.acRDTSCCurrentTime, status.acFramesProcessed,
-                     status.acFramesDropped, status.acBufferLevel);
+    GST_TRACE_OBJECT(
+        self,
+        "State %d "
+        "start frame %d "
+        "end frame %d "
+        "active frame %d "
+        "start time %" GST_TIME_FORMAT
+        " "
+        "current time %" GST_TIME_FORMAT
+        " "
+        "frames processed %u "
+        "frames dropped %u "
+        "buffer level %u",
+        status.acState, status.acStartFrame, status.acEndFrame,
+        status.acActiveFrame, GST_TIME_ARGS(status.acRDTSCStartTime * 100),
+        GST_TIME_ARGS(status.acRDTSCCurrentTime * 100),
+        status.acFramesProcessed, status.acFramesDropped, status.acBufferLevel);
 
     // Detect if we were too slow with providing frames and report if that was
     // the case together with the amount of frames dropped
@@ -2059,7 +2062,7 @@ restart:
     if (status.GetNumAvailableOutputFrames() > 1) {
       QueueItem item, *item_p;
 
-      while ((item_p = (QueueItem *)gst_queue_array_pop_head_struct(
+      while ((item_p = (QueueItem *)gst_vec_deque_pop_head_struct(
                   self->queue)) == NULL &&
              self->playing && !self->shutdown && !self->draining) {
         GST_DEBUG_OBJECT(
@@ -2094,8 +2097,8 @@ restart:
         continue;
       }
 
-      GST_TRACE_OBJECT(self, "%u frames queued",
-                       gst_queue_array_get_length(self->queue));
+      GST_TRACE_OBJECT(self, "%" G_GSIZE_FORMAT " frames queued",
+                       gst_vec_deque_get_length(self->queue));
 
       item = *item_p;
       g_mutex_unlock(&self->queue_lock);
@@ -2149,25 +2152,31 @@ restart:
         gst_buffer_unref(item.anc_buffer2);
       }
 
-      GST_TRACE_OBJECT(
-          self,
-          "Transferred frame. "
-          "frame time %" GST_TIME_FORMAT
-          " "
-          "current frame %u "
-          "current frame time %" GST_TIME_FORMAT
-          " "
-          "frames processed %u "
-          "frames dropped %u "
-          "buffer level %u",
-          GST_TIME_ARGS(transfer.acTransferStatus.acFrameStamp.acFrameTime *
-                        100),
-          transfer.acTransferStatus.acFrameStamp.acCurrentFrame,
-          GST_TIME_ARGS(
-              transfer.acTransferStatus.acFrameStamp.acCurrentFrameTime * 100),
-          transfer.acTransferStatus.acFramesProcessed,
-          transfer.acTransferStatus.acFramesDropped,
-          transfer.acTransferStatus.acBufferLevel);
+      const AUTOCIRCULATE_TRANSFER_STATUS &transfer_status =
+          transfer.GetTransferStatus();
+      const FRAME_STAMP &frame_stamp = transfer_status.GetFrameStamp();
+
+      GST_TRACE_OBJECT(self,
+                       "State %d "
+                       "transfer frame %d "
+                       "current frame %u "
+                       "frame time %" GST_TIME_FORMAT
+                       " "
+                       "current frame time %" GST_TIME_FORMAT
+                       " "
+                       "current time %" GST_TIME_FORMAT
+                       " "
+                       "frames processed %u "
+                       "frames dropped %u "
+                       "buffer level %u",
+                       transfer_status.acState, transfer_status.acTransferFrame,
+                       frame_stamp.acCurrentFrame,
+                       GST_TIME_ARGS(frame_stamp.acFrameTime * 100),
+                       GST_TIME_ARGS(frame_stamp.acCurrentFrameTime * 100),
+                       GST_TIME_ARGS(frame_stamp.acCurrentTime * 100),
+                       transfer_status.acFramesProcessed,
+                       transfer_status.acFramesDropped,
+                       transfer_status.acBufferLevel);
 
       // Trivial drift calculation
       //
@@ -2176,18 +2185,16 @@ restart:
       // FIXME: Add some compensation by dropping/duplicating frames as needed
       // but make this configurable
       if (frames_rendered_start_time == GST_CLOCK_TIME_NONE &&
-          transfer.acTransferStatus.acFrameStamp.acCurrentFrameTime != 0 &&
-          transfer.acTransferStatus.acFramesProcessed +
-                  transfer.acTransferStatus.acFramesDropped >
+          frame_stamp.acCurrentFrameTime != 0 &&
+          transfer_status.acFramesProcessed + transfer_status.acFramesDropped >
               self->queue_size &&
           clock) {
-        frames_rendered_start = transfer.acTransferStatus.acFramesProcessed +
-                                transfer.acTransferStatus.acFramesDropped;
+        frames_rendered_start =
+            transfer_status.acFramesProcessed + transfer_status.acFramesDropped;
 
         GstClockTime now_gst = gst_clock_get_time(clock);
         GstClockTime now_sys = g_get_real_time() * 1000;
-        GstClockTime render_time =
-            transfer.acTransferStatus.acFrameStamp.acCurrentFrameTime * 100;
+        GstClockTime render_time = frame_stamp.acCurrentFrameTime * 100;
 
         if (render_time < now_sys) {
           frames_rendered_start_time = now_gst - (now_sys - render_time);
@@ -2197,8 +2204,7 @@ restart:
       if (clock && frames_rendered_start_time != GST_CLOCK_TIME_NONE) {
         GstClockTime now_gst = gst_clock_get_time(clock);
         GstClockTime now_sys = g_get_real_time() * 1000;
-        GstClockTime render_time =
-            transfer.acTransferStatus.acFrameStamp.acCurrentFrameTime * 100;
+        GstClockTime render_time = frame_stamp.acCurrentFrameTime * 100;
 
         GstClockTime sys_diff;
         if (now_sys > render_time) {
@@ -2210,8 +2216,8 @@ restart:
         GstClockTime diff = now_gst - frames_rendered_start_time;
         if (sys_diff < diff) diff -= sys_diff;
 
-        guint64 frames_rendered = (transfer.acTransferStatus.acFramesProcessed +
-                                   transfer.acTransferStatus.acFramesDropped) -
+        guint64 frames_rendered = (transfer_status.acFramesProcessed +
+                                   transfer_status.acFramesDropped) -
                                   frames_rendered_start;
         guint64 frames_produced =
             gst_util_uint64_scale(diff, self->configured_info.fps_n,

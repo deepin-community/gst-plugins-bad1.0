@@ -30,6 +30,7 @@
 #endif
 
 #include <gst/cuda/gstcuda.h>
+#ifdef HAVE_NVCODEC_DGPU
 #include "gstnvdec.h"
 #include "gstnvenc.h"
 #include "gstnvav1dec.h"
@@ -38,21 +39,25 @@
 #include "gstnvvp8dec.h"
 #include "gstnvvp9dec.h"
 #include "gstnvdecoder.h"
+#endif
 #include "gstcudamemorycopy.h"
 #include "gstcudaconvertscale.h"
-#ifdef HAVE_NVCODEC_NVMM
-#include "gstcudanvmm.h"
-#endif
+#include <gst/cuda/gstcudanvmm-private.h>
 
 #ifdef G_OS_WIN32
 #include <gst/d3d11/gstd3d11.h>
 #endif
+#ifdef HAVE_NVCODEC_DGPU
 #include "gstnvh264encoder.h"
 #include "gstnvh265encoder.h"
+#include "gstnvav1encoder.h"
+#include "gstnvjpegenc.h"
+#endif
+
 #include "gstcudaipcsink.h"
 #include "gstcudaipcsrc.h"
 #include "gstnvcodecutils.h"
-#include "gstnvjpegenc.h"
+#include "gstcudacompositor.h"
 
 #include <glib/gi18n-lib.h>
 
@@ -60,10 +65,6 @@ GST_DEBUG_CATEGORY (gst_nvcodec_debug);
 GST_DEBUG_CATEGORY (gst_nvdec_debug);
 GST_DEBUG_CATEGORY (gst_nvenc_debug);
 GST_DEBUG_CATEGORY (gst_nv_decoder_debug);
-
-#ifdef HAVE_NVCODEC_NVMM
-GST_DEBUG_CATEGORY (gst_cuda_nvmm_debug);
-#endif
 
 #define GST_CAT_DEFAULT gst_nvcodec_debug
 
@@ -119,6 +120,7 @@ plugin_init (GstPlugin * plugin)
   const char *err_name = NULL, *err_desc = NULL;
   gint dev_count = 0;
   guint i;
+#ifdef HAVE_NVCODEC_DGPU
   gboolean nvdec_available = TRUE;
   gboolean nvenc_available = TRUE;
   /* hardcoded minimum supported version */
@@ -126,6 +128,8 @@ plugin_init (GstPlugin * plugin)
   guint api_minor_ver = 1;
   GList *h264_enc_cdata = NULL;
   GList *h265_enc_cdata = NULL;
+  GList *av1_enc_cdata = NULL;
+#endif
   gboolean have_nvrtc = FALSE;
 
   GST_DEBUG_CATEGORY_INIT (gst_nvcodec_debug, "nvcodec", 0, "nvcodec");
@@ -133,16 +137,13 @@ plugin_init (GstPlugin * plugin)
   GST_DEBUG_CATEGORY_INIT (gst_nvenc_debug, "nvenc", 0, "nvenc");
   GST_DEBUG_CATEGORY_INIT (gst_nv_decoder_debug, "nvdecoder", 0, "nvdecoder");
 
-#ifdef HAVE_NVCODEC_NVMM
-  GST_DEBUG_CATEGORY_INIT (gst_cuda_nvmm_debug, "cudanvmm", 0, "cudanvmm");
-#endif
-
   if (!gst_cuda_load_library ()) {
     gst_plugin_add_status_warning (plugin,
         "CUDA library \"" CUDA_LIBNAME "\" was not found.");
     return TRUE;
   }
 
+#ifdef HAVE_NVCODEC_DGPU
   /* get available API version from nvenc and it will be passed to
    * nvdec */
   if (!gst_nvenc_load_library (&api_major_ver, &api_minor_ver)) {
@@ -161,6 +162,7 @@ plugin_init (GstPlugin * plugin)
 
   if (!nvdec_available && !nvenc_available)
     return TRUE;
+#endif
 
   cuda_ret = CuInit (0);
   if (cuda_ret != CUDA_SUCCESS) {
@@ -191,7 +193,15 @@ plugin_init (GstPlugin * plugin)
     return TRUE;
   }
 
+#ifdef NVCODEC_CUDA_PRECOMPILED
+  /* If cuda kernels are precompiled, just try library load library.
+   * Even if we have compiled kernel bytecode, we may need to use
+   * this runtime compiler as a fallback */
+  gst_cuda_nvrtc_load_library ();
+  have_nvrtc = TRUE;
+#else
   have_nvrtc = check_runtime_compiler ();
+#endif
   if (!have_nvrtc) {
     gst_plugin_add_status_info (plugin,
         "CUDA runtime compilation library \"" NVRTC_LIBNAME "\" was not found, "
@@ -200,8 +210,9 @@ plugin_init (GstPlugin * plugin)
 
   for (i = 0; i < dev_count; i++) {
     GstCudaContext *context = gst_cuda_context_new (i);
-    CUcontext cuda_ctx;
+#if defined(G_OS_WIN32) || defined(HAVE_NVCODEC_DGPU)
     gint64 adapter_luid = 0;
+#endif
 
     if (!context) {
       GST_WARNING ("Failed to create context for device %d", i);
@@ -211,7 +222,7 @@ plugin_init (GstPlugin * plugin)
     g_object_get (context, "dxgi-adapter-luid", &adapter_luid, NULL);
 #endif
 
-    cuda_ctx = gst_cuda_context_get_handle (context);
+#ifdef HAVE_NVCODEC_DGPU
     if (nvdec_available) {
       gint j;
 
@@ -221,7 +232,7 @@ plugin_init (GstPlugin * plugin)
         cudaVideoCodec codec = (cudaVideoCodec) j;
         gboolean register_cuviddec = FALSE;
 
-        if (gst_nv_decoder_check_device_caps (cuda_ctx,
+        if (gst_nv_decoder_check_device_caps (context,
                 codec, &sink_template, &src_template)) {
           const gchar *codec_name = gst_cuda_video_codec_to_string (codec);
 
@@ -291,36 +302,53 @@ plugin_init (GstPlugin * plugin)
           if (cdata)
             h265_enc_cdata = g_list_append (h265_enc_cdata, cdata);
 
+          cdata = gst_nv_av1_encoder_register_d3d11 (plugin,
+              d3d11_device, GST_RANK_NONE);
+          if (cdata)
+            av1_enc_cdata = g_list_append (av1_enc_cdata, cdata);
+
           gst_object_unref (d3d11_device);
         }
       }
 #endif
-      cdata =
-          gst_nv_h264_encoder_register_cuda (plugin, context, GST_RANK_NONE);
+      cdata = gst_nv_h264_encoder_register_cuda (plugin,
+          context, GST_RANK_PRIMARY + 1);
       if (cdata)
         h264_enc_cdata = g_list_append (h264_enc_cdata, cdata);
 
-      cdata =
-          gst_nv_h265_encoder_register_cuda (plugin, context, GST_RANK_NONE);
+      cdata = gst_nv_h265_encoder_register_cuda (plugin,
+          context, GST_RANK_PRIMARY + 1);
       if (cdata)
         h265_enc_cdata = g_list_append (h265_enc_cdata, cdata);
 
-      gst_nvenc_plugin_init (plugin, i, cuda_ctx);
+      cdata = gst_nv_av1_encoder_register_cuda (plugin,
+          context, GST_RANK_PRIMARY + 1);
+      if (cdata)
+        av1_enc_cdata = g_list_append (av1_enc_cdata, cdata);
     }
 
     gst_nv_jpeg_enc_register (plugin, context, GST_RANK_NONE, have_nvrtc);
 
+#endif
     gst_object_unref (context);
   }
 
+#ifdef HAVE_NVCODEC_DGPU
   if (h264_enc_cdata) {
     gst_nv_h264_encoder_register_auto_select (plugin, h264_enc_cdata,
         GST_RANK_NONE);
   }
+
   if (h265_enc_cdata) {
     gst_nv_h265_encoder_register_auto_select (plugin, h265_enc_cdata,
         GST_RANK_NONE);
   }
+
+  if (av1_enc_cdata) {
+    gst_nv_av1_encoder_register_auto_select (plugin, av1_enc_cdata,
+        GST_RANK_NONE);
+  }
+#endif
 
   gst_cuda_memory_copy_register (plugin, GST_RANK_NONE);
 
@@ -331,6 +359,8 @@ plugin_init (GstPlugin * plugin)
         GST_TYPE_CUDA_SCALE);
     gst_element_register (plugin, "cudaconvertscale", GST_RANK_NONE,
         GST_TYPE_CUDA_CONVERT_SCALE);
+    gst_element_register (plugin, "cudacompositor", GST_RANK_NONE,
+        GST_TYPE_CUDA_COMPOSITOR);
   }
   gst_element_register (plugin,
       "cudaipcsink", GST_RANK_NONE, GST_TYPE_CUDA_IPC_SINK);
@@ -338,12 +368,8 @@ plugin_init (GstPlugin * plugin)
       "cudaipcsrc", GST_RANK_NONE, GST_TYPE_CUDA_IPC_SRC);
 
   gst_cuda_memory_init_once ();
-
-#ifdef HAVE_NVCODEC_NVMM
-  if (gst_cuda_nvmm_init_once ()) {
+  if (gst_cuda_nvmm_init_once ())
     GST_INFO ("Enable NVMM support");
-  }
-#endif
 
   g_object_set_data_full (G_OBJECT (plugin),
       "plugin-nvcodec-shutdown", (gpointer) "shutdown-data",

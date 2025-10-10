@@ -46,6 +46,7 @@ struct _GstSRTSink {
   GstBaseSink parent;
 
   GstBufferList *headers;
+  gboolean headers_sent;
 
   GstSRTObject *srtobject;
 };

@@ -121,6 +121,17 @@ cleanup_and_fail:
 }
 
 static void
+gst_a2dp_sink_finalize (GObject * object)
+{
+  GstA2dpSink *self = GST_A2DP_SINK (object);
+
+  g_free (self->device);
+  g_free (self->transport);
+
+  G_OBJECT_CLASS (parent_class)->finalize (object);
+}
+
+static void
 gst_a2dp_sink_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
 {
@@ -281,6 +292,7 @@ gst_a2dp_sink_class_init (GstA2dpSinkClass * klass)
 
   parent_class = g_type_class_peek_parent (klass);
 
+  object_class->finalize = GST_DEBUG_FUNCPTR (gst_a2dp_sink_finalize);
   object_class->set_property = GST_DEBUG_FUNCPTR (gst_a2dp_sink_set_property);
   object_class->get_property = GST_DEBUG_FUNCPTR (gst_a2dp_sink_get_property);
 
@@ -288,16 +300,18 @@ gst_a2dp_sink_class_init (GstA2dpSinkClass * klass)
 
   g_object_class_install_property (object_class, PROP_DEVICE,
       g_param_spec_string ("device", "Device",
-          "Bluetooth remote device address", NULL, G_PARAM_READWRITE));
+          "Bluetooth remote device address", NULL,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (object_class, PROP_AUTOCONNECT,
       g_param_spec_boolean ("auto-connect", "Auto-connect",
           "Automatically attempt to connect to device",
-          DEFAULT_AUTOCONNECT, G_PARAM_READWRITE));
+          DEFAULT_AUTOCONNECT, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   g_object_class_install_property (object_class, PROP_TRANSPORT,
       g_param_spec_string ("transport", "Transport",
-          "Use configured transport", NULL, G_PARAM_READWRITE));
+          "Use configured transport", NULL,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_static_metadata (element_class, "Bluetooth A2DP sink",
       "Sink/Audio", "Plays audio to an A2DP device",

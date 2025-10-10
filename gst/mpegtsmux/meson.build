@@ -5,11 +5,36 @@ tsmux_sources = [
   'gstbasetsmuxopus.c',
   'gstbasetsmuxttxt.c',
   'gstbasetsmuxjpeg2000.c',
+  'gstbasetsmuxjpegxs.c',
   'gstmpegtsmux.c',
   'gstatscmux.c',
   'tsmux/tsmux.c',
   'tsmux/tsmuxstream.c'
 ]
+
+tsmux_headers = [
+  'gstbasetsmuxopus.h',
+  'gstatscmux.h',
+  'gstbasetsmuxjpeg2000.h',
+  'gstbasetsmuxjpegxs.h',
+  'gstmpegtsmux.h',
+  'gstbasetsmux.h',
+  'gstbasetsmuxaac.h',
+  'gstbasetsmuxttxt.h',
+]
+
+doc_sources = []
+foreach s: tsmux_sources + tsmux_headers
+  doc_sources += meson.current_source_dir() / s
+endforeach
+
+plugin_sources += {
+  'mpegtsmux': pathsep.join(doc_sources)
+}
+
+if get_option('mpegtsmux').disabled()
+  subdir_done()
+endif
 
 gstmpegtsmux = library('gstmpegtsmux',
   tsmux_sources,

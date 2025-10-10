@@ -18,6 +18,17 @@
  * Boston, MA 02110-1301, USA.
  */
 
+/**
+ * SECTION:gstv4l2codecalphadecodebin
+ * @title: GstV4l2CodecAlphaDecodeBin
+ * @short_description: V4L2 base class to implement VP8/VP9 alpha decoding.
+ *
+ * V4L2 base class to implement VP8/VP9 alpha decoding.
+ *
+ * Since: 1.20
+ */
+
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -26,6 +37,14 @@
 
 #include "gstv4l2codecalphadecodebin.h"
 #include "gstv4l2decoder.h"
+
+/* When wrapping, use the original rank plus this offset. The ad-hoc rules is
+ * that hardware implementation will use PRIMARY+1 or +2 to override the
+ * software decoder, so the offset must be large enough to jump over those.
+ * This should also be small enough so that a marginal (64) or secondary
+ * wrapper does not cross the PRIMARY line.
+ */
+#define GST_V4L2_CODEC_ALPHA_DECODE_BIN_RANK_OFFSET 10
 
 GST_DEBUG_CATEGORY_STATIC (v4l2_codecalphadecodebin_debug);
 #define GST_CAT_DEFAULT (v4l2_codecalphadecodebin_debug)
@@ -100,8 +119,7 @@ gst_v4l2_codec_alpha_decode_bin_constructed (GObject * obj)
   GstPad *src_gpad, *sink_gpad;
   GstPad *src_pad = NULL, *sink_pad = NULL;
   GstElement *alphademux = NULL;
-  GstElement *queue = NULL;
-  GstElement *alpha_queue = NULL;
+  GstElement *mq = NULL;
   GstElement *decoder = NULL;
   GstElement *alpha_decoder = NULL;
   GstElement *alphacombine = NULL;
@@ -122,10 +140,9 @@ gst_v4l2_codec_alpha_decode_bin_constructed (GObject * obj)
     goto cleanup;
   }
 
-  queue = gst_element_factory_make ("queue", NULL);
-  alpha_queue = gst_element_factory_make ("queue", NULL);
-  if (!queue || !alpha_queue) {
-    priv->missing_element = "queue";
+  mq = gst_element_factory_make ("multiqueue", NULL);
+  if (!mq) {
+    priv->missing_element = "multiqueue";
     goto cleanup;
   }
 
@@ -152,7 +169,7 @@ gst_v4l2_codec_alpha_decode_bin_constructed (GObject * obj)
     goto cleanup;
   }
 
-  gst_bin_add_many (GST_BIN (self), alphademux, queue, alpha_queue, decoder,
+  gst_bin_add_many (GST_BIN (self), alphademux, mq, decoder,
       alpha_decoder, alphacombine, NULL);
 
   /* link elements */
@@ -160,21 +177,19 @@ gst_v4l2_codec_alpha_decode_bin_constructed (GObject * obj)
   gst_ghost_pad_set_target (GST_GHOST_PAD (sink_gpad), sink_pad);
   gst_clear_object (&sink_pad);
 
-  gst_element_link_pads (alphademux, "src", queue, "sink");
-  gst_element_link_pads (queue, "src", decoder, "sink");
+  gst_element_link_pads (alphademux, "src", mq, "sink_0");
+  gst_element_link_pads (mq, "src_0", decoder, "sink");
   gst_element_link_pads (decoder, "src", alphacombine, "sink");
 
-  gst_element_link_pads (alphademux, "alpha", alpha_queue, "sink");
-  gst_element_link_pads (alpha_queue, "src", alpha_decoder, "sink");
+  gst_element_link_pads (alphademux, "alpha", mq, "sink_1");
+  gst_element_link_pads (mq, "src_1", alpha_decoder, "sink");
   gst_element_link_pads (alpha_decoder, "src", alphacombine, "alpha");
 
   src_pad = gst_element_get_static_pad (alphacombine, "src");
   gst_ghost_pad_set_target (GST_GHOST_PAD (src_gpad), src_pad);
   gst_object_unref (src_pad);
 
-  g_object_set (queue, "max-size-bytes", 0, "max-size-time",
-      G_GUINT64_CONSTANT (0), "max-size-buffers", 1, NULL);
-  g_object_set (alpha_queue, "max-size-bytes", 0, "max-size-time",
+  g_object_set (mq, "max-size-bytes", 0, "max-size-time",
       G_GUINT64_CONSTANT (0), "max-size-buffers", 1, NULL);
 
   /* signal success, we will handle this in NULL->READY transition */
@@ -183,8 +198,7 @@ gst_v4l2_codec_alpha_decode_bin_constructed (GObject * obj)
 
 cleanup:
   gst_clear_object (&alphademux);
-  gst_clear_object (&queue);
-  gst_clear_object (&alpha_queue);
+  gst_clear_object (&mq);
   gst_clear_object (&decoder);
   gst_clear_object (&alpha_decoder);
   gst_clear_object (&alphacombine);
@@ -224,8 +238,15 @@ gst_v4l2_codec_alpha_decode_bin_register (GstPlugin * plugin,
 {
   /* TODO check that we have compatible src format */
 
-  gst_v4l2_decoder_register (plugin,
-      GST_TYPE_V4L2_CODEC_ALPHA_DECODE_BIN, class_init, class_data, NULL,
-      element_name_tmpl, device,
+  GTypeInfo type_info = {
+    .class_size = sizeof (GstV4l2CodecAlphaDecodeBinClass),
+    .class_init = class_init,
+    .class_data = class_data,
+    .instance_size = sizeof (GstV4l2CodecAlphaDecodeBin),
+    .instance_init = NULL,
+  };
+
+  gst_v4l2_decoder_register (plugin, GST_TYPE_V4L2_CODEC_ALPHA_DECODE_BIN,
+      &type_info, element_name_tmpl, device,
       rank + GST_V4L2_CODEC_ALPHA_DECODE_BIN_RANK_OFFSET, NULL);
 }

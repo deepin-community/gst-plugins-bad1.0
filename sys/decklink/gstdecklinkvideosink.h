@@ -63,10 +63,6 @@ struct _GstDecklinkVideoSink
   GstClockTime internal_base_time;
   GstClockTime external_base_time;
 
-  /* really an internal start time */
-  GstClockTime internal_time_offset;
-  GstClockTime internal_pause_time;
-
   GstDecklinkOutput *output;
 
   GstVideoVBIEncoder *vbiencoder;
@@ -77,6 +73,14 @@ struct _GstDecklinkVideoSink
 
   gint afd_bar_line;
   GstDecklinkMappingFormat mapping_format;
+
+  gboolean initial_sync;
+  GQueue *pending_frames;
+
+  gboolean have_light_level;
+  GstVideoContentLightLevel light_level;
+  gboolean have_mastering_info;
+  GstVideoMasteringDisplayInfo mastering_info;
 };
 
 struct _GstDecklinkVideoSinkClass

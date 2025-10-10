@@ -274,17 +274,10 @@ gst_vulkan_video_filter_start (GstBaseTransform * bt)
         ("Failed to retrieve vulkan instance"), (NULL));
     return FALSE;
   }
-  if (!gst_vulkan_device_run_context_query (GST_ELEMENT (render),
-          &render->device)) {
-    GError *error = NULL;
-    GST_DEBUG_OBJECT (render, "No device retrieved from peer elements");
-    if (!(render->device =
-            gst_vulkan_instance_create_device (render->instance, &error))) {
-      GST_ELEMENT_ERROR (render, RESOURCE, NOT_FOUND,
-          ("Failed to create vulkan device"), ("%s", error->message));
-      g_clear_error (&error);
-      return FALSE;
-    }
+
+  if (!gst_vulkan_ensure_element_device (GST_ELEMENT (bt), render->instance,
+          &render->device, 0)) {
+    return FALSE;
   }
 
   if (!gst_vulkan_queue_run_context_query (GST_ELEMENT (render),
@@ -309,4 +302,64 @@ gst_vulkan_video_filter_stop (GstBaseTransform * bt)
   gst_clear_object (&render->instance);
 
   return TRUE;
+}
+
+/**
+ * gst_vulkan_video_filter_get_instance:
+ * @filter: a #GstVulkanVideoFilter
+ *
+ * Returns: (transfer full) (nullable): The currently configured
+ *     #GstVulkanInstance
+ *
+ * Since: 1.26
+ */
+GstVulkanInstance *
+gst_vulkan_video_filter_get_instance (GstVulkanVideoFilter * filter)
+{
+  g_return_val_if_fail (GST_IS_VULKAN_VIDEO_FILTER (filter), NULL);
+
+  if (filter->instance)
+    return gst_object_ref (filter->instance);
+  else
+    return NULL;
+}
+
+/**
+ * gst_vulkan_video_filter_get_device:
+ * @filter: a #GstVulkanVideoFilter
+ *
+ * Returns: (transfer full) (nullable): The currently configured
+ *     #GstVulkanDevice
+ *
+ * Since: 1.26
+ */
+GstVulkanDevice *
+gst_vulkan_video_filter_get_device (GstVulkanVideoFilter * filter)
+{
+  g_return_val_if_fail (GST_IS_VULKAN_VIDEO_FILTER (filter), NULL);
+
+  if (filter->device)
+    return gst_object_ref (filter->device);
+  else
+    return NULL;
+}
+
+/**
+ * gst_vulkan_video_filter_get_queue:
+ * @filter: a #GstVulkanVideoFilter
+ *
+ * Returns: (transfer full) (nullable): The currently configured
+ *     #GstVulkanQueue
+ *
+ * Since: 1.26
+ */
+GstVulkanQueue *
+gst_vulkan_video_filter_get_queue (GstVulkanVideoFilter * filter)
+{
+  g_return_val_if_fail (GST_IS_VULKAN_VIDEO_FILTER (filter), NULL);
+
+  if (filter->queue)
+    return gst_object_ref (filter->queue);
+  else
+    return NULL;
 }

@@ -25,12 +25,67 @@
 
 #include <gst/video/video.h>
 #include <gst/vulkan/vulkan.h>
+#include "gst/vulkan/gstvkdecoder-private.h"
 
 #include "gstvulkanelements.h"
 
-typedef struct _GstVulkanH265Decoder GstVulkanH265Decoder;
-typedef struct _GstVulkanH265Picture GstVulkanH265Picture;
+GST_DEBUG_CATEGORY_STATIC (gst_vulkan_h265_decoder_debug);
+#define GST_CAT_DEFAULT gst_vulkan_h265_decoder_debug
 
+#define GST_VULKAN_H265_DECODER(obj)            ((GstVulkanH265Decoder *) obj)
+#define GST_VULKAN_H265_DECODER_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS ((obj), G_TYPE_FROM_INSTANCE (obj), GstVulkanH265DecoderClass))
+#define GST_VULKAN_H265_DECODER_CLASS(klass)    ((GstVulkanH265DecoderClass *) klass)
+
+static GstElementClass *parent_class = NULL;
+
+struct CData
+{
+  gchar *description;
+  gint device_index;
+};
+
+typedef struct _GstVulkanH265Decoder GstVulkanH265Decoder;
+typedef struct _GstVulkanH265DecoderClass GstVulkanH265DecoderClass;
+typedef struct _GstVulkanH265Picture GstVulkanH265Picture;
+typedef struct _VPS VPS;
+typedef struct _SPS SPS;
+typedef struct _PPS PPS;
+
+struct _SPS
+{
+  StdVideoH265SequenceParameterSet sps;
+  StdVideoH265ScalingLists scaling;
+  StdVideoH265HrdParameters vui_header;
+  StdVideoH265SequenceParameterSetVui vui;
+  StdVideoH265ProfileTierLevel ptl;
+  StdVideoH265DecPicBufMgr dpbm;
+  StdVideoH265PredictorPaletteEntries pal;
+  StdVideoH265SubLayerHrdParameters nal_hrd[GST_H265_MAX_SUB_LAYERS];
+  StdVideoH265SubLayerHrdParameters vcl_hrd[GST_H265_MAX_SUB_LAYERS];
+  /* 7.4.3.2.1: num_short_term_ref_pic_sets is in [0, 64]. */
+  StdVideoH265ShortTermRefPicSet str[64];
+  StdVideoH265LongTermRefPicsSps ltr;
+};
+
+struct _PPS
+{
+  StdVideoH265PictureParameterSet pps;
+  StdVideoH265ScalingLists scaling;
+  StdVideoH265PredictorPaletteEntries pal;
+};
+
+struct _VPS
+{
+  StdVideoH265VideoParameterSet vps;
+  StdVideoH265ProfileTierLevel ptl;
+  StdVideoH265DecPicBufMgr dpbm;
+  /* FIXME: a VPS can have multiple header params, each with its own nal and vlc
+     headers sets. Sadly, that's not currently supported by the GStreamer H265
+     parser, which only supports one header params per VPS. */
+  StdVideoH265HrdParameters hrd;
+  StdVideoH265SubLayerHrdParameters nal_hdr[GST_H265_MAX_SUB_LAYERS];
+  StdVideoH265SubLayerHrdParameters vcl_hdr[GST_H265_MAX_SUB_LAYERS];
+};
 struct _GstVulkanH265Picture
 {
   GstVulkanDecoderPicture base;
@@ -72,6 +127,19 @@ struct _GstVulkanH265Decoder
   VkChromaLocation xloc, yloc;
 
   GstVideoCodecState *output_state;
+  GstVideoCodecState *input_state;
+
+  VPS std_vps;
+  SPS std_sps;
+  PPS std_pps;
+};
+
+
+struct _GstVulkanH265DecoderClass
+{
+  GstH265DecoderClass parent;
+
+  gint device_index;
 };
 
 static GstStaticPadTemplate gst_vulkan_h265dec_sink_template =
@@ -86,16 +154,16 @@ GST_STATIC_PAD_TEMPLATE ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
     GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE_WITH_FEATURES
         (GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE, "NV12")));
 
-GST_DEBUG_CATEGORY (gst_debug_vulkan_h265_decoder);
-#define GST_CAT_DEFAULT gst_debug_vulkan_h265_decoder
-
 #define gst_vulkan_h265_decoder_parent_class parent_class
-G_DEFINE_TYPE_WITH_CODE (GstVulkanH265Decoder, gst_vulkan_h265_decoder,
-    GST_TYPE_H265_DECODER,
-    GST_DEBUG_CATEGORY_INIT (gst_debug_vulkan_h265_decoder,
-        "vulkanh265dec", 0, "Vulkan H.265 Decoder"));
-GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (vulkanh265dec, "vulkanh265dec",
-    GST_RANK_NONE, GST_TYPE_VULKAN_H265_DECODER, vulkan_element_init (plugin));
+
+static gpointer
+_register_debug_category (gpointer data)
+{
+  GST_DEBUG_CATEGORY_INIT (gst_vulkan_h265_decoder_debug, "vulkanh265dec", 0,
+      "Vulkan H.265 decoder");
+
+  return NULL;
+}
 
 static void
 gst_vulkan_h265_decoder_set_context (GstElement * element, GstContext * context)
@@ -184,6 +252,7 @@ static gboolean
 gst_vulkan_h265_decoder_open (GstVideoDecoder * decoder)
 {
   GstVulkanH265Decoder *self = GST_VULKAN_H265_DECODER (decoder);
+  GstVulkanH265DecoderClass *klass = GST_VULKAN_H265_DECODER_GET_CLASS (self);
 
   if (!gst_vulkan_ensure_element_data (GST_ELEMENT (decoder), NULL,
           &self->instance)) {
@@ -192,18 +261,9 @@ gst_vulkan_h265_decoder_open (GstVideoDecoder * decoder)
     return FALSE;
   }
 
-  if (!gst_vulkan_device_run_context_query (GST_ELEMENT (decoder),
-          &self->device)) {
-    GError *error = NULL;
-    GST_DEBUG_OBJECT (self, "No device retrieved from peer elements");
-    self->device = gst_vulkan_instance_create_device (self->instance, &error);
-    if (!self->device) {
-      GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
-          ("Failed to create vulkan device"),
-          ("%s", error ? error->message : ""));
-      g_clear_error (&error);
-      return FALSE;
-    }
+  if (!gst_vulkan_ensure_element_device (GST_ELEMENT (decoder), self->instance,
+          &self->device, klass->device_index)) {
+    return FALSE;
   }
 
   if (!gst_vulkan_queue_run_context_query (GST_ELEMENT (self),
@@ -219,7 +279,7 @@ gst_vulkan_h265_decoder_open (GstVideoDecoder * decoder)
     return FALSE;
   }
 
-  self->decoder = gst_vulkan_queue_create_decoder (self->decode_queue,
+  self->decoder = gst_vulkan_decoder_new_from_queue (self->decode_queue,
       VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR);
   if (!self->decoder) {
     GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
@@ -252,8 +312,8 @@ gst_vulkan_h265_decoder_stop (GstVideoDecoder * decoder)
   if (self->decoder)
     gst_vulkan_decoder_stop (self->decoder);
 
-  if (self->output_state)
-    gst_video_codec_state_unref (self->output_state);
+  g_clear_pointer (&self->output_state, gst_video_codec_state_unref);
+  g_clear_pointer (&self->input_state, gst_video_codec_state_unref);
 
   return GST_VIDEO_DECODER_CLASS (parent_class)->stop (decoder);
 }
@@ -262,13 +322,15 @@ static gboolean
 gst_vulkan_h265_decoder_negotiate (GstVideoDecoder * decoder)
 {
   GstVulkanH265Decoder *self = GST_VULKAN_H265_DECODER (decoder);
-  GstH265Decoder *h265dec = GST_H265_DECODER (decoder);
   VkVideoFormatPropertiesKHR format_prop;
   GstVideoFormat format;
 
   /* Ignore downstream renegotiation request. */
-  if (!self->need_negotiation)
-    return TRUE;
+  if (!self->need_negotiation) {
+    GST_DEBUG_OBJECT (decoder,
+        "Input state hasn't changed, no need to reconfigure downstream caps");
+    goto bail;
+  }
 
   if (!gst_vulkan_decoder_out_format (self->decoder, &format_prop))
     return FALSE;
@@ -281,15 +343,17 @@ gst_vulkan_h265_decoder_negotiate (GstVideoDecoder * decoder)
   format = gst_vulkan_format_to_video_format (format_prop.format);
   self->output_state = gst_video_decoder_set_interlaced_output_state (decoder,
       format, GST_VIDEO_INTERLACE_MODE_PROGRESSIVE, self->width, self->height,
-      h265dec->input_state);
+      self->input_state);
 
   self->output_state->caps = gst_video_info_to_caps (&self->output_state->info);
   gst_caps_set_features_simple (self->output_state->caps,
-      gst_caps_features_new (GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE, NULL));
+      gst_caps_features_new_static_str (GST_CAPS_FEATURE_MEMORY_VULKAN_IMAGE,
+          NULL));
 
   GST_INFO_OBJECT (self, "Negotiated caps %" GST_PTR_FORMAT,
       self->output_state->caps);
 
+bail:
   return GST_VIDEO_DECODER_CLASS (parent_class)->negotiate (decoder);
 }
 
@@ -518,6 +582,9 @@ gst_vulkan_h265_decoder_new_sequence (GstH265Decoder * decoder,
   self->width = width;
   self->height = height;
 
+  g_clear_pointer (&self->input_state, gst_video_codec_state_unref);
+  self->input_state = gst_video_codec_state_ref (decoder->input_state);
+
   /* Ycbcr sampler */
   {
     VkSamplerYcbcrRange range;
@@ -566,20 +633,6 @@ gst_vulkan_h265_decoder_new_sequence (GstH265Decoder * decoder,
   return GST_FLOW_OK;
 }
 
-/* set a common pipeline stage valid for any queue to avoid Vulkan Validation
- * errors */
-static void
-reset_pipeline_stage_mask (GstBuffer * buf)
-{
-  guint i, n = gst_buffer_n_memory (buf);
-
-  for (i = 0; i < n; i++) {
-    GstVulkanImageMemory *vk_mem =
-        (GstVulkanImageMemory *) gst_buffer_peek_memory (buf, i);
-    vk_mem->barrier.parent.pipeline_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-  }
-}
-
 static GstVulkanH265Picture *
 gst_vulkan_h265_picture_new (GstVulkanH265Decoder * self, GstBuffer * out)
 {
@@ -587,7 +640,6 @@ gst_vulkan_h265_picture_new (GstVulkanH265Decoder * self, GstBuffer * out)
 
   pic = g_new0 (GstVulkanH265Picture, 1);
   gst_vulkan_decoder_picture_init (self->decoder, &pic->base, out);
-  reset_pipeline_stage_mask (out);
 
   return pic;
 }
@@ -636,41 +688,7 @@ allocation_failed:
   }
 }
 
-struct SPS
-{
-  StdVideoH265SequenceParameterSet sps;
-  StdVideoH265ScalingLists scaling;
-  StdVideoH265HrdParameters vui_header;
-  StdVideoH265SequenceParameterSetVui vui;
-  StdVideoH265ProfileTierLevel ptl;
-  StdVideoH265DecPicBufMgr dpbm;
-  StdVideoH265PredictorPaletteEntries pal;
-  StdVideoH265SubLayerHrdParameters nal_hrd[GST_H265_MAX_SUB_LAYERS];
-  StdVideoH265SubLayerHrdParameters vcl_hrd[GST_H265_MAX_SUB_LAYERS];
-  /* 7.4.3.2.1: num_short_term_ref_pic_sets is in [0, 64]. */
-  StdVideoH265ShortTermRefPicSet str[64];
-  StdVideoH265LongTermRefPicsSps ltr;
-};
 
-struct PPS
-{
-  StdVideoH265PictureParameterSet pps;
-  StdVideoH265ScalingLists scaling;
-  StdVideoH265PredictorPaletteEntries pal;
-};
-
-struct VPS
-{
-  StdVideoH265VideoParameterSet vps;
-  StdVideoH265ProfileTierLevel ptl;
-  StdVideoH265DecPicBufMgr dpbm;
-  /* FIXME: a VPS can have multiple header params, each with its own nal and vlc
-     headers sets. Sadly, that's not currently supported by the GStreamer H265
-     parser, which only supports one header params per VPS. */
-  StdVideoH265HrdParameters hrd;
-  StdVideoH265SubLayerHrdParameters nal_hdr[GST_H265_MAX_SUB_LAYERS];
-  StdVideoH265SubLayerHrdParameters vcl_hdr[GST_H265_MAX_SUB_LAYERS];
-};
 
 static void
 _copy_scaling_list (const GstH265ScalingList * scaling_list,
@@ -803,7 +821,7 @@ _copy_profile_tier_level (const GstH265ProfileTierLevel * ptl,
 }
 
 static void
-_fill_sps (const GstH265SPS * sps, struct SPS *std_sps)
+_fill_sps (const GstH265SPS * sps, SPS * std_sps)
 {
   int i;
   const GstH265VUIParams *vui_params = &sps->vui_params;
@@ -1077,7 +1095,7 @@ _fill_sps (const GstH265SPS * sps, struct SPS *std_sps)
 }
 
 static void
-_fill_pps (const GstH265PPS * pps, const GstH265SPS * sps, struct PPS *std_pps)
+_fill_pps (const GstH265PPS * pps, PPS * std_pps)
 {
   int i, j;
 
@@ -1135,7 +1153,7 @@ _fill_pps (const GstH265PPS * pps, const GstH265SPS * sps, struct PPS *std_pps)
     },
     .pps_pic_parameter_set_id = pps->id,
     .pps_seq_parameter_set_id = pps->sps_id,
-    .sps_video_parameter_set_id = sps->vps_id,
+    .sps_video_parameter_set_id = pps->sps->vps_id,
     .num_extra_slice_header_bits = pps->num_extra_slice_header_bits,
     .num_ref_idx_l0_default_active_minus1 =
         pps->num_ref_idx_l0_default_active_minus1,
@@ -1199,7 +1217,7 @@ _fill_pps (const GstH265PPS * pps, const GstH265SPS * sps, struct PPS *std_pps)
 }
 
 static void
-_fill_vps (const GstH265VPS * vps, struct VPS * std_vps)
+_fill_vps (const GstH265VPS * vps, VPS * std_vps)
 {
   const GstH265HRDParams *hrd = &vps->hrd_params;
 
@@ -1283,22 +1301,20 @@ _fill_vps (const GstH265VPS * vps, struct VPS * std_vps)
 }
 
 static GstFlowReturn
-_update_parameters (GstVulkanH265Decoder * self, const GstH265PPS * pps)
+_update_parameters (GstVulkanH265Decoder * self, const GstH265VPS * vps,
+    const GstH265SPS * sps, const GstH265PPS * pps)
 {
-  GstH265SPS *sps = pps->sps;
-  GstH265VPS *vps = sps->vps;
-  struct SPS std_sps;
-  struct PPS std_pps;
-  struct VPS std_vps;
+
+  gboolean update = FALSE;
   VkVideoDecodeH265SessionParametersAddInfoKHR params = {
     .sType =
         VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_SESSION_PARAMETERS_ADD_INFO_KHR,
     .stdSPSCount = 1,
-    .pStdSPSs = &std_sps.sps,
+    .pStdSPSs = &self->std_sps.sps,
     .stdPPSCount = 1,
-    .pStdPPSs = &std_pps.pps,
+    .pStdPPSs = &self->std_pps.pps,
     .stdVPSCount = 1,
-    .pStdVPSs = &std_vps.vps,
+    .pStdVPSs = &self->std_vps.vps,
   };
   /* *INDENT-OFF* */
   GstVulkanDecoderParameters dec_params = {
@@ -1313,10 +1329,21 @@ _update_parameters (GstVulkanH265Decoder * self, const GstH265PPS * pps)
   };
   /* *INDENT-ON* */
   GError *error = NULL;
+  if (vps) {
+    _fill_vps (vps, &self->std_vps);
+    update = TRUE;
+  }
+  if (sps) {
+    _fill_sps (sps, &self->std_sps);
+    update = TRUE;
+  }
+  if (pps) {
+    _fill_pps (pps, &self->std_pps);
+    update = TRUE;
+  }
 
-  _fill_sps (sps, &std_sps);
-  _fill_pps (pps, sps, &std_pps);
-  _fill_vps (vps, &std_vps);
+  if (!update)
+    return GST_FLOW_OK;
 
   if (!gst_vulkan_decoder_update_video_session_parameters (self->decoder,
           &dec_params, &error)) {
@@ -1389,7 +1416,7 @@ _fill_ref_slot (GstVulkanH265Decoder * self, GstH265Picture * picture,
     .sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR,
     .codedOffset = { self->x, self->y },
     .codedExtent = { self->coded_width, self->coded_height },
-    .baseArrayLayer = self->decoder->layered_dpb ? pic->slot_idx : 0,
+    .baseArrayLayer = (self->decoder->layered_dpb && self->decoder->dedicated_dpb) ? pic->slot_idx : 0,
     .imageViewBinding = pic->base.img_view_ref->view,
   };
 
@@ -1405,8 +1432,8 @@ _fill_ref_slot (GstVulkanH265Decoder * self, GstH265Picture * picture,
     *ref = &pic->base;
 
 
-  GST_TRACE_OBJECT (self, "0x%lx slotIndex: %d", res->imageViewBinding,
-      slot->slotIndex);
+  GST_TRACE_OBJECT (self, "0x%" G_GUINT64_FORMAT "x slotIndex: %d",
+      res->imageViewBinding, slot->slotIndex);
 }
 
 static GstFlowReturn
@@ -1415,6 +1442,8 @@ gst_vulkan_h265_decoder_start_picture (GstH265Decoder * decoder,
 {
   GstVulkanH265Decoder *self = GST_VULKAN_H265_DECODER (decoder);
   GstH265PPS *pps = slice->header.pps;
+  GstH265SPS *sps = pps->sps;
+  GstH265VPS *vps = sps->vps;
   GstFlowReturn ret;
   GstVulkanH265Picture *pic;
   GArray *refs;
@@ -1422,10 +1451,14 @@ gst_vulkan_h265_decoder_start_picture (GstH265Decoder * decoder,
 
   GST_TRACE_OBJECT (self, "Start picture");
 
+
+  ret =
+      _update_parameters (self, self->need_params_update ? vps : NULL,
+      self->need_params_update ? sps : NULL, pps);
+  if (ret != GST_FLOW_OK)
+    return ret;
+
   if (self->need_params_update) {
-    ret = _update_parameters (self, pps);
-    if (ret != GST_FLOW_OK)
-      return ret;
     self->need_params_update = FALSE;
   }
 
@@ -1439,7 +1472,7 @@ gst_vulkan_h265_decoder_start_picture (GstH265Decoder * decoder,
     .flags = {
       .IrapPicFlag = GST_H265_IS_NAL_TYPE_IRAP (slice->nalu.type),
       .IdrPicFlag = GST_H265_IS_NAL_TYPE_IDR (slice->nalu.type),
-      .IsReference = picture->ref,
+      .IsReference = picture->RapPicFlag ? 1 : slice->nalu.type & 1,
       .short_term_ref_pic_set_sps_flag =
          slice->header.short_term_ref_pic_set_sps_flag,
     },
@@ -1612,13 +1645,18 @@ gst_vulkan_h265_decoder_output_picture (GstH265Decoder * decoder,
 {
   GstVideoDecoder *vdec = GST_VIDEO_DECODER (decoder);
   GstVulkanH265Decoder *self = GST_VULKAN_H265_DECODER (decoder);
+  GstVideoCodecState *discont_state =
+      GST_CODEC_PICTURE (picture)->discont_state;
 
   GST_TRACE_OBJECT (self, "Output picture");
 
   GST_LOG_OBJECT (self,
       "Outputting picture %p (poc %d)", picture, picture->pic_order_cnt);
 
-  if (GST_CODEC_PICTURE (picture)->discont_state) {
+  if (discont_state) {
+    g_clear_pointer (&self->input_state, gst_video_codec_state_unref);
+    self->input_state = gst_video_codec_state_ref (discont_state);
+
     self->need_negotiation = TRUE;
     if (!gst_video_decoder_negotiate (vdec)) {
       gst_h265_picture_unref (picture);
@@ -1629,27 +1667,40 @@ gst_vulkan_h265_decoder_output_picture (GstH265Decoder * decoder,
 
   gst_h265_picture_unref (picture);
 
-  reset_pipeline_stage_mask (frame->output_buffer);
-
   return gst_video_decoder_finish_frame (vdec, frame);
 }
 
 static void
-gst_vulkan_h265_decoder_init (GstVulkanH265Decoder * self)
+gst_vulkan_h265_decoder_init (GTypeInstance * instance, gpointer g_class)
 {
   gst_vulkan_buffer_memory_init_once ();
 }
 
 static void
-gst_vulkan_h265_decoder_class_init (GstVulkanH265DecoderClass * klass)
+gst_vulkan_h265_decoder_class_init (gpointer g_klass, gpointer class_data)
 {
-  GstElementClass *element_class = GST_ELEMENT_CLASS (klass);
-  GstVideoDecoderClass *decoder_class = GST_VIDEO_DECODER_CLASS (klass);
-  GstH265DecoderClass *h265decoder_class = GST_H265_DECODER_CLASS (klass);
+  GstElementClass *element_class = GST_ELEMENT_CLASS (g_klass);
+  GstVideoDecoderClass *decoder_class = GST_VIDEO_DECODER_CLASS (g_klass);
+  GstH265DecoderClass *h265decoder_class = GST_H265_DECODER_CLASS (g_klass);
+  GstVulkanH265DecoderClass *vk_h265_class =
+      GST_VULKAN_H265_DECODER_CLASS (g_klass);
+  struct CData *cdata = class_data;
+  gchar *long_name;
+  const gchar *name;
 
-  gst_element_class_set_metadata (element_class, "Vulkan H.265 decoder",
+  name = "Vulkan H.265 decoder";
+  if (cdata->description)
+    long_name = g_strdup_printf ("%s on %s", name, cdata->description);
+  else
+    long_name = g_strdup (name);
+
+  vk_h265_class->device_index = cdata->device_index;
+
+  gst_element_class_set_metadata (element_class, long_name,
       "Codec/Decoder/Video/Hardware", "A H.265 video decoder based on Vulkan",
       "Víctor Jáquez <vjaquez@igalia.com>");
+
+  parent_class = g_type_class_peek_parent (g_klass);
 
   gst_element_class_add_static_pad_template (element_class,
       &gst_vulkan_h265dec_sink_template);
@@ -1684,4 +1735,48 @@ gst_vulkan_h265_decoder_class_init (GstVulkanH265DecoderClass * klass)
       GST_DEBUG_FUNCPTR (gst_vulkan_h265_decoder_end_picture);
   h265decoder_class->output_picture =
       GST_DEBUG_FUNCPTR (gst_vulkan_h265_decoder_output_picture);
+
+  g_free (long_name);
+  g_free (cdata->description);
+  g_free (cdata);
+}
+
+gboolean
+gst_vulkan_h265_decoder_register (GstPlugin * plugin, GstVulkanDevice * device,
+    guint rank)
+{
+  static GOnce debug_once = G_ONCE_INIT;
+  GType type;
+  GTypeInfo type_info = {
+    .class_size = sizeof (GstVulkanH265DecoderClass),
+    .class_init = gst_vulkan_h265_decoder_class_init,
+    .instance_size = sizeof (GstVulkanH265Decoder),
+    .instance_init = gst_vulkan_h265_decoder_init,
+  };
+  struct CData *cdata;
+  gboolean ret;
+  gchar *type_name, *feature_name;
+
+  cdata = g_new (struct CData, 1);
+  cdata->description = NULL;
+  cdata->device_index = device->physical_device->device_index;
+
+  g_return_val_if_fail (GST_IS_PLUGIN (plugin), FALSE);
+
+  gst_vulkan_create_feature_name (device, "GstVulkanH265Decoder",
+      "GstVulkanH265Device%dDecoder", &type_name, "vulkanh265dec",
+      "vulkanh265device%ddec", &feature_name, &cdata->description, &rank);
+
+  type_info.class_data = cdata;
+
+  g_once (&debug_once, _register_debug_category, NULL);
+  type = g_type_register_static (GST_TYPE_H265_DECODER,
+      type_name, &type_info, 0);
+
+  ret = gst_element_register (plugin, feature_name, rank, type);
+
+  g_free (type_name);
+  g_free (feature_name);
+
+  return ret;
 }

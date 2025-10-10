@@ -369,18 +369,40 @@ va_ensure_image (GstVaDisplay * display, VASurfaceID surface,
 gboolean
 va_check_surface (GstVaDisplay * display, VASurfaceID surface)
 {
+  return va_check_surface_has_status (display, surface, 0);
+}
+
+#ifndef GST_DISABLE_GST_DEBUG
+static const char *surface_status_str_map[] = {
+  [VASurfaceRendering] = "rendering",
+  [VASurfaceDisplaying] = "displaying",
+  [VASurfaceReady] = "ready",
+  [VASurfaceSkipped] = "skipped"
+};
+#endif
+
+gboolean
+va_check_surface_has_status (GstVaDisplay * display, VASurfaceID surface,
+    VASurfaceStatus surface_status)
+{
   VADisplay dpy = gst_va_display_get_va_dpy (display);
   VAStatus status;
   VASurfaceStatus state;
 
   status = vaQuerySurfaceStatus (dpy, surface, &state);
 
-  if (status != VA_STATUS_SUCCESS)
+  if (status != VA_STATUS_SUCCESS) {
     GST_ERROR ("vaQuerySurfaceStatus: %s", vaErrorStr (status));
+    return FALSE;
+  }
 
-  GST_LOG ("surface %#x status %d", surface, state);
+  GST_LOG ("surface %#x status: %s", surface, surface_status_str_map[state]);
 
-  return (status == VA_STATUS_SUCCESS);
+  /* Just query the surface, no flag to compare, we succeed. */
+  if (!surface_status)
+    return TRUE;
+
+  return ((state & surface_status) == surface_status);
 }
 
 gboolean

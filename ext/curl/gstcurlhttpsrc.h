@@ -54,7 +54,6 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <gst/base/gstpushsrc.h>
 
 #include "curltask.h"
@@ -72,6 +71,7 @@ G_BEGIN_DECLS
 #define GST_IS_CURLHTTPSRC_CLASS(klass) \
   (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_CURLHTTPSRC))
 
+#define GSTCURL_FUNCTIONTRACE 0
 #if GSTCURL_FUNCTIONTRACE
 #define GSTCURL_FUNCTION_ENTRY(x) GST_DEBUG_OBJECT(x, "Entering function");
 #define GSTCURL_FUNCTION_EXIT(x) GST_DEBUG_OBJECT(x, "Leaving function");

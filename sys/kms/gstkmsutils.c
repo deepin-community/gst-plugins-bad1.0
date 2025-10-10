@@ -51,6 +51,7 @@ static const struct
   DEF_FMT (P016, P016_LE),
 
   /* 16bits/c YUV 4:2:0 */
+  DEF_FMT (NV15, NV12_10LE40),
   DEF_FMT (P010, P010_10LE),
 
   /* YUV 4:4:4 */
@@ -128,6 +129,7 @@ gst_drm_bpp_from_drm (guint32 drmfmt)
     case DRM_FORMAT_NV24:
       bpp = 8;
       break;
+    case DRM_FORMAT_NV15:
     case DRM_FORMAT_P010:
       bpp = 10;
       break;
@@ -198,7 +200,7 @@ GstCaps *
 gst_kms_sink_caps_template_fill (void)
 {
   gint i;
-  GstCaps *caps;
+  GstCaps *caps, *dma_caps;
   GstStructure *template;
 
   caps = gst_caps_new_empty ();
@@ -210,7 +212,12 @@ gst_kms_sink_caps_template_fill (void)
         "framerate", GST_TYPE_FRACTION_RANGE, 0, 1, G_MAXINT, 1, NULL);
     gst_caps_append_structure (caps, template);
   }
-  return gst_caps_simplify (caps);
+
+  caps = gst_caps_simplify (caps);
+
+  dma_caps = gst_caps_from_string (GST_VIDEO_DMA_DRM_CAPS_MAKE);
+
+  return gst_caps_merge (caps, dma_caps);
 }
 
 static const gint device_par_map[][2] = {

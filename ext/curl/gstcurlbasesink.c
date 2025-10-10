@@ -45,18 +45,17 @@
 #include <string.h>
 #include <stdio.h>
 
-#if HAVE_SYS_SOCKET_H
+#ifdef HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
 #endif
 #include <sys/types.h>
-#if HAVE_NETINET_IN_H
+#ifdef HAVE_NETINET_IN_H
 #include <netinet/in.h>
 #endif
-#include <unistd.h>
-#if HAVE_NETINET_IP_H
+#ifdef HAVE_NETINET_IP_H
 #include <netinet/ip.h>
 #endif
-#if HAVE_NETINET_TCP_H
+#ifdef HAVE_NETINET_TCP_H
 #include <netinet/tcp.h>
 #endif
 #include <sys/stat.h>
@@ -1152,7 +1151,7 @@ gst_curl_base_sink_transfer_socket_cb (void *clientp, curl_socket_t curlfd,
 
   g_assert (sink);
 
-  if (curlfd < 0) {
+  if (curlfd == CURL_SOCKET_BAD) {
     /* signal an unrecoverable error to the library which will close the socket
        and return CURLE_COULDNT_CONNECT
      */

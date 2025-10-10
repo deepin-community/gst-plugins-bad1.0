@@ -32,7 +32,7 @@
 
 #include <va/va.h>
 #include <va/va_drmcommon.h>
-#include <libdrm/drm_fourcc.h>
+#include <drm_fourcc.h>
 #include <unistd.h>
 #include "gstmsdkallocator.h"
 #include "gstmsdkallocator_libva.h"
@@ -324,6 +324,7 @@ gst_msdk_frame_lock (mfxHDL pthis, mfxMemId mid, mfxFrameData * data)
         data->V = data->U + 2;
         break;
       case VA_FOURCC_ARGB:
+      case VA_FOURCC_XRGB:
         data->Pitch = mem_id->image.pitches[0];
         data->B = buf + mem_id->image.offsets[0];
         data->G = data->B + 1;

@@ -39,6 +39,15 @@ va_win32_headers = files(
   'gstvadisplay_win32.h',
 )
 
+doc_sources = []
+foreach s: va_sources + va_sources_priv + va_headers + va_linux_sources + va_linux_headers + va_win32_sources + va_win32_headers
+  doc_sources += s.full_path()
+endforeach
+
+libs_sources += {
+  'va': pathsep.join(doc_sources)
+}
+
 gstva_dep = dependency('', required : false)
 platform_deps = []
 extra_args = ['-DGST_USE_UNSTABLE_API',
@@ -69,31 +78,26 @@ if host_system == 'windows'
   libva_req = ['>= 1.18']
 endif
 
-libva_dep = dependency('libva', version: libva_req, required: va_required,
-    fallback: ['libva', 'libva_dep'])
+libva_dep = dependency('libva', version: libva_req, required: va_required)
 if not libva_dep.found()
   subdir_done()
 endif
 
 if host_system == 'linux'
-  libva_drm_dep = dependency('libva-drm', version: libva_req, required: va_required,
-      fallback: ['libva', 'libva_drm_dep'])
+  libva_drm_dep = dependency('libva-drm', version: libva_req, required: va_required)
   if not libva_drm_dep.found()
     subdir_done()
   endif
   platform_deps += [libva_drm_dep]
 
-  libdrm_dep = dependency('libdrm', version: '>=2.4', required: get_option('drm'))
   if libdrm_dep.found()
     platform_deps += [libdrm_dep]
-    extra_args += ['-DHAVE_LIBDRM']
   endif
 
   va_sources += va_linux_sources
   va_headers += va_linux_headers
 else
-  libva_win32_dep = dependency('libva-win32', version: libva_req, required: va_required,
-      fallback: ['libva', 'libva_win32_dep'])
+  libva_win32_dep = dependency('libva-win32', version: libva_req, required: va_required)
   if not libva_win32_dep.found()
     subdir_done()
   endif
