@@ -5,3 +5,4 @@ fix-ill-format-string.patch
 CVE-2026-2923-1.patch
 CVE-2026-2923-2.patch
 CVE-2026-2923-3.patch
+CVE-2026-3082.patch

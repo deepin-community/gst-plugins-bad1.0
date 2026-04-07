@@ -1,3 +1,9 @@
+gst-plugins-bad1.0 (1.24.6-1deepin5) unstable; urgency=medium
+
+  * fix CVE-2026-3082
+
+ -- lichenggang <lichenggang@uniontech.com>  Tue, 07 Apr 2026 10:26:24 +0800
+
 gst-plugins-bad1.0 (1.24.6-1deepin4) unstable; urgency=medium
 
   * fix CVE-2026-2923 
