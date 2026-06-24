@@ -812,10 +812,14 @@ rfb_decoder_state_framebuffer_update_rectangle (RfbDecoder * decoder)
   GST_DEBUG ("w:%d h:%d", w, h);
   GST_DEBUG ("encoding: %d", encoding);
 
-  if (((w * h) + (x * y)) > (decoder->width * decoder->height)) {
-    GST_ERROR ("Desktop resize is unsupported.");
-    decoder->state = NULL;
-    return TRUE;
+  if (x < 0 || y < 0 || w <= 0 || h <= 0) {
+    GST_ERROR ("Invalid rectangle dimensions.");
+    return FALSE;
+  }
+
+  if (x + w > decoder->width || y + h > decoder->height) {
+    GST_ERROR ("Rectangle exceeds framebuffer bounds.");
+    return FALSE;
   }
 
   switch (encoding) {
