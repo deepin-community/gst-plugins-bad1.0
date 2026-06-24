@@ -400,6 +400,9 @@ gst_jpeg_decoder_handle_frame (GstVideoDecoder * decoder,
       goto unmap_and_error;
 
     offset = seg.offset + seg.size;
+    /* clamp segment size to available data */
+    if (seg.size > (gint) (map.size - seg.offset))
+      seg.size = (gint) (map.size - seg.offset);
     marker = seg.marker;
 
     if (!valid_state (priv->state, GST_JPEG_DECODER_STATE_GOT_SOI)
