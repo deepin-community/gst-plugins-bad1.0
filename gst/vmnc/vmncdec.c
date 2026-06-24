@@ -405,9 +405,22 @@ vmnc_handle_wmvd_rectangle (GstVMncDec * dec, struct RfbRectangle *rect,
   type = RFB_GET_UINT8 (data);
 
   if (type == CURSOR_COLOUR) {
-    datalen += rect->width * rect->height * dec->format.bytes_per_pixel * 2;
+    guint64 cursor_size;
+
+    cursor_size = (guint64) rect->width * rect->height
+        * dec->format.bytes_per_pixel * 2;
+    if (cursor_size > G_MAXINT - datalen) {
+      GST_WARNING_OBJECT (dec, "Cursor data size overflow");
+      return ERROR_INVALID;
+    }
+    datalen += (int) cursor_size;
   } else if (type == CURSOR_ALPHA) {
-    datalen += rect->width * rect->height * 4;
+    guint64 cursor_size = (guint64) rect->width * rect->height * 4;
+    if (cursor_size > G_MAXINT - datalen) {
+      GST_WARNING_OBJECT (dec, "Cursor alpha data size overflow");
+      return ERROR_INVALID;
+    }
+    datalen += (int) cursor_size;
   } else {
     GST_WARNING_OBJECT (dec, "Unknown cursor type: %d", type);
     return ERROR_INVALID;
