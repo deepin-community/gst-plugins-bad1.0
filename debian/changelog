@@ -1,3 +1,11 @@
+gst-plugins-bad1.0 (1.24.6-1deepin6) unstable; urgency=medium
+
+  * fix CVE-2026-52719: vajpegdec: validate JPEG segment length
+  * fix CVE-2026-52720: librfb: validate rectangle bounds individually
+  * fix CVE-2026-52722: vmnc: fix signed integer overflow in cursor payload
+
+ -- deepin-ci-robot <packages@deepin.org>  Wed, 24 Jun 2026 19:30:00 +0800
+
 gst-plugins-bad1.0 (1.24.6-1deepin5) unstable; urgency=medium
 
   * fix CVE-2026-3082
