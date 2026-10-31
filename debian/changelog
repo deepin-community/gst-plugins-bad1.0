@@ -4,6 +4,10 @@ gst-plugins-bad1.0 (1.24.6-1deepin15) unstable; urgency=medium
     slice header data being available   Upstream:
     https://gitlab.freedesktop.org/gstreamer/gstreamer/-
     /commit/8c6d4df57b531c7b41a5f3bce28d2c7bc98a1d3d
+  * fix(cve): CVE-2026-119729 (medium) - av1parse: Avoid signed 32 bit
+    integer overflow when parsing LEB128 values   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /merge_requests/11245
 
  -- deepin-ci-robot <packages@deepin.org>  Sat, 12 Sep 2026 05:43:28 +0800
 
