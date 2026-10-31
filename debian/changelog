@@ -1,3 +1,26 @@
+gst-plugins-bad1.0 (1.24.6-1deepin15) unstable; urgency=medium
+
+  * fix(cve): CVE-2026-12892 (medium) - h264parse: Check for enough
+    slice header data being available   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /commit/8c6d4df57b531c7b41a5f3bce28d2c7bc98a1d3d
+  * fix(cve): CVE-2026-119729 (medium) - av1parse: Avoid signed 32 bit
+    integer overflow when parsing LEB128 values   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /merge_requests/11245
+  * fix(cve): CVE-2026-119728 (medium) - h264parse: Avoid NULL pointer
+    dereferences when freeing partially parsed SPS/MVC data   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /commit/ad02aae2caabda639b80a87d5609d66e9b968df5,https://gitlab.free
+    desktop.org/gstreamer/gstreamer/-
+    /commit/43a89cd28f9b9f30c5e715825e0a06ae4d2d788d
+  * fix(cve): CVE-2026-119727 (unknown) - h265parser: Validate
+    num_decoding_units_minus1 in pic_timing SEI   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /commit/0846ed1364c9b1d83e52ed09cdc3de4cdc7ec50d
+
+ -- deepin-ci-robot <packages@deepin.org>  Sat, 12 Sep 2026 05:43:28 +0800
+
 gst-plugins-bad1.0 (1.24.6-1deepin14) unstable; urgency=medium
 
   * fix(cve): CVE-2026-19387
