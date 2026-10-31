@@ -14,6 +14,10 @@ gst-plugins-bad1.0 (1.24.6-1deepin15) unstable; urgency=medium
     /commit/ad02aae2caabda639b80a87d5609d66e9b968df5,https://gitlab.free
     desktop.org/gstreamer/gstreamer/-
     /commit/43a89cd28f9b9f30c5e715825e0a06ae4d2d788d
+  * fix(cve): CVE-2026-119727 (unknown) - h265parser: Validate
+    num_decoding_units_minus1 in pic_timing SEI   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /commit/0846ed1364c9b1d83e52ed09cdc3de4cdc7ec50d
 
  -- deepin-ci-robot <packages@deepin.org>  Sat, 12 Sep 2026 05:43:28 +0800
 
