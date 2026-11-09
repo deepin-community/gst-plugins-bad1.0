@@ -18,6 +18,12 @@ gst-plugins-bad1.0 (1.24.6-1deepin15) unstable; urgency=medium
     num_decoding_units_minus1 in pic_timing SEI   Upstream:
     https://gitlab.freedesktop.org/gstreamer/gstreamer/-
     /commit/0846ed1364c9b1d83e52ed09cdc3de4cdc7ec50d
+  * fix(cve): CVE-2026-121259 (medium) - jp2kdecimator: Fix some
+    possible integer overflows in size checks   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /commit/f9cc731607ca60ce8a66e0ded3a11d77805d55c6,https://gitlab.free
+    desktop.org/gstreamer/gstreamer/-
+    /commit/e900fe1730353b068b9224dcde331b62ee58d27c
 
  -- deepin-ci-robot <packages@deepin.org>  Sat, 12 Sep 2026 05:43:28 +0800
 
