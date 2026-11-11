@@ -24,6 +24,10 @@ gst-plugins-bad1.0 (1.24.6-1deepin15) unstable; urgency=medium
     /commit/f9cc731607ca60ce8a66e0ded3a11d77805d55c6,https://gitlab.free
     desktop.org/gstreamer/gstreamer/-
     /commit/e900fe1730353b068b9224dcde331b62ee58d27c
+  * fix(cve): CVE-2026-121611 (unknown) - h265parser: Fix use of
+    uninitialized HRD parameters   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /commit/29fba4dc5606554e391a616bbc51943ad4c8e46f
 
  -- deepin-ci-robot <packages@deepin.org>  Sat, 12 Sep 2026 05:43:28 +0800
 
