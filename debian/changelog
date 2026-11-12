@@ -28,6 +28,10 @@ gst-plugins-bad1.0 (1.24.6-1deepin15) unstable; urgency=medium
     uninitialized HRD parameters   Upstream:
     https://gitlab.freedesktop.org/gstreamer/gstreamer/-
     /commit/29fba4dc5606554e391a616bbc51943ad4c8e46f
+  * fix(cve): CVE-2026-125707 (unknown) - mxfdemux: Fix reverse temporal
+    offsets array upper bounds check   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /commit/53677b5c176f653014a6d164bd585d2815839e8d
 
  -- deepin-ci-robot <packages@deepin.org>  Sat, 12 Sep 2026 05:43:28 +0800
 
