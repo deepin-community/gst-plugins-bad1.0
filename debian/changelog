@@ -32,6 +32,14 @@ gst-plugins-bad1.0 (1.24.6-1deepin15) unstable; urgency=medium
     offsets array upper bounds check   Upstream:
     https://gitlab.freedesktop.org/gstreamer/gstreamer/-
     /commit/53677b5c176f653014a6d164bd585d2815839e8d
+  * fix(cve): CVE-2026-125706 (unknown) - mpegdemux: 修复 PES header
+    解析的边界检查缺失（CVE-2026-125706）   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /commit/018c476c9076c76c8d64e862a211cbafb34727fb,https://gitlab.free
+    desktop.org/gstreamer/gstreamer/-
+    /commit/495e9cbed7943587ea31dcb7d30c9475b7e3cfc1,https://gitlab.free
+    desktop.org/gstreamer/gstreamer/-
+    /commit/234ad3c4f2e73048c61849ea553907580fe46bf8
 
  -- deepin-ci-robot <packages@deepin.org>  Sat, 12 Sep 2026 05:43:28 +0800
 
