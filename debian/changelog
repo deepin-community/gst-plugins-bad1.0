@@ -40,6 +40,12 @@ gst-plugins-bad1.0 (1.24.6-1deepin15) unstable; urgency=medium
     /commit/495e9cbed7943587ea31dcb7d30c9475b7e3cfc1,https://gitlab.free
     desktop.org/gstreamer/gstreamer/-
     /commit/234ad3c4f2e73048c61849ea553907580fe46bf8
+  * fix(cve): CVE-2026-125703 (unknown) - mxfmux: Fix size calculations
+    when writing VANC packets   Upstream:
+    https://gitlab.freedesktop.org/gstreamer/gstreamer/-
+    /commit/209fb634cfcd2776073c0ea3264009321d04ab65,https://gitlab.free
+    desktop.org/gstreamer/gstreamer/-
+    /commit/89efe32eac678d3e0bc4b28a9c7acd02728e5337
 
  -- deepin-ci-robot <packages@deepin.org>  Sat, 12 Sep 2026 05:43:28 +0800
 
